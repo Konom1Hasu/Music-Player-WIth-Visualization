@@ -240,7 +240,7 @@ cd Music-Player-WIth-Visualization
 │   ├── build-portable.ps1      # 构建便携版（同步 app/ 并准备 Electron 运行时）
 │   ├── install.ps1             # 安装到本机 + 创建快捷方式 + 生成卸载脚本
 │   ├── use-version.ps1         # 回滚 app/index.html 到某个历史版本
-│   ├── push-to-github.ps1      # 设置 origin 并推送到 GitHub
+│   ├── push-to-github.ps1      # 一条命令完成提交推送 + 推标签（自动适配受限网络）
 │   ├── setup-push-tls.ps1      # 准备推送通道（schannel 不可用时改用 openssl + 本机 CA）
 │   ├── 数据管控验证.js          # 数据管控离线回归验证（16 项断言）
 │   └── 设置持久化验证.js        # 设置持久化离线回归验证（31 项断言）
@@ -255,6 +255,7 @@ cd Music-Player-WIth-Visualization
 │   └── 音乐播放器-win32-x64/
 ├── 构建.bat                    # 双击构建
 ├── 安装.bat                    # 双击安装
+├── 推送.bat                    # 双击推送到 GitHub
 ├── .gitignore
 ├── LICENSE
 └── README.md

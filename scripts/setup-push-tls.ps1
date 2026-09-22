@@ -32,18 +32,36 @@
 .PARAMETER PrintEnv
     只打印需要设置的环境变量，不执行任何 git 命令。
 
+.PARAMETER SetEnv
+    直接把 GIT_CONFIG_* 写进**当前进程环境**（后续 git 子进程自动继承）。
+    $env: 是进程级变量，所以即使在子作用域里调用也能生效。
+
+.PARAMETER EmitPath
+    只把生成的 bundle 路径写到管道（配合 -Quiet 供其它脚本调用）。
+    push-to-github.ps1 的 TLS 兜底就是走这条路。
+
+.PARAMETER Quiet
+    抑制流程输出，只保留结果。
+
 .EXAMPLE
     .\scripts\setup-push-tls.ps1 -Test
 
 .EXAMPLE
-    # 自己手动跑（把 setup 输出的三行先执行一遍）
-    .\scripts\setup-push-tls.ps1 -PrintEnv
+    # 自己手动跑：先把环境变量设进当前会话，再正常用 git
+    .\scripts\setup-push-tls.ps1 -SetEnv
     git push origin main
+
+.EXAMPLE
+    # 别的脚本里取路径
+    $bundle = & .\scripts\setup-push-tls.ps1 -EmitPath -Quiet
 #>
 [CmdletBinding()]
 param(
     [switch]$Test,
-    [switch]$PrintEnv
+    [switch]$PrintEnv,
+    [switch]$EmitPath,
+    [switch]$SetEnv,
+    [switch]$Quiet
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,9 +70,10 @@ $Root    = Split-Path -Parent $PSScriptRoot
 $CaDir   = Join-Path $Root 'dist\git-ca'
 $Bundle  = Join-Path $CaDir 'ca-bundle.pem'
 
-function Write-Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
-function Write-Ok($m)   { Write-Host "    $m" -ForegroundColor Green }
-function Write-Warn2($m){ Write-Host "    $m" -ForegroundColor Yellow }
+# -Quiet 供其它脚本调用时抑制流程输出（Write-Host 不走管道，所以不会污染 -EmitPath 的返回值）
+function Write-Step($m) { if (-not $Quiet) { Write-Host "==> $m" -ForegroundColor Cyan } }
+function Write-Ok($m)   { if (-not $Quiet) { Write-Host "    $m" -ForegroundColor Green } }
+function Write-Warn2($m){ if (-not $Quiet) { Write-Host "    $m" -ForegroundColor Yellow } }
 
 # ---------------------------------------------------------------- 1. 基准 CA
 Write-Step '收集 CA 证书'
@@ -101,16 +120,40 @@ New-Item -ItemType Directory -Force -Path $CaDir | Out-Null
 [System.IO.File]::WriteAllText($Bundle, $out, (New-Object System.Text.UTF8Encoding($false)))
 
 Write-Ok "合并 $($added.Count) 张本机自签根证书："
-$added | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+# 这两处原先是裸 Write-Host，会绕过 -Quiet —— 由 push-to-github.ps1 调用时刷屏。
+if (-not $Quiet) {
+    $added | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+}
 Write-Ok "bundle: $Bundle  ($([math]::Round((Get-Item $Bundle).Length/1KB,1)) KB)"
-Write-Host ''
-Write-Host '    注意：bundle 里含有本机私有 CA，它只应当留在本机 ——' -ForegroundColor DarkGray
-Write-Host "    dist\ 已被 .gitignore 排除，所以不会被提交。" -ForegroundColor DarkGray
+if (-not $Quiet) {
+    Write-Host ''
+    Write-Host '    注意：bundle 里含有本机私有 CA，它只应当留在本机 ——' -ForegroundColor DarkGray
+    Write-Host "    dist\ 已被 .gitignore 排除，所以不会被提交。" -ForegroundColor DarkGray
+}
 
-# ---------------------------------------------------------------- 3. 输出环境变量
+# ---------------------------------------------------------------- 3. 只输出路径（供其它脚本调用）
+if ($EmitPath) {
+    # Write-Output 走管道 → 调用方用 & $setup -EmitPath -Quiet 即可拿到纯路径
+    Write-Output $Bundle
+    return
+}
+
+# ---------------------------------------------------------------- 4. 直接设置到当前进程环境
+if ($SetEnv) {
+    # $env: 是进程级变量，即使本脚本是子作用域，后续 git 子进程也能继承
+    $env:GIT_CONFIG_COUNT    = '2'
+    $env:GIT_CONFIG_KEY_0    = 'http.sslBackend'
+    $env:GIT_CONFIG_VALUE_0  = 'openssl'
+    $env:GIT_CONFIG_KEY_1    = 'http.sslCAInfo'
+    $env:GIT_CONFIG_VALUE_1  = $Bundle
+    Write-Ok "已设置 GIT_CONFIG_* 环境变量（本次进程内生效）"
+    return
+}
+
+# ---------------------------------------------------------------- 5. 打印环境变量
 if ($PrintEnv) {
     Write-Host ''
-    Write-Host '在本次会话里执行这三行，之后的 git 命令就能直连 GitHub：' -ForegroundColor Cyan
+    Write-Host '在本次会话里执行这几行，之后的 git 命令就能直连 GitHub：' -ForegroundColor Cyan
     Write-Host ''
     Write-Host '    $env:GIT_CONFIG_COUNT   = "2"' -ForegroundColor White
     Write-Host '    $env:GIT_CONFIG_KEY_0   = "http.sslBackend"' -ForegroundColor White
@@ -121,7 +164,7 @@ if ($PrintEnv) {
     return
 }
 
-# ---------------------------------------------------------------- 4. 验证通道
+# ---------------------------------------------------------------- 6. 验证通道
 if ($Test) {
     Write-Step '验证通道（git ls-remote，只读，不需要凭证）'
     $env:GIT_CONFIG_COUNT   = '2'
@@ -136,13 +179,16 @@ if ($Test) {
         $url = git remote get-url origin 2>$null
         if (-not $url) { Write-Warn2 '仓库还没有配置 origin，跳过验证'; return }
         Write-Ok "origin = $url"
-        $res = git ls-remote $url 2>&1
-        if ($LASTEXITCODE -eq 0) {
+        $old = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { $res = @(& git ls-remote $url 2>&1); $code = $LASTEXITCODE }
+        finally { $ErrorActionPreference = $old }
+        if ($code -eq 0) {
             Write-Ok '通道可用 ✓'
-            $res | Select-Object -First 6 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+            $res | Select-Object -First 8 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
         }
         else {
-            Write-Warn2 "通道仍然不通（退出码 $LASTEXITCODE）"
+            Write-Warn2 "通道仍然不通（退出码 $code）"
             $res | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
         }
     }
