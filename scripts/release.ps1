@@ -69,6 +69,14 @@ function Write-Ok($m)   { Write-Host "    $m" -ForegroundColor Green }
 function Write-Warn2($m){ Write-Host "    $m" -ForegroundColor Yellow }
 function Write-Dim($m)  { Write-Host "    $m" -ForegroundColor DarkGray }
 
+# 显式按 UTF-8 读文本。
+# ★ 不能用 Get-Content -Raw：PowerShell 5.1 对「无 BOM 的 UTF-8」会按 ANSI/GBK 解码，
+#   中文被破坏后 package.json 直接不是合法 JSON（ConvertFrom-Json 报错），
+#   README 里的中文标记也匹配不到 —— 表现为"版本号没被写进去"。
+function Read-Utf8([string]$p) {
+    return [System.IO.File]::ReadAllText($p, [System.Text.Encoding]::UTF8)
+}
+
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
@@ -103,7 +111,7 @@ $pkgPath  = Join-Path $Root 'app\package.json'
 $readmePath = Join-Path $Root 'README.md'
 $logPath  = Join-Path $Root 'docs\更新日志.md'
 
-$pkg = Get-Content $pkgPath -Raw | ConvertFrom-Json
+$pkg = Read-Utf8 $pkgPath | ConvertFrom-Json
 $oldVersion = $pkg.version
 if ($oldVersion -notmatch '^(\d+)\.(\d+)\.(\d+)$') { throw "package.json 里的版本号格式不对：$oldVersion" }
 $major = [int]$Matches[1]; $minor = [int]$Matches[2]; $patch = [int]$Matches[3]
@@ -137,7 +145,7 @@ if (git tag --list | Where-Object { $_ -eq "v$newVersion" }) { throw "标签 v$n
 # ---------------------------------------------------------------- 3. 更新日志（文档先行）
 Write-Step '检查更新日志'
 
-$log = Get-Content $logPath -Raw
+$log = Read-Utf8 $logPath
 if ($log -notmatch [regex]::Escape("## [$newVersion]")) {
     Write-Warn2 "docs\更新日志.md 里没有 [${newVersion}] 段落"
     $stamp = Get-Date -Format 'yyyy'
@@ -186,12 +194,12 @@ Write-Ok "更新日志里已有 [$newVersion] 段落"
 # ---------------------------------------------------------------- 4. 写入版本号
 Write-Step '写入版本号'
 
-$pkgText = Get-Content $pkgPath -Raw
+$pkgText = Read-Utf8 $pkgPath
 $pkgText = $pkgText -replace '("version"\s*:\s*")[^"]+(")', "`${1}$newVersion`${2}"
 [System.IO.File]::WriteAllText($pkgPath, $pkgText, (New-Object System.Text.UTF8Encoding($false)))
 Write-Ok "app\package.json -> $newVersion"
 
-$rmText = Get-Content $readmePath -Raw
+$rmText = Read-Utf8 $readmePath
 $rmNew = $rmText -replace '(\*\*当前版本\s*v)[0-9]+\.[0-9]+\.[0-9]+(\*\*)', "`${1}$newVersion`${2}"
 if ($rmNew -ne $rmText) {
     [System.IO.File]::WriteAllText($readmePath, $rmNew, (New-Object System.Text.UTF8Encoding($false)))
