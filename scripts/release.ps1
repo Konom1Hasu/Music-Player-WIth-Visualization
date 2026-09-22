@@ -129,11 +129,18 @@ else {
     $newVersion = "$major.$minor.$patch"
 }
 
-# 新版本必须比旧版本大
-function Compare-Ver([string]$a, [string]$b) {
-    $A = $a.Split('.') | ForEach-Object { [int]$_ }
-    $B = $b.Split('.') | ForEach-Object { [int]$_ }
-    for ($i = 0; $i -lt 3; $i++) { if ($A[$i] -ne $B[$i]) { return [Math]::Sign($A[$i] - $B[$i]) } }
+# 新版本必须比旧版本大。
+# ★ 局部变量千万不要用 $A / $B / $a / $b 这类只差大小写的名字：PowerShell 变量名
+#   不区分大小写，`$A = $a.Split('.')` 实际上是在给参数 $a 赋值；而 $a 被声明成
+#   [string]，数组赋回去会被**静默转成字符串** "1 1 3"，于是 $A[2] 取到的是字符 '1'
+#   而不是数字 3，两边永远"相等"，版本比较恒返回 0。参数名与局部名因此取得完全不一样。
+function Compare-Ver([string]$Left, [string]$Right) {
+    $verL = @($Left.Split('.')  | ForEach-Object { [int]$_ })
+    $verR = @($Right.Split('.') | ForEach-Object { [int]$_ })
+    for ($i = 0; $i -lt 3; $i++) {
+        if ($verL[$i] -gt $verR[$i]) { return 1 }
+        if ($verL[$i] -lt $verR[$i]) { return -1 }
+    }
     return 0
 }
 if ((Compare-Ver $newVersion $oldVersion) -le 0) {
