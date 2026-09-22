@@ -345,6 +345,21 @@ cd Music-Player-WIth-Visualization
 
 版本对照表、兼容性说明与一段已被推翻的历史约束记录见 [versions/README.md](versions/README.md)。
 
+### 版本标签
+
+除了 `versions/` 里的可视化快照，仓库还用 git 附注标签标记功能版本：
+
+| 标签 | 说明 |
+| --- | --- |
+| `v1.0.0` | 首个公开发布版本：本地曲库 + 频谱可视化 + 迷你悬浮窗 + 媒体键 |
+| `v1.1.0` | 派生数据三层管控 + 历史版本回滚 + 审计日志 |
+
+```powershell
+git tag -n1                    # 列出标签与说明
+git show v1.1.0 --stat         # 看某个版本改了什么
+git checkout v1.0.0 -- app/    # 取出某个版本的文件（不切换分支）
+```
+
 ---
 
 ## 常见问题
