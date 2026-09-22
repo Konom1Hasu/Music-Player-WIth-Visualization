@@ -143,11 +143,19 @@ function Compare-Ver([string]$Left, [string]$Right) {
     }
     return 0
 }
-if ((Compare-Ver $newVersion $oldVersion) -le 0) {
-    throw "新版本号 $newVersion 必须大于当前版本 $oldVersion。"
+$cmp = Compare-Ver $newVersion $oldVersion
+if ($cmp -lt 0) {
+    throw "新版本号 $newVersion 不能小于当前版本 $oldVersion。"
+}
+if ($cmp -eq 0) {
+    # 上一次发布可能在中途失败（例如验证没过），版本号已经写进 package.json 了。
+    # 这种情况允许用同一个版本号重跑把流程走完，而不是逼用户再升一版。
+    Write-Warn2 "版本号已经是 $newVersion（上次发布可能中途中断），继续完成这次发布"
 }
 Write-Ok "$oldVersion -> $newVersion"
-if (git tag --list | Where-Object { $_ -eq "v$newVersion" }) { throw "标签 v$newVersion 已存在，换一个版本号。" }
+if (git tag --list | Where-Object { $_ -eq "v$newVersion" }) {
+    throw "标签 v$newVersion 已存在，说明这个版本已经发布过。要再发一版请换更大的版本号。"
+}
 
 # ---------------------------------------------------------------- 3. 更新日志（文档先行）
 Write-Step '检查更新日志'
@@ -201,14 +209,17 @@ Write-Ok "更新日志里已有 [$newVersion] 段落"
 # ---------------------------------------------------------------- 4. 写入版本号
 Write-Step '写入版本号'
 
-$pkgText = Read-Utf8 $pkgPath
-$pkgText = $pkgText -replace '("version"\s*:\s*")[^"]+(")', "`${1}$newVersion`${2}"
+# 先留底：验证可能在后面失败，那时要把版本号改回去，
+# 否则仓库会停在"版本号已升、但没打完标签"的半截状态，重跑还会撞上"版本号不够大"。
+$pkgBackup = Read-Utf8 $pkgPath
+$rmBackup  = Read-Utf8 $readmePath
+
+$pkgText = $pkgBackup -replace '("version"\s*:\s*")[^"]+(")', "`${1}$newVersion`${2}"
 [System.IO.File]::WriteAllText($pkgPath, $pkgText, (New-Object System.Text.UTF8Encoding($false)))
 Write-Ok "app\package.json -> $newVersion"
 
-$rmText = Read-Utf8 $readmePath
-$rmNew = $rmText -replace '(\*\*当前版本\s*v)[0-9]+\.[0-9]+\.[0-9]+(\*\*)', "`${1}$newVersion`${2}"
-if ($rmNew -ne $rmText) {
+$rmNew = $rmBackup -replace '(\*\*当前版本\s*v)[0-9]+\.[0-9]+\.[0-9]+(\*\*)', "`${1}$newVersion`${2}"
+if ($rmNew -ne $rmBackup) {
     [System.IO.File]::WriteAllText($readmePath, $rmNew, (New-Object System.Text.UTF8Encoding($false)))
     Write-Ok "README.md 当前版本 -> v$newVersion"
 }
@@ -234,6 +245,9 @@ foreach ($c in $checks) {
     if ($code -ne 0) {
         Write-Host "    ✗ $($c.name)：$tail" -ForegroundColor Red
         $out | ForEach-Object { Write-Host "        $_" -ForegroundColor DarkGray }
+        Write-Warn2 '已把版本号回滚，修复文档/代码不一致后重跑即可'
+        [System.IO.File]::WriteAllText($pkgPath, $pkgBackup, (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllText($readmePath, $rmBackup, (New-Object System.Text.UTF8Encoding($false)))
         throw "$($c.name) 验证未通过。文档/代码不一致时不允许发布。"
     }
     Write-Ok "$($c.name)：$tail"
