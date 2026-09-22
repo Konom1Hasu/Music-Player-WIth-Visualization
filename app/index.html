@@ -1,0 +1,2263 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>音乐播放器</title>
+<style>
+  :root{
+    --hue:250; --bg:#0e1322; --panel:#161c2e; --card:#1b2338; --card-border:rgba(255,255,255,.08);
+    --text:#e8ecf6; --muted:#9aa5c0; --accent:hsl(250 85% 68%); --accent2:hsl(220 85% 60%);
+    --input-bg:#121828; --hover:rgba(255,255,255,.06);
+    /* 弹层与滑槽：必须走变量，否则切浅色主题时弹层还是深色底（原来的 bug） */
+    --pop:rgba(20,26,44,.96); --pop-shadow:0 24px 60px rgba(0,0,0,.5);
+    --track:rgba(255,255,255,.12); --thumb:#fff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html,body{height:100%;}
+  body{
+    font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;
+    background:radial-gradient(1200px 800px at 80% -10%,hsla(var(--hue) 85% 60% / .18),transparent 55%),var(--bg);
+    color:var(--text);overflow:hidden;
+  }
+  button{font-family:inherit;}
+  .app{display:flex;flex-direction:column;height:100%;}
+  /* 顶栏 */
+  .topbar{display:flex;align-items:center;gap:10px;padding:10px 18px;flex-wrap:wrap;flex:none;}
+  .brand{font-size:18px;font-weight:800;margin-right:auto;background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent;}
+  .btn{
+    border:1px solid var(--card-border);background:var(--card);color:var(--text);
+    padding:9px 16px;border-radius:999px;font-size:13px;cursor:pointer;
+    transition:transform .15s,background .15s;display:inline-flex;align-items:center;gap:6px;
+  }
+  .btn:hover{transform:translateY(-1px);background:var(--hover);}
+  .btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;}
+  .btn.on{background:hsla(var(--hue) 85% 62% / .28);border-color:hsla(var(--hue) 85% 62% / .5);}
+  .fps{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;padding:4px 9px;border:1px solid var(--card-border);border-radius:999px;}
+  /* 主区 */
+  .main{flex:1;display:flex;gap:16px;padding:0 18px 12px;min-height:0;}
+  .stage{flex:1;min-width:0;display:flex;flex-direction:row;gap:18px;padding:14px;background:var(--panel);border:1px solid var(--card-border);border-radius:22px;position:relative;overflow:hidden;}
+  .now{display:flex;gap:18px;align-items:center;flex:none;}
+  /* 正在播放面板右侧的"编辑信息"按钮：不参与挤压缩放，靠右停 */
+  #npEditBtn{flex:none;opacity:.6;width:26px;height:26px;font-size:13px;}
+  #npEditBtn:hover{opacity:1;}
+  .cover-wrap{flex:none;position:relative;}
+  #coverImg{width:52px;height:52px;border-radius:10px;object-fit:cover;background:#0b0f18;display:block;box-shadow:0 4px 14px rgba(0,0,0,.35);cursor:pointer;}
+  #favBtn{position:absolute;top:-6px;right:-6px;width:22px;height:22px;font-size:12px;border:none;border-radius:50%;background:rgba(0,0,0,.4);color:#fff;font-size:15px;cursor:pointer;}
+  .info{min-width:0;flex:1;}
+  #songTitle{font-size:22px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  #songArtist{font-size:14px;color:var(--muted);margin-top:6px;}
+  #songAlbum{font-size:12px;color:var(--muted);margin-top:4px;opacity:.8;}
+  /* ===== 顶部专区：大封面 + 歌曲信息 + 歌词 =====
+     这一块是【留给封面和歌词的真实空间】：高度用 clamp 跟窗口高度联动
+     （窗口矮了自动收，不会把下面的可视化挤没），封面用 aspect-ratio 正方形
+     始终跟这一区等高。可视化占下方剩余全部高度 —— 视觉主体＝可视化＋封面。 */
+  /* ===== 左右两半布局 =====
+     左半：封面占满，并外溢一层"模糊副本"向右渐隐 → 左右之间形成渐变模糊过渡
+     右半：上=歌曲信息+歌词，下=可视化（占剩余全部高度） */
+  .stage-left{flex:0 0 52%;min-width:0;position:relative;display:flex;}
+  .cover-bleed{position:absolute;inset:-14%;z-index:0;
+    background-size:cover;background-position:left center;background-repeat:no-repeat;
+    filter:blur(64px) saturate(1.65);opacity:.55;pointer-events:none;
+    -webkit-mask-image:linear-gradient(100deg,#000 0%,#000 24%,rgba(0,0,0,.66) 44%,rgba(0,0,0,.3) 64%,rgba(0,0,0,.1) 80%,transparent 96%);
+    mask-image:linear-gradient(100deg,#000 0%,#000 24%,rgba(0,0,0,.66) 44%,rgba(0,0,0,.3) 64%,rgba(0,0,0,.1) 80%,transparent 96%);}
+  .big-cover{position:relative;z-index:1;flex:1;min-width:0;border-radius:18px;overflow:hidden;
+    background:#0b0f18;box-shadow:0 10px 28px rgba(0,0,0,.45);cursor:pointer;}
+  .big-cover img{width:100%;height:100%;object-fit:cover;display:block;}
+  .big-cover::after{content:'';position:absolute;inset:0;border-radius:16px;border:1px solid rgba(255,255,255,.09);pointer-events:none;}
+  #bigFavBtn{position:absolute;right:10px;bottom:10px;width:34px;height:34px;border:none;border-radius:50%;z-index:2;
+    background:rgba(0,0,0,.45);color:#fff;font-size:17px;line-height:1;cursor:pointer;opacity:.85;}
+  #bigFavBtn:hover{opacity:1;background:rgba(0,0,0,.62);}
+  .stage-right{flex:1;min-width:0;display:flex;flex-direction:column;gap:10px;position:relative;z-index:1;}
+  .head-meta{flex:none;min-width:0;}
+  .hm-title{font-size:18px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .hm-sub{font-size:13px;color:var(--muted);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  /* 歌词隐藏时（点 🎤 切换）把信息行在竖直方向居中，右边不留空洞 */
+  .stage-right.no-lyr .lyrics{display:none;}
+  .lyrics{flex:1 1 auto;min-height:0;overflow:hidden;position:relative;
+    mask-image:linear-gradient(180deg,transparent,#000 16%,#000 84%,transparent);
+    -webkit-mask-image:linear-gradient(180deg,transparent,#000 16%,#000 84%,transparent);}
+  .lyrics.hide{display:none;}
+  .lyrics-body{position:relative;height:100%;overflow-y:auto;text-align:left;padding:6px 2px;scroll-behavior:smooth;}
+  .lyrics-body .l{font-size:13px;color:var(--muted);padding:5px 0;transition:color .2s,font-size .2s;}
+  .lyrics-body .l.active{color:var(--accent);font-size:16px;font-weight:700;}
+  #viz{width:100%;flex:0 0 auto;height:52%;min-height:140px;border-radius:14px;background:rgba(0,0,0,.18);display:block;}
+  /* 进度 */
+  .bar-wrap{flex:none;display:flex;align-items:center;gap:10px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;}
+  #bar{flex:1;height:6px;background:var(--track);border-radius:3px;cursor:pointer;position:relative;}
+  #barFill{height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:3px;}
+  #barThumb{position:absolute;top:50%;left:0;width:14px;height:14px;border-radius:50%;background:var(--thumb);transform:translate(-50%,-50%);box-shadow:0 1px 6px rgba(0,0,0,.4);pointer-events:none;}
+  /* 控制 */
+  .controls{flex:none;display:flex;align-items:center;justify-content:center;gap:14px;flex-wrap:wrap;}
+  .icon-btn{width:44px;height:44px;border:none;border-radius:50%;background:var(--card);color:var(--text);font-size:18px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;}
+  .icon-btn:hover{background:var(--hover);}
+  #playBtn{width:56px;height:56px;border:none;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));box-shadow:0 6px 18px -8px var(--accent);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;}
+  #playBtn svg{width:26px;height:26px;fill:currentColor;}
+  .pill-btn{border:1px solid var(--card-border);background:var(--card);color:var(--text);padding:7px 13px;border-radius:999px;font-size:12px;cursor:pointer;}
+  /* ===== 简约线性图标：统一 24×24、跟随文字颜色的 1.7px 圆头描边 ===== */
+  .icon-btn svg,.btn svg,.pill-btn svg,.playnext svg,.edit svg,.del svg{
+    width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.7;
+    stroke-linecap:round;stroke-linejoin:round;flex:none;pointer-events:none;}
+  .icon-btn svg{width:21px;height:21px;}
+  #playBtn svg{width:23px;height:23px;fill:currentColor;stroke:none;}
+  #playBtn svg rect,#playBtn svg path{stroke:none;}
+  /* 收藏：未收藏＝描边，已收藏＝填充 */
+  #favBtn.on svg,#bigFavBtn.on svg,#favFilterBtn.on svg{fill:currentColor;}
+  /* 激活态（播放列表 / 歌词 等开关）：淡主色底，一眼看出当前是开还是关 */
+  .pill-btn.on,.icon-btn.on{background:hsla(var(--hue) 85% 62% / .30);}
+  .pill-btn.on{border-color:hsla(var(--hue) 85% 62% / .55);}
+  .vol{display:flex;align-items:center;gap:8px;}
+  .vicon{cursor:pointer;font-size:16px;}
+  #volBar{width:90px;height:5px;background:var(--track);border-radius:3px;cursor:pointer;position:relative;}
+  #volFill{height:100%;width:70%;background:var(--accent);border-radius:3px;}
+  /* 播放列表 */
+  .playlist-drawer{width:320px;flex:none;display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--card-border);border-radius:22px;padding:14px;min-height:0;}
+  .playlist-drawer.hidden{display:none;}
+  .playlist-head{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex:none;}
+  .playlist-head b{margin-right:auto;font-size:14px;}
+  #list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:4px;min-height:0;}
+  .item{display:flex;align-items:center;gap:10px;padding:8px;border-radius:12px;cursor:pointer;position:relative;transition:background .15s;}
+  /* 行首序号（网易云风格）：正在播放显示 ♪ 并高亮 */
+  .item .idx{flex:none;width:20px;text-align:center;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;}
+  .item.active .idx{color:var(--accent);font-weight:700;}
+  .item:hover{background:var(--hover);}
+  .item.active{background:hsla(var(--hue) 85% 62% / .22);}
+  .thumb{width:40px;height:40px;border-radius:8px;overflow:hidden;position:relative;flex:none;}
+  .thumb img{width:100%;height:100%;object-fit:cover;}
+  .info{flex:1;min-width:0;}
+  .info .t{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .info .m{font-size:11px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .dur{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;flex:none;}
+  .del{flex:none;width:24px;height:24px;border:none;border-radius:50%;background:transparent;color:var(--muted);font-size:12px;cursor:pointer;opacity:0;transition:opacity .15s;}
+  .item:hover .del{opacity:1;}
+  .del:hover{background:rgba(255,90,90,.18);color:#ff8080;}
+  .playnext{flex:none;width:24px;height:24px;border:none;border-radius:50%;background:transparent;color:var(--accent);font-size:10px;cursor:pointer;opacity:0;transition:opacity .15s;}
+  .item:hover .playnext{opacity:1;}
+  .playnext.on{opacity:1;background:hsla(var(--hue) 85% 62% / .28);}
+  #emptyTip{text-align:center;color:var(--muted);font-size:13px;padding:30px 10px;line-height:2;}
+  #emptyTip .big{font-size:36px;display:block;margin-bottom:6px;opacity:.7;}
+  /* 弹层 */
+  #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--pop);border:1px solid var(--card-border);color:var(--text);padding:10px 18px;border-radius:999px;font-size:13px;z-index:100;opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(-6px);}
+  .drag-overlay{position:fixed;inset:12px;border:2.5px dashed var(--accent);border-radius:30px;z-index:50;display:none;align-items:center;justify-content:center;background:rgba(8,12,24,.6);font-size:18px;font-weight:600;color:var(--accent);}
+  body.dragging .drag-overlay{display:flex;}
+  /* ===== 网易云风格改版 =====
+     1) 底部固定播放栏（封面缩略图 + 歌名 + 控制 + 进度，全宽）
+     2) 右侧可伸缩播放列表（宽度过渡动画，状态记忆）
+     3) 更中性偏暗的面板色、圆角药丸按钮 */
+  .playerbar{flex:none;display:flex;align-items:center;gap:18px;padding:12px 18px;
+    background:var(--panel);border-top:1px solid var(--card-border);}
+  .pb-left{display:flex;align-items:center;gap:12px;min-width:0;flex:0 1 300px;}
+  .pb-left .cover-wrap{flex:none;}
+  .pb-thumb{width:52px;height:52px;border-radius:10px;object-fit:cover;background:#0b0f18;display:block;cursor:pointer;}
+  .pb-info{min-width:0;flex:1;}
+  .pb-title{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;}
+  .pb-sub{font-size:11px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .pb-mid{flex:1 1 auto;display:flex;flex-direction:column;gap:7px;min-width:0;}
+  .pb-ctrls{display:flex;align-items:center;justify-content:center;gap:16px;}
+  .pb-right{display:flex;align-items:center;gap:10px;flex:0 1 auto;justify-content:flex-end;}
+  .pb-prog{display:flex;align-items:center;gap:10px;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;}
+  /* 播放列表伸缩栏：宽度过渡（不是 display:none 的硬切换） */
+  .playlist-drawer{transition:width .22s ease,opacity .22s ease,padding .22s ease,margin .22s ease;overflow:hidden;}
+  .playlist-drawer.collapsed{width:0!important;padding-left:0;padding-right:0;margin-left:0;opacity:0;border-width:0;}
+  #settingsPop{position:absolute;bottom:64px;right:18px;z-index:60;display:none;flex-direction:column;gap:9px;
+    background:var(--pop);border:1px solid var(--card-border);border-radius:14px;padding:14px 16px;box-shadow:var(--pop-shadow);}
+  #settingsPop.show{display:flex;}
+  #settingsPop .row2{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);white-space:nowrap;}
+  /* ===== 歌曲信息编辑 ===== */
+  .edit{flex:none;width:24px;height:24px;border:none;border-radius:50%;background:transparent;color:var(--muted);font-size:12px;cursor:pointer;opacity:0;transition:opacity .15s;}
+  .item:hover .edit{opacity:1;}
+  .edit:hover{background:hsla(var(--hue) 85% 62% / .25);color:var(--accent);}
+  .modal-mask{position:fixed;inset:0;background:rgba(6,10,20,.62);backdrop-filter:blur(6px);z-index:120;display:none;align-items:center;justify-content:center;padding:20px;}
+  .modal-mask.show{display:flex;}
+  .modal{width:min(460px,100%);background:var(--pop);border:1px solid var(--card-border);border-radius:20px;padding:20px 22px 16px;box-shadow:var(--pop-shadow);}
+  .modal h3{margin:0 0 14px;font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px;}
+  .modal h3 .sub{font-size:12px;font-weight:400;color:var(--muted);}
+  .fld{display:flex;align-items:center;gap:10px;margin-bottom:10px;}
+  .fld span{flex:none;width:52px;color:var(--muted);font-size:13px;text-align:right;}
+  .fld input[type=text]{flex:1;min-width:0;background:var(--input-bg);border:1px solid var(--card-border);color:var(--text);border-radius:10px;padding:8px 10px;font-size:13px;font-family:inherit;}
+  .fld input[type=text]:focus{outline:none;border-color:var(--accent);}
+  .cover-row{display:flex;align-items:center;gap:12px;margin:14px 0 6px;}
+  .cover-row .big{width:72px;height:72px;border-radius:12px;flex:none;}
+  .cover-row .hint{font-size:12px;color:var(--muted);line-height:1.7;}
+  .modal-btns{display:flex;justify-content:flex-end;gap:10px;margin-top:16px;}
+  .modal-btns .btn{padding:8px 16px;font-size:13px;}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="brand">🎵 音乐播放器</div>
+    <button class="btn primary" id="addBtn"><svg viewBox="0 0 24 24"><path d="M12 5.2v13.6"/><path d="M5.2 12h13.6"/></svg> 添加音乐</button>
+    <button class="btn" id="folderBtn"><svg viewBox="0 0 24 24"><path d="M3 7.6A2.6 2.6 0 0 1 5.6 5h3l2 2.4h7.8A2.6 2.6 0 0 1 21 10v7.4A2.6 2.6 0 0 1 18.4 20H5.6A2.6 2.6 0 0 1 3 17.4z"/></svg> 文件夹</button>
+    <button class="btn" id="biliBtn"><svg viewBox="0 0 24 24"><rect x="3" y="7.2" width="18" height="12.6" rx="2.6"/><path d="M8 3.6 12 7l4-3.4"/></svg> B站缓存</button>
+    <button class="btn" id="themeBtn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6"/><path d="M12 3.4v17.2"/><path d="M12 3.4a8.6 8.6 0 0 1 0 17.2" fill="currentColor" stroke="none"/></svg> 主题</button>
+    <button class="btn" id="renderModeBtn"><svg viewBox="0 0 24 24"><path d="M13 2.6 4.9 13.4H11l-1 8 8.4-11H12z"/></svg> GPU</button>
+    <button class="btn" id="clearBtn">清空列表</button>
+    <span class="fps" id="fpsReadout"></span>
+  </div>
+  <div class="main">
+    <section class="stage">
+      <!-- 左半：封面（外溢一层模糊副本，向右渐隐 → 与右半形成渐变模糊过渡）
+           右半：上=歌曲信息+歌词，下=可视化 -->
+      <div class="cover-bleed" id="coverBleed"></div>
+      <div class="stage-left">
+        <div class="big-cover" id="bigCover" title="点击编辑这首歌的信息 / 封面">
+          <img id="bigCoverImg" alt="">
+          <button id="bigFavBtn" title="收藏"><svg viewBox="0 0 24 24"><path d="M12 20.2S3.8 15.2 3.8 10.2A4.2 4.2 0 0 1 12 7.9a4.2 4.2 0 0 1 8.2 2.3c0 5-8.2 10-8.2 10z"/></svg></button>
+        </div>
+      </div>
+      <div class="stage-right" id="stageHead">
+        <div class="head-meta">
+          <div class="hm-title" id="bigTitle">还没有播放任何歌曲</div>
+          <div class="hm-sub" id="bigArtist">点击「＋ 添加音乐」导入本地音频</div>
+        </div>
+        <div class="lyrics" id="lyrics"><div class="lyrics-body" id="lyricsBody"></div></div>
+        <canvas id="viz"></canvas>
+      </div>
+    </section>
+    <aside class="playlist-drawer" id="playlistDrawer">
+      <div class="playlist-head">
+        <b>播放列表</b>
+        <select id="sortSel" style="background:var(--card);color:var(--text);border:1px solid var(--card-border);border-radius:8px;padding:4px 8px;font-size:12px;">
+          <option value="default">添加顺序</option>
+          <option value="title">按歌名</option>
+          <option value="artist">按歌手</option>
+          <option value="album">按专辑</option>
+          <option value="plays">按播放次数</option>
+          <option value="recent">最近播放</option>
+        </select>
+        <button class="pill-btn" id="favFilterBtn"><svg viewBox="0 0 24 24"><path d="M12 20.2S3.8 15.2 3.8 10.2A4.2 4.2 0 0 1 12 7.9a4.2 4.2 0 0 1 8.2 2.3c0 5-8.2 10-8.2 10z"/></svg> 收藏</button>
+      </div>
+      <div id="list"></div>
+      <div id="emptyTip"></div>
+    </aside>
+  </div>
+  <!-- ===== 底部播放栏（网易云风格：左封面+歌名 / 中控制+进度 / 右功能+音量） ===== -->
+  <div class="playerbar">
+    <div class="pb-left">
+      <div class="cover-wrap">
+        <img id="coverImg" alt="">
+        <button id="favBtn" title="收藏"><svg viewBox="0 0 24 24"><path d="M12 20.2S3.8 15.2 3.8 10.2A4.2 4.2 0 0 1 12 7.9a4.2 4.2 0 0 1 8.2 2.3c0 5-8.2 10-8.2 10z"/></svg></button>
+      </div>
+      <div class="pb-info">
+        <div class="pb-title" id="songTitle">还没有播放任何歌曲</div>
+        <div class="pb-sub" id="songArtist">点击「＋ 添加音乐」导入本地音频</div>
+        <div class="pb-sub" id="songAlbum" style="display:none"></div>
+      </div>
+      <button class="icon-btn" id="npEditBtn" title="编辑这首歌的信息（歌名/歌手/专辑/封面）"><svg viewBox="0 0 24 24"><path d="M4 20h4.2L20.2 8 16 3.8 4 15.8z"/><path d="M14.6 5.4 18.8 9.6"/></svg></button>
+    </div>
+    <div class="pb-mid">
+      <div class="pb-ctrls">
+        <button class="icon-btn" id="modeBtn" title="播放模式"><svg viewBox="0 0 24 24"><path d="M17 2.6 20.4 6 17 9.4"/><path d="M20.4 6H7.2A4.2 4.2 0 0 0 3 10.2"/><path d="M7 21.4 3.6 18 7 14.6"/><path d="M3.6 18h13.2A4.2 4.2 0 0 0 21 13.8"/></svg></button>
+        <button class="icon-btn" id="prevBtn" title="上一首"><svg viewBox="0 0 24 24"><path d="M19.4 5.6v12.8"/><path d="M15.4 5.8 6 12l9.4 6.2z"/></svg></button>
+        <button id="playBtn" title="播放 / 暂停"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+        <button class="icon-btn" id="nextBtn" title="下一首"><svg viewBox="0 0 24 24"><path d="M4.6 5.6v12.8"/><path d="M8.6 5.8 18 12l-9.4 6.2z"/></svg></button>
+        <button class="icon-btn" id="lyrToggleBtn" title="歌词"><svg viewBox="0 0 24 24"><rect x="9.2" y="2.6" width="5.6" height="10.6" rx="2.8"/><path d="M5.6 11.4a6.4 6.4 0 0 0 12.8 0"/><path d="M12 17.8v3.2"/></svg></button>
+      </div>
+      <div class="pb-prog">
+        <span id="curTime">0:00</span>
+        <div id="bar"><div id="barFill"></div><div id="barThumb"></div></div>
+        <span id="durTime">0:00</span>
+      </div>
+    </div>
+    <div class="pb-right">
+      <button id="vizModeBtn" class="pill-btn" title="切换可视化样式">融合</button>
+      <button id="speedBtn" class="pill-btn" title="播放速度">1.0x</button>
+      <button id="settingsBtn" class="icon-btn" title="可视化调音（平衡/峰宽/抖动/鼓点/峰高）"><svg viewBox="0 0 24 24"><path d="M4 7.6h7.2"/><path d="M16.4 7.6H20"/><circle cx="13.8" cy="7.6" r="2.1"/><path d="M4 16.4h3.2"/><path d="M12.4 16.4H20"/><circle cx="9.8" cy="16.4" r="2.1"/></svg></button>
+      <button id="miniToggleBtn" class="pill-btn" title="桌面悬浮小窗"><svg viewBox="0 0 24 24"><rect x="3" y="4.6" width="18" height="14.8" rx="2.6"/><path d="M3 9.4h18"/></svg></button>
+      <div class="vol">
+        <span class="vicon" id="vicon" title="静音/恢复">🔊</span>
+        <div id="volBar"><div id="volFill"></div></div>
+      </div>
+      <button class="icon-btn" id="listToggleBtn" title="播放列表"><svg viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h10"/></svg><span id="listBtnCount">0</span></button>
+    </div>
+  </div>
+  <!-- 可视化调音（收纳到 ⚙ 里，保持播放栏干净） -->
+  <div id="settingsPop">
+    <div class="row2"><span style="width:30px" title="频谱平衡：低频补偿强弱，越大左侧整体越高">平衡</span><input type="range" id="tiltSlider" min="0" max="100" value="55" style="width:110px;accent-color:var(--accent);"></div>
+    <div class="row2"><span style="width:30px" id="bassWLabel" title="左侧低频峰（约 45Hz）的宽度">峰宽</span><input type="range" id="bassWSlider" min="20" max="80" step="1" value="48" style="width:110px;accent-color:var(--accent);"></div>
+    <div class="row2"><span style="width:30px" id="jitLabel" title="逐条抖动强度">抖动</span><input type="range" id="jitSlider" min="40" max="200" step="5" value="100" style="width:110px;accent-color:var(--accent);"></div>
+    <div class="row2"><span style="width:30px" id="kickLabel" title="鼓点泵动深度">鼓点</span><input type="range" id="kickSlider" min="0" max="60" step="5" value="40" style="width:110px;accent-color:var(--accent);"></div>
+    <div class="row2"><span style="width:30px" id="peakLabel" title="左峰静态高度：>1 更容易顶满，<1 留余量只在鼓点上顶">峰高</span><input type="range" id="peakSlider" min="55" max="145" step="5" value="105" style="width:110px;accent-color:var(--accent);"></div>
+    <div class="row2" style="border-top:1px solid var(--card-border);padding-top:8px;"><span style="width:44px" title="耳机/键盘媒体键的注册状态：被游戏占用时会在这里显示">媒体键</span><span id="hkLabel" style="font-size:12px;color:var(--muted)">自检中…</span></div>
+  </div>
+</div>
+<div class="drag-overlay">拖入音频文件即可播放</div>
+<div id="toast"></div>
+
+<!-- 歌曲信息编辑弹层（修正导入时识别错的歌名/歌手/专辑/封面） -->
+<div class="modal-mask" id="editMask">
+  <div class="modal">
+    <h3>✎ 编辑歌曲信息 <span class="sub" id="edFileName"></span></h3>
+    <div class="fld"><span>歌名</span><input type="text" id="edTitle" placeholder="歌曲名"></div>
+    <div class="fld"><span>歌手</span><input type="text" id="edArtist" placeholder="演唱者"></div>
+    <div class="fld"><span>专辑</span><input type="text" id="edAlbum" placeholder="专辑名"></div>
+    <div class="fld" id="edQualityRow" style="display:none;"><span>音质</span><span id="edQuality" style="flex:1;min-width:0;font-size:12px;color:var(--muted);line-height:1.6;"></span></div>
+    <div class="cover-row">
+      <div class="thumb big"><img id="edCover" alt=""></div>
+      <div>
+        <div class="hint">封面：点「换封面」选一张图片，或「从 NCM 取封面」读原文件里的内嵌封面<br>也可以点「用默认封面」按歌手名重新生成</div>
+        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn" id="edPickCover" style="padding:6px 12px;font-size:12px;">换封面…</button>
+          <button class="btn" id="edNcmCover" style="padding:6px 12px;font-size:12px;" title="从这首歌自己的文件里取内嵌封面（NCM / MP3 / FLAC / M4A / WAV / OGG / APE）；文件里没有时退回同目录的封面图。也可以手动选别的文件。">取内嵌封面</button>
+          <button class="btn" id="edResetCover" style="padding:6px 12px;font-size:12px;">用默认封面</button>
+        </div>
+        <input type="file" id="edNcmInput" accept=".ncm,.mp3,.MP3,.flac,.m4a,.mp4,.aac,.wav,.ogg,.opus,.ape,.wma,.aiff,.aif,.m4b,audio/*" hidden>
+      </div>
+    </div>
+    <div class="modal-btns">
+      <button class="btn" id="edCancel">取消</button>
+      <button class="btn primary" id="edSave">保存</button>
+    </div>
+  </div>
+</div>
+<input type="file" id="edCoverInput" accept="image/*" hidden>
+<input type="file" id="fileInput" accept="audio/*,.mp3,.wav,.flac,.m4a,.aac,.ogg,.opus,.webm,.ncm" multiple hidden>
+<input type="file" id="folderInput" webkitdirectory hidden>
+<input type="file" id="lrcInput" accept=".lrc,text/plain,.txt" hidden>
+<audio id="audio"></audio>
+
+<script>
+(() => {
+'use strict';
+/* ================= 工具 ================= */
+const $ = s => document.querySelector(s);
+const fmt = t => { if (!isFinite(t) || t < 0) t = 0; const m = Math.floor(t / 60), s = Math.floor(t % 60); return `${m}:${String(s).padStart(2, '0')}`; };
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+const hash = str => { let h = 0; for (const ch of str) h = (h * 31 + ch.charCodeAt(0)) | 0; return Math.abs(h); };
+const syncsafe = (dv, off) => ((dv.getUint8(off) & 0x7f) << 21) | ((dv.getUint8(off + 1) & 0x7f) << 14) | ((dv.getUint8(off + 2) & 0x7f) << 7) | (dv.getUint8(off + 3) & 0x7f);
+const normalizeStr = s => (s || '').toLowerCase().replace(/[\s\-_—–~·,，。.()（）\[\]【】"'“”‘’]/g, '');
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._t); t._t = setTimeout(() => t.classList.remove('show'), 2200); }
+
+/* ================= ID3 标签解析 ================= */
+function decodeText(fb, enc, start, end) {
+  if (end <= start) return '';
+  const bytes = fb.subarray(start, end);
+  try {
+    if (enc === 1) {
+      let s = 0, label = 'utf-16le';
+      if (bytes.length >= 2) {
+        if (bytes[0] === 0xfe && bytes[1] === 0xff) { label = 'utf-16be'; s = 2; }
+        else if (bytes[0] === 0xff && bytes[1] === 0xfe) s = 2;
+      }
+      return new TextDecoder(label).decode(bytes.subarray(s)).replace(/\u0000+$/, '');
+    }
+    if (enc === 2) return new TextDecoder('utf-16be').decode(bytes).replace(/\u0000+$/, '');
+    if (enc === 3) return new TextDecoder('utf-8').decode(bytes).replace(/\u0000+$/, '');
+    return new TextDecoder('latin1').decode(bytes).replace(/\u0000+$/, '');
+  } catch (e) { return ''; }
+}
+function parseTextFrame(fb) {
+  if (!fb.length) return '';
+  return decodeText(fb, fb[0], 1, fb.length).split('\u0000')[0].split('/')[0].trim();
+}
+function splitArtists(raw) {
+  if (!raw) return '';
+  const nullParts = raw.split('\u0000').map(s => s.trim()).filter(Boolean);
+  if (nullParts.length > 1) return nullParts.join(' / ');
+  let s = (nullParts[0] || raw).trim();
+  s = s.replace(/\s*\(?(?:feat\.?|ft\.?|featuring)\s*/ig, ' / ').replace(/\s+with\s+/ig, ' / ');
+  const parts = s.split(/\s+\/\s+|\s*[、，；,;]\s*/).map(x => x.trim()).filter(Boolean);
+  return parts.length > 1 ? parts.join(' / ') : (parts[0] || s);
+}
+function parseArtistFrame(fb) {
+  if (!fb.length) return '';
+  return splitArtists(decodeText(fb, fb[0], 1, fb.length));
+}
+function bytesToB64(bytes) {
+  let s = ''; const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  return btoa(s);
+}
+function parseApic(fb) {
+  if (fb.length < 10) return null;
+  const enc = fb[0];
+  let p = 1;
+  while (p < fb.length && fb[p] !== 0) p++;
+  const mime = new TextDecoder('latin1').decode(fb.subarray(1, p)).toLowerCase() || 'image/jpeg';
+  p++;
+  if (enc === 1) { p++; while (p + 1 < fb.length && !(fb[p] === 0 && fb[p + 1] === 0)) p += 2; p += 2; }
+  else { while (p < fb.length && fb[p] !== 0) p++; p++; }
+  const data = fb.subarray(p);
+  if (!data.length || data.length > 3 * 1024 * 1024) return null;
+  return `data:${mime};base64,${bytesToB64(data)}`;
+}
+function parseID3Bytes(bytes) {
+  if (bytes.length < 10 || bytes[0] !== 0x49 || bytes[1] !== 0x44 || bytes[2] !== 0x33) return {};
+  const ver = bytes[3], flags = bytes[5];
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const out = {};
+  if (ver < 3) {
+    const size = syncsafe(dv, 6);
+    let off = 10;
+    const end = Math.min(10 + size, bytes.length - 6);
+    while (off + 6 <= end) {
+      const id = String.fromCharCode(bytes[off], bytes[off + 1], bytes[off + 2]);
+      const fsize = (bytes[off + 3] << 16) | (bytes[off + 4] << 8) | bytes[off + 5];
+      const fs = off + 6;
+      if (fsize <= 0) { off += 6; continue; }
+      if (fs + fsize > bytes.length) break;
+      const fb = bytes.subarray(fs, fs + fsize);
+      if (id === 'TT2' && !out.title) out.title = parseTextFrame(fb);
+      else if (id === 'TP1' && !out.artist) out.artist = parseArtistFrame(fb);
+      else if (id === 'TAL' && !out.album) out.album = parseTextFrame(fb);
+      else if (id === 'PIC' && !out.cover && fb.length > 6) {
+        const mime = new TextDecoder('latin1').decode(fb.subarray(1, 4)) || 'image/jpeg';
+        let p = 5; while (p < fb.length && fb[p] !== 0) p++; p++;
+        const data = fb.subarray(p);
+        if (data.length && data.length <= 3 * 1024 * 1024) out.cover = `data:${mime};base64,${bytesToB64(data)}`;
+      }
+      off = fs + fsize;
+    }
+    return out;
+  }
+  const isV4 = ver === 4;
+  const size = syncsafe(dv, 6);
+  let off = 10;
+  if (flags & 0x40) { if (isV4) off += syncsafe(dv, off); else off += 4 + dv.getUint32(off, false); }
+  const end = Math.min(10 + size, bytes.length - 8);
+  while (off + 10 <= end) {
+    const id = String.fromCharCode(bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]);
+    if (id === '\0\0\0\0') break;
+    let fsize;
+    try { fsize = isV4 ? syncsafe(dv, off + 4) : dv.getUint32(off + 4, false); } catch (e) { break; }
+    const fs = off + 10;
+    if (fsize <= 0) { off += 10; continue; }
+    if (fs + fsize > bytes.length) break;
+    const fb = bytes.subarray(fs, fs + fsize);
+    if (id === 'TIT2' && !out.title) out.title = parseTextFrame(fb);
+    else if (id === 'TPE1' && !out.artist) out.artist = parseArtistFrame(fb);
+    else if (id === 'TALB' && !out.album) out.album = parseTextFrame(fb);
+    else if (id === 'APIC' && !out.cover) out.cover = parseApic(fb);
+    off = fs + fsize;
+  }
+  return out;
+}
+function niceName(name) {
+  let n = name.replace(/\.[^.]+$/, '').replace(/_/g, ' ').trim();
+  n = n.replace(/^\s*\d{1,3}[\s._\-—–:：)]+/, '').trim();
+  n = n.replace(/\[(flac|wav|mp3|aac|ogg|ape|无损|高清|高音质|hq|sq|320k|高品质|live|mv|伴奏|纯音乐|remix|铃声)\]/ig, ' ').replace(/\s+/g, ' ').trim();
+  const m = n.match(/^\s*(.+?)\s*[-–—|｜~～]\s*(.+?)\s*$/);
+  if (m) {
+    const left = m[1].trim(), right = m[2].trim();
+    if (/^(feat|ft|featuring|with)\.?/i.test(right)) return { artist: '', title: n };
+    return { artist: left, title: right };
+  }
+  return { artist: '', title: n };
+}
+function defaultCover(title, artist) {
+  const c = document.createElement('canvas'); c.width = c.height = 512;
+  const g = c.getContext('2d');
+  const h = hash((title || '') + (artist || '') + 'music');
+  const hue = h % 360;
+  const grad = g.createLinearGradient(0, 0, 512, 512);
+  grad.addColorStop(0, `hsl(${hue} 70% 55%)`);
+  grad.addColorStop(1, `hsl(${(hue + 60) % 360} 70% 35%)`);
+  g.fillStyle = grad; g.fillRect(0, 0, 512, 512);
+  g.fillStyle = 'rgba(255,255,255,.9)'; g.font = 'bold 90px system-ui'; g.textAlign = 'center';
+  g.fillText((title || '♪').slice(0, 1), 256, 300);
+  return c.toDataURL('image/png');
+}
+
+/* ================= 主题 ================= */
+/* 三档循环：深色（蓝紫）→ 浅色 → 网易云红。
+   红色的取值参考网易云桌面端：主色 #EC4141、面板 #1f1f22、次级文字 #a0a0a8。 */
+const THEMES = [
+  { key: 'auto', label: '深色', light: false },
+  { key: 'light', label: '浅色', light: true },
+  { key: 'netease', label: '网易云红', light: false }
+];
+let theme = 'auto';
+function applyTheme(key) {
+  theme = key;
+  const t = THEMES.find(x => x.key === key) || THEMES[0];
+  const set = (k, v) => document.documentElement.style.setProperty(k, v);
+  if (t.light) {
+    set('--hue', 250);
+    set('--accent', 'hsl(250 85% 60%)');
+    set('--accent2', 'hsl(220 85% 55%)');
+    set('--bg', '#eef1f8');
+    set('--panel', '#f7f9fd');
+    set('--card', '#ffffff');
+    set('--card-border', 'rgba(20,32,64,.1)');
+    set('--text', '#1b2540');
+    set('--muted', '#5a6785');
+    set('--input-bg', '#ffffff');
+    // 弹层/滑槽/把手也要跟着主题走，否则切浅色后弹层仍是深底（原来漏了）
+    set('--pop', 'rgba(255,255,255,.98)');
+    set('--pop-shadow', '0 24px 60px rgba(20,32,64,.18)');
+    set('--track', 'rgba(20,32,64,.14)');
+    set('--thumb', 'hsl(250 85% 52%)');
+    set('--hover', 'rgba(20,32,64,.05)');
+  } else if (t.key === 'netease') {
+    set('--hue', 356);
+    set('--accent', '#ec4141');
+    set('--accent2', '#ff6b6b');
+    set('--bg', '#141416');
+    set('--panel', '#1f1f22');
+    set('--card', '#26262a');
+    set('--card-border', 'rgba(255,255,255,.07)');
+    set('--text', '#ececec');
+    set('--muted', '#9b9ba3');
+    set('--input-bg', '#2a2a2e');
+    set('--pop', 'rgba(32,32,36,.98)');
+    set('--pop-shadow', '0 24px 60px rgba(0,0,0,.55)');
+    set('--track', 'rgba(255,255,255,.14)');
+    set('--thumb', '#fff');
+    set('--hover', 'rgba(255,255,255,.07)');
+  } else {
+    set('--hue', 250);
+    set('--accent', 'hsl(250 85% 68%)');
+    set('--accent2', 'hsl(220 85% 60%)');
+    set('--bg', '#0e1322');
+    set('--panel', '#161c2e');
+    set('--card', '#1b2338');
+    set('--card-border', 'rgba(255,255,255,.08)');
+    set('--text', '#e8ecf6');
+    set('--muted', '#9aa5c0');
+    set('--input-bg', '#121828');
+    set('--pop', 'rgba(20,26,44,.96)');
+    set('--pop-shadow', '0 24px 60px rgba(0,0,0,.5)');
+    set('--track', 'rgba(255,255,255,.12)');
+    set('--thumb', '#fff');
+    set('--hover', 'rgba(255,255,255,.06)');
+  }
+  // 可视化配色跟着主题走（accentLight/accentStrong 供画布与小窗使用）
+  try {
+    const cs = getComputedStyle(document.documentElement);
+    accentLight = cs.getPropertyValue('--accent2').trim() || accentLight;
+    accentStrong = cs.getPropertyValue('--accent').trim() || accentStrong;
+    if (typeof gradCache !== 'undefined') { gradCache.key = ''; }
+  } catch (e) { /* ignore */ }
+  try { localStorage.setItem('mp_theme', key); } catch (e) {}
+  pushMiniMeta(true);   // 主题变了：小窗的 light / 配色要更新（只发这一次，不再每帧发）
+}
+$('#themeBtn').addEventListener('click', () => {
+  const i = Math.max(0, THEMES.findIndex(x => x.key === theme));
+  applyTheme(THEMES[(i + 1) % THEMES.length].key);
+  toast('主题：' + THEMES.find(x => x.key === theme).label);
+});
+
+/* ================= 状态 ================= */
+let songs = [];
+let currentId = null;
+let mode = 'list'; // list 列表循环 | order 顺序播放 | single 单曲循环 | shuffle 随机
+/* ===== 简约线性图标（与按钮内联 SVG 同一套，供动态切换用） ===== */
+const IC = {
+  gpu: '<svg viewBox="0 0 24 24"><path d="M13 2.6 4.9 13.4H11l-1 8 8.4-11H12z"/></svg>',
+  soft: '<svg viewBox="0 0 24 24"><rect x="3" y="4.6" width="18" height="12.4" rx="2.6"/><path d="M8.6 20h6.8"/><path d="M12 17v3"/></svg>',
+  heart: '<svg viewBox="0 0 24 24"><path d="M12 20.2S3.8 15.2 3.8 10.2A4.2 4.2 0 0 1 12 7.9a4.2 4.2 0 0 1 8.2 2.3c0 5-8.2 10-8.2 10z"/></svg>',
+  repeat: '<svg viewBox="0 0 24 24"><path d="M17 2.6 20.4 6 17 9.4"/><path d="M20.4 6H7.2A4.2 4.2 0 0 0 3 10.2"/><path d="M7 21.4 3.6 18 7 14.6"/><path d="M3.6 18h13.2A4.2 4.2 0 0 0 21 13.8"/></svg>',
+  repeat1: '<svg viewBox="0 0 24 24"><path d="M17 2.6 20.4 6 17 9.4"/><path d="M20.4 6H7.2A4.2 4.2 0 0 0 3 10.2"/><path d="M7 21.4 3.6 18 7 14.6"/><path d="M3.6 18h13.2A4.2 4.2 0 0 0 21 13.8"/><path d="M11.4 10.6v4"/><path d="M10.7 15h1.5"/></svg>',
+  order: '<svg viewBox="0 0 24 24"><path d="M4 12h12.6"/><path d="M12.4 7.6 16.8 12l-4.4 4.4"/></svg>',
+  shuffle: '<svg viewBox="0 0 24 24"><path d="M3 6.6h3.6l3.2 4.2"/><path d="M3 17.4h3.6L17 6.6h3.8"/><path d="M17.4 3.4 20.8 6.6l-3.4 3.2"/><path d="M17.4 14.2 20.8 17.4l-3.4 3.2"/></svg>'
+};
+const MODES = [{ key: 'list', label: '列表循环', icon: IC.repeat }, { key: 'order', label: '顺序播放', icon: IC.order }, { key: 'single', label: '单曲循环', icon: IC.repeat1 }, { key: 'shuffle', label: '随机播放', icon: IC.shuffle }];
+let volume = 0.7;
+let speed = 1;
+let sortMode = 'default';
+let favOnly = false;
+let nextQueue = [];
+let orderSeq = 0;
+let currentUrl = null;
+
+const audio = $('#audio');
+audio.volume = volume;
+
+/* ================= IndexedDB ================= */
+let db = null;
+function idbOpen() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open('round-music-player', 1);
+    r.onupgradeneeded = e => { if (!e.target.result.objectStoreNames.contains('songs')) e.target.result.createObjectStore('songs', { keyPath: 'id' }); };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+function idbPut(song) { return new Promise((res, rej) => { const tx = db.transaction('songs', 'readwrite'); tx.objectStore('songs').put(song); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); }
+function idbGetAll() { return new Promise((res, rej) => { const tx = db.transaction('songs', 'readonly'); const rq = tx.objectStore('songs').getAll(); rq.onsuccess = () => res(rq.result || []); rq.onerror = () => rej(rq.error); }); }
+function idbDelete(id) { return new Promise(res => { const tx = db.transaction('songs', 'readwrite'); tx.objectStore('songs').delete(id); tx.oncomplete = res; tx.onerror = res; }); }
+function idbClear() { return new Promise(res => { const tx = db.transaction('songs', 'readwrite'); tx.objectStore('songs').clear(); tx.oncomplete = res; tx.onerror = res; }); }
+
+function saveState() {
+  if (!currentId) return;
+  try { localStorage.setItem('mp_state', JSON.stringify({ id: currentId, time: audio.currentTime || 0, mode, volume, at: Date.now() })); } catch (e) {}
+}
+
+/* ================= 音频分析 + 可视化 ================= */
+let audioCtx = null, analyser = null;
+let accentLight = '#b7adff', accentStrong = '#7c6cf0';
+
+/* ===== 自研频谱：Hann 加窗 + Goertzel 对数频段 + 峰值归一 + 对数压缩 =====
+   80 个对数频段铺满 20Hz ~ 0.45×Nyquist（高频不丢失）、帧内峰值归一（响度无关）、
+   跳过 DC、Goertzel 单 bin 计算（内循环仅乘加，性能好）。 */
+const SPECTRUM_N = 1024;        // 分析窗长（= analyser.fftSize）
+const SPECTRUM_BANDS = 120;     // 对数频段数（原 96，条数增多后同步提高以保留真实频段分辨率）
+const LOG101 = Math.log10(101);
+let customTime = new Float32Array(SPECTRUM_N);
+let customMag = new Float32Array(SPECTRUM_BANDS);
+// 多留一格（索引 96）放"鼓点强度"：频谱数组本身是 96 个频段，第 97 个值由 worker/同步路径写入
+let customFreq = new Float32Array(SPECTRUM_BANDS + 1);
+let specKickRef = 0;   // 同步回退路径用的低频参考电平
+let bandKCache = null, bandKCacheSr = 0;
+// Hann 窗（预缓存）
+const hannCache = (() => { const w = new Float32Array(SPECTRUM_N); for (let i = 0; i < SPECTRUM_N; i++) w[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (SPECTRUM_N - 1))); return w; })();
+function buildBandCache(sr) {
+  const nyq = sr / 2, fMin = 20, fMax = 0.45 * nyq;
+  const arr = new Float32Array(SPECTRUM_BANDS);
+  for (let b = 0; b < SPECTRUM_BANDS; b++) arr[b] = (fMin * Math.pow(fMax / fMin, b / (SPECTRUM_BANDS - 1))) / sr * SPECTRUM_N;
+  return arr;
+}
+function goertzelBin(td, k) {
+  const co = 2 * Math.cos(2 * Math.PI * k / SPECTRUM_N);
+  let s1 = 0, s2 = 0;
+  for (let i = 0; i < SPECTRUM_N; i++) {
+    const s0 = td[i] * hannCache[i] + co * s1 - s2;
+    s2 = s1; s1 = s0;
+  }
+  return Math.sqrt(s1 * s1 + s2 * s2 - co * s1 * s2);
+}
+function computeCustomSpectrum() {
+  analyser.getFloatTimeDomainData(customTime);
+  const sr = audioCtx.sampleRate;
+  if (!bandKCache || bandKCacheSr !== sr) { bandKCache = buildBandCache(sr); bandKCacheSr = sr; }
+  let mx = 1e-6;
+  for (let b = 0; b < SPECTRUM_BANDS; b++) { customMag[b] = goertzelBin(customTime, bandKCache[b]); if (customMag[b] > mx) mx = customMag[b]; }
+  // 鼓点（同步回退路径）：与 worker 内完全一致的算法
+  let lowMag = 0;
+  for (let b = 2; b < 17; b++) lowMag += customMag[b];
+  lowMag /= 15;
+  if (specKickRef <= 0) specKickRef = lowMag;
+  const kRise = (lowMag - specKickRef) / Math.max(specKickRef, 1e-6);
+  const kick = Math.max(0, Math.min(1, (kRise - 0.08) * 2.2));
+  specKickRef += (lowMag - specKickRef) * 0.05;   // ★ 与 worker 一致：参考电平慢速跟随
+  for (let b = 0; b < SPECTRUM_BANDS; b++) customFreq[b] = Math.log10(1 + 100 * Math.min(1, customMag[b] / mx)) / LOG101;
+  customFreq[SPECTRUM_BANDS] = kick;
+}
+
+/* Web Worker 频谱计算 + 看门狗回退到同步 computeCustomSpectrum() */
+let spectrumWorker = null, workerEver = false, watchdogTimer = null;
+function initSpectrumWorker() {
+  try {
+    const code = `
+      const N = 1024, B = 120, LOG101 = Math.log10(101);
+      const hann = new Float32Array(N);
+      for (let i = 0; i < N; i++) hann[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (N - 1)));
+      let bandK = null, sr = 0, kickRef = 0;
+      self.onmessage = e => {
+        const d = e.data;
+        if (d.sr !== sr) {
+          sr = d.sr;
+          const nyq = sr / 2, fMin = 20, fMax = 0.45 * nyq;
+          bandK = new Float32Array(B);
+          for (let b = 0; b < B; b++) bandK[b] = (fMin * Math.pow(fMax / fMin, b / (B - 1))) / sr * N;
+        }
+        const td = d.td, out = new Float32Array(B + 1);
+        let mx = 1e-6;
+        for (let b = 0; b < B; b++) {
+          const co = 2 * Math.cos(2 * Math.PI * bandK[b] / N);
+          let s1 = 0, s2 = 0;
+          for (let i = 0; i < N; i++) { const s0 = td[i] * hann[i] + co * s1 - s2; s2 = s1; s1 = s0; }
+          const m = Math.sqrt(Math.max(0, s1 * s1 + s2 * s2 - co * s1 * s2));
+          out[b] = m; if (m > mx) mx = m;
+        }
+        // 鼓点：必须用"归一化之前"的原始低频幅度——
+        // 归一化后本帧最响的带恒为 1.0，低频再响也涨不上去，差分永远是 0（原来的空转 bug）。
+        // 这里拿原始幅度与自己 ~0.5 秒的慢速平均比，只有"明显突然变响"才算一次鼓点。
+        let lowMag = 0;
+        for (let b = 2; b < 17; b++) lowMag += out[b];
+        lowMag /= 15;
+        if (kickRef <= 0) kickRef = lowMag;
+        const kRise = (lowMag - kickRef) / Math.max(kickRef, 1e-6);
+        const kick = Math.max(0, Math.min(1, (kRise - 0.08) * 2.2));
+        // ★ 参考电平必须"慢速跟随"（时间常数 ≈ 20 帧 ≈ 0.4s）。
+        // 原来漏了这一句：kickRef 只在第一帧定值，越往后 kRise 越大 → kick 恒定钳在 1.0
+        // → 泵动系数恒为 1 → 左峰永远停在"顶回满高"的位置，完全不再反映鼓点。
+        kickRef += (lowMag - kickRef) * 0.05;
+        for (let b = 0; b < B; b++) out[b] = Math.log10(1 + 100 * Math.min(1, out[b] / mx)) / LOG101;
+        out[B] = kick;
+        self.postMessage(out.buffer, [out.buffer]);
+      };
+    `;
+    const blob = new Blob([code], { type: 'application/javascript' });
+    spectrumWorker = new Worker(URL.createObjectURL(blob));
+    spectrumWorker.onmessage = e => { customFreq = new Float32Array(e.data); workerEver = true; };
+    spectrumWorker.onerror = () => { spectrumWorker = null; };
+  } catch (e) { spectrumWorker = null; }
+}
+function requestSpectrum() {
+  if (spectrumWorker) {
+    const buf = new Float32Array(SPECTRUM_N);
+    analyser.getFloatTimeDomainData(buf);
+    spectrumWorker.postMessage({ td: buf, sr: audioCtx.sampleRate }, [buf.buffer]);
+    if (!workerEver) computeCustomSpectrum(); // 首帧同步兜底
+  } else {
+    computeCustomSpectrum();
+  }
+}
+function armSpectrumWatchdog() {
+  if (watchdogTimer) clearTimeout(watchdogTimer);
+  watchdogTimer = setTimeout(() => {
+    if (!workerEver && spectrumWorker) { try { spectrumWorker.terminate(); } catch (e) {} spectrumWorker = null; }
+  }, 800);
+}
+
+/* ===== 条形流水线 ===== */
+const BAR_N = 120;
+const VIZ_LEVELS = 14;
+const GR = 0.618033988749895; // 黄金比例
+const VIZ_MODES = [{ key: 'mix', label: '融合' }, { key: 'timbre', label: '音色' }, { key: 'bars', label: '条形' }, { key: 'ring', label: '圆环' }, { key: 'wave', label: '波形' }];
+let vizMode = 'mix';
+let tiltStrength = 55; // 频谱平衡（低频补偿）0~100
+/* 抖动：三个量一起随「抖动」滑块缩放（jitterK）
+     jitterAmp  逐条幅度          —— 每条柱子的高度波动范围
+     jitterFreq 空间频率（周/根） —— 决定"相邻两根差多少"，这是"高低穿插"的总开关：
+                 · 原实现固定在金比例 0.618 → 周期仅 1.6 根，相邻两根相位差 222°（几乎反相），
+                   顶端呈梳齿状"高低高低"交替。实测左区相邻柱高差 0.310，而关掉抖动只有 0.070
+                   —— 也就是说"穿插"里有 4.4 倍是抖动造成的，不是音乐本身。
+                 · 现在随强度联动：弱 → 0.10（周期 10 根，连续起伏）；强 → 0.42（周期 2.4 根，细密）。
+                   实测把频率降到 0.12 时，左区相邻柱高差 0.310 → 0.127（去掉 6 成）
+                   而尖锐度几乎不变（1.12 → 1.09），所以"连续"和"尖"不冲突。
+     默认 1.00 倍：幅度 ±45%、频率 0.22（周期 4.5 根）、满高条顶端颤动 5.5% */
+let jitterK = 1.00;
+let jitterAmp = 0.45 * jitterK;
+let jitterFreq = 0.10 + 0.20 * (jitterK - 0.4);
+let jitterStep = 0.03 * jitterK;
+let jitterWobble = 0.055 * jitterK;
+/* 鼓点：kickEnergy（0~1，由频谱 worker 用原始低频幅度算出，customFreq[SPECTRUM_BANDS]）
+   驱动【泵动深度】—— 平时峰区回落到 (1-kickPump)，鼓点一来顶回满高。
+   注意必须是乘法：加法（旧版 kick×3.0）会把窗口内十几根一起顶过 1.0 钳住，
+   量化后全落最高档 → 顶端变成平直方块（实测方块对数 3.6~4.3/帧）。 */
+let kickPump = 0.40;   // 鼓点泵动深度（0=关，0.4=无鼓点时峰区回落到 60%）
+const bars = new Float32Array(BAR_N);   // 平滑后的条高
+const peaks = new Float32Array(BAR_N);  // 峰值指示线
+const waveBuf = new Uint8Array(128);    // 波形
+let jitterPhase = 0;
+let lowPrev = 0, tenv = 0, kickEnergy = 0;
+
+/* 频段增益（boost zones）：制造"峰谷"高低差——低频强、中频谷、中高频峰；高频保持基线不做硬衰减（保证条数完整）
+   左峰的宽度由 σ（bassSigma）决定。峰心固定在 f=0.12（→ 第 7 根柱、约 45Hz），σ 越大峰越宽。
+   实测换算（用与运行期完全相同的映射反推）：
+     σ=0.030  → 半高宽 5 根（第 5–9 根）    ← 原值，偏窄
+     σ=0.0375 → 半高宽 7 根（第 4–10 根）   ← 当前默认
+     σ=0.045  → 8 根        σ=0.050 → 10 根
+   只动这一个峰的宽度，不碰其它频段，所以右侧动态范围完全不受影响。 */
+/* 低频峰（宽丘）中心：约 45Hz。峰"落在第几根柱"完全由 条数/频段数 决定，
+   下面统一用 bassPeakBar() 换算，避免写死柱号（换条数后细针对准与倾斜补偿都靠它）。 */
+const BASS_WIDE_CENTER = 0.12;
+function bassPeakBar() {
+  const usable = Math.floor(SPECTRUM_BANDS * 0.98);
+  const target = BASS_WIDE_CENTER * (SPECTRUM_BANDS - 1);
+  const bandOf = i => Math.floor(Math.pow(i / BAR_N, 0.8) * usable);
+  for (let i = 0; i < BAR_N; i++) {
+    const a = bandOf(i), b = Math.max(a + 1, bandOf(i + 1));
+    if (target >= a && target < b) return i;
+  }
+  return 0;
+}
+const BASS_PEAK_BAR = bassPeakBar();
+
+function buildBandBoost(sigma, bassGain) {
+  const g = new Float32Array(SPECTRUM_BANDS);
+  /* 左峰 = 宽丘 + 细针 两个分量叠加，这是"尖"的关键：
+     ① 纯高斯的顶部是抛物面（圆钝），而且每帧按"本帧最响的带"归一化到 1.0，
+        最响的带在第 0~18 带之间游走（→ 第 0~11 根柱），左区各根轮流当最高，
+        实测平均下来"峰心 ÷ 紧邻"只有 ≈1.0 —— 一个圆丘，不是尖峰。
+     ② 细针必须【对准第 7 根柱的中心】。原峰心 f=0.12 落在 band 11.4，
+        而 band 11/12 分别映射到第 6/7 根 —— 峰高被摊到两根上，再怎么收窄也尖不起来。
+        第 7 根覆盖 band 11~12，中心即 band 12 → f = 12/95 = 0.1263。
+     实测（静态形状，tiltStrength=61、目标增益 1.05）：
+        旧（纯高斯 σ0.035）：峰高 0.87，峰/紧邻 1.12，形状 0.39 0.42 0.54 0.76 0.87 0.80 …
+        新（宽丘+细针）：    峰高 1.00，峰/紧邻 1.42，形状 0.44 0.49 0.57 0.65 0.81 1.00 0.60 …
+     半高宽同为 6 根、基座仍有 12 根，所以是"变尖"而不是"变窄"。 */
+  const WIDE_CENTER = BASS_WIDE_CENTER; // 宽丘中心（≈45Hz）
+  /* 细针中心：自动对准"低频峰所在柱"（BASS_PEAK_BAR）的正中心。
+     原来写死 0.1263（= 96 带时第 7 根的中心），条数/频段数一改就会错位，
+     而细针一旦不对准柱心，峰高会被摊到相邻两根上 —— 再怎么收窄也尖不起来。 */
+  const NEEDLE_CENTER = (() => {
+    const usable = Math.floor(SPECTRUM_BANDS * 0.98);
+    const bandOf = i => Math.floor(Math.pow(i / BAR_N, 0.8) * usable);
+    const a = bandOf(BASS_PEAK_BAR), b = Math.max(a + 1, bandOf(BASS_PEAK_BAR + 1));
+    return ((a + b - 1) / 2) / (SPECTRUM_BANDS - 1);
+  })();
+  const needleSigma = sigma * 0.1875;
+  for (let b = 0; b < SPECTRUM_BANDS; b++) {
+    const f = b / (SPECTRUM_BANDS - 1); // 0~1 对数位置
+    const uw = (f - WIDE_CENTER) / sigma;
+    const un = (f - NEEDLE_CENTER) / needleSigma;
+    const bass = (0.50 * Math.exp(-uw * uw) + 0.95 * Math.exp(-un * un)) * bassGain;
+    const pres = Math.exp(-Math.pow((f - 0.58) / 0.075, 2)) * 0.75;   // 中高频（人声）尖峰
+    const valley = -Math.exp(-Math.pow((f - 0.33) / 0.09, 2)) * 0.45; // 中频谷（更深）
+    g[b] = Math.max(0.58, Math.min(2.9, 1.0 + bass + pres + valley));
+  }
+  return g;
+}
+/* 左峰"静态总增益"目标 —— 这是"左边一直高耸"的真正开关：
+   左峰中心的总增益 = (1 + bassGain) × 倾斜补偿。原值 1.8 时总增益 ≈ 2.5×0.72 ≈ 1.8，
+   而流水线里有 pow(min(1, v), 2.1) —— 输入一旦 ≥1 就被钳成 1，于是左峰被死死顶在满高，
+   低频再响也不会更高、鼓点也顶不上去（1.0 上加任何数还是 1.0）。
+   把目标定在 ≈1.05：平时落在 0.6~0.9 之间随低音起伏，只有最强的低频瞬间才会顶到 1.0。
+   倾斜滑块改了会改变补偿量，所以增益要按它反推（rebuildBandBoost）。 */
+let bassGainTarget = 1.05;
+function bassGainForTilt() {
+  const tilt = (50 - tiltStrength) / 50;
+  // 低频峰所在柱处的倾斜补偿（柱号由条数换算，不写死"第 7 根"）
+  const Tp = Math.pow(5, tilt * (1 - BASS_PEAK_BAR / BAR_N));
+  return Math.max(-0.35, Math.min(3.0, bassGainTarget / Math.max(0.15, Tp) - 1));
+}
+let bassSigma = 0.048;                   // 宽丘分量的 σ（0.020~0.080，由"峰宽"滑块调；细针 σ = 它的 0.1875）
+let bandBoost = buildBandBoost(bassSigma, bassGainForTilt());
+function rebuildBandBoost() { bandBoost = buildBandBoost(bassSigma, bassGainForTilt()); }
+
+/* 左峰的半高宽，换算成"根"。只用来把滑块的影响显示给人看（与运行期同一套映射） */
+let bassPeakWidthCache = null;
+/* 左峰的"半高宽（根）"与"尖锐度"：量的是【最终显示出来的形状】，不是增益曲线。
+   改成"宽丘+细针"双分量之后，增益曲线的半高宽宽到 19 根，跟眼睛看到的完全不是一回事
+   （宽丘把两侧托起来，但经过倾斜补偿与 pow(min(1,v),2.1) 之后两侧会明显塌下去）。
+   所以这里把显示流水线（tilt → pow）复刻一遍，参考带值取 0.9。 */
+function bassPeakHalfWidth() {
+  const usable = Math.floor(SPECTRUM_BANDS * 0.98);
+  const tilt = (50 - tiltStrength) / 50;
+  const vals = [];
+  for (let i = 0; i < 22; i++) {
+    const a = Math.floor(Math.pow(i / BAR_N, 0.8) * usable);
+    const b = Math.max(a + 1, Math.floor(Math.pow((i + 1) / BAR_N, 0.8) * usable));
+    let s = 0;
+    for (let f = a; f < b; f++) s += bandBoost[f];
+    let v = (s / Math.max(1, b - a)) * 0.9;
+    v *= Math.pow(5, tilt * (1 - i / BAR_N));
+    vals.push(Math.pow(Math.min(1, v), 2.1));
+  }
+  const peak = Math.max.apply(null, vals);
+  const pk = vals.indexOf(peak);
+  const half = peak * 0.5;
+  let lo = pk, hi = pk;
+  while (lo > 0 && vals[lo - 1] > half) lo--;
+  while (hi < vals.length - 1 && vals[hi + 1] > half) hi++;
+  const nb = (vals[pk - 1] + vals[pk + 1]) / 2;
+  bassPeakWidthCache = { half: hi - lo + 1, pk, peak, vals, sharp: nb > 0 ? peak / nb : 1 };
+  return hi - lo + 1;
+}
+function refreshBassWidthUI() {
+  const n = bassPeakHalfWidth();
+  const sharp = bassPeakWidthCache ? bassPeakWidthCache.sharp : 1;
+  $('#bassWLabel').textContent = `峰宽${n}尖${sharp.toFixed(2)}`;
+  $('#bassWLabel').title = `左侧低频峰：显示半高宽 ${n} 根柱；尖锐度（峰高 ÷ 相邻两根平均）${sharp.toFixed(2)}`
+    + `　—— 1.1 左右是圆丘，1.4 以上是尖峰。峰心固定在第 ${BASS_PEAK_BAR + 1} 根（约 45Hz），σ=${bassSigma.toFixed(4)}`;
+}
+
+function sampleBand(i, n) {
+  const usable = Math.floor(SPECTRUM_BANDS * 0.98);
+  const a = Math.floor(Math.pow(i / n, 0.8) * usable);
+  const b = Math.max(a + 1, Math.floor(Math.pow((i + 1) / n, 0.8) * usable));
+  let s = 0;
+  for (let f = a; f < b; f++) s += customFreq[f] * bandBoost[f];
+  return s / Math.max(1, b - a);
+}
+function computeBars() {
+  const n = BAR_N;
+  // 低频能量 → 鼓点 onset
+  // 旧写法 low = mean(customFreq[2..7]) 再取差分：customFreq 是"每帧按本帧最大值归一化"的，
+  // 低频带恒等于 ≈1.0，于是 low - lowPrev ≡ 0 —— 那条"鼓点增强低频"其实一直在空转。
+  // 现在鼓点在频谱 worker 里用【未归一化的原始低频幅度】算好（customFreq[SPECTRUM_BANDS]），这里直接取。
+  const kickRaw = customFreq.length > SPECTRUM_BANDS ? customFreq[SPECTRUM_BANDS] : 0;
+  kickEnergy = isFinite(kickRaw) ? kickRaw : 0;
+  lowPrev = kickEnergy;
+  tenv = tenv + (kickEnergy - tenv) * 0.08;
+  const tilt = (50 - tiltStrength) / 50; // 1=低频补偿最强，-1=高频
+  for (let i = 0; i < n; i++) {
+    let v = sampleBand(i, n);
+    // 倾斜补偿（低频端最高 5×）
+    v *= Math.pow(5, tilt * (1 - i / n));
+    // 幂次曲线：拉大高低差（v∈[0,1]，>1 的幂压低中值、突出峰值）
+    v = Math.pow(Math.min(1, v), 2.1);
+    // 鼓点：改成【泵动】而不是往上加。
+    // 旧写法 v += kick*3.0*高斯窗 是加法，而 kick 在鼓点上常为 1.0 → 整个窗口 +3.0，
+    // 十几根柱子一起被顶过 1.0 钳住，再经 14 级量化全部落在最高档 → 顶端变成一条平直方块
+    // （实测每帧有 7.8~9.4 根在最高档、"方块对数" 3.6~4.3，这就是"左侧变得方正"）。
+    // 泵动是乘法：没有鼓点时峰区整体回落到 (1-深度)，鼓点一来回到原位 —— 既看得见每一下，
+    // 又永远不越过 1.0，所以不会再造出平台。实测方块对数 3.62 → 0.21。
+    const pumpW = Math.exp(-Math.pow((i / n - 0.07) / 0.10, 2));
+    v *= 1 - pumpW * kickPump * (1 - kickEnergy);
+    v += kickEnergy * 0.06 * pumpW;   // 一点点加法，让鼓点那一下更"利"
+    // 抖动（空间频率由"抖动"滑块联动：低=连续起伏，高=细密穿插）
+    // 向上幅度按【剩余余量】缩放：已经很高的柱子若再被 +45% 顶一下，会被 min(1,v) 钳住；
+    // 相邻几根一起被钳住、再经 14 级量化 → 全部落在最高档 → 顶端变成一条平直的"方块"
+    // （这就是"左侧变得方正、不再尖细"的原因）。缩掉向上幅度后，峰心照样顶上、两侧不再被
+    // 推过顶，针形得以保留；向下那层 jitterWobble 不受影响，所以顶端颤动依然看得见。
+    const ph = i * jitterFreq * Math.PI * 2 + jitterPhase;
+    const headroom = Math.max(0, Math.min(1, (1 - v) / 0.45));
+    v *= 1 + Math.sin(ph) * jitterAmp * headroom;
+    v = Math.max(0.02, Math.min(1, v));
+    // 14 级量化（阶梯感）
+    v = Math.round(v * (VIZ_LEVELS - 1)) / (VIZ_LEVELS - 1);
+    // 量化之后再补一层"单边向下"的抖动：顶到 1.0 的条会被钳位把抖动抹平，
+    // 于是最显眼的左峰顶端看着是死的。这一层只往下走（幅度 ≤ jitterWobble），
+    // 既不突破满高，又让满高条的顶端持续颤动。
+    v *= 1 - jitterWobble * (0.5 - 0.5 * Math.sin(ph));
+    // 平滑：上行/下行都改成"追着目标值走"（一阶跟随），而不是老式的乘法自衰减。
+    // 老写法 bars[i] * rel 有个根本问题：v 掉下去时它【根本不看 v】，只是按固定比例自己缩水，
+    // 于是尾巴拖得很长、永远落在目标后面 —— 观感就是"回落不干脆"。
+    // 实测（局部峰掉到自身 50% 用几帧）：右端 10~15 帧 → 2~4 帧；左端 6~10 帧 → 4~8 帧；
+    // 收敛到目标（|显示-目标|<0.05）右端 3 帧 → 1 帧。
+    // 系数仍随频率放缓（高频瞬态密集，起得缓、落得也稍缓），左端保持原来的手感。
+    const atk = 0.70 - 0.20 * (i / n);   // 上行：左 0.70 → 右 0.50
+    const rel = 0.58 + 0.22 * (i / n);   // 下行：左 0.58 → 右 0.80
+    bars[i] = v > bars[i] ? bars[i] + (v - bars[i]) * atk : bars[i] + (v - bars[i]) * rel;
+    peaks[i] = Math.max(peaks[i] * 0.97, bars[i]);
+  }
+  jitterPhase += jitterStep;
+}
+function ensureCtx() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = SPECTRUM_N;
+    analyser.smoothingTimeConstant = 0.6;
+    const src = audioCtx.createMediaElementSource(audio);
+    src.connect(analyser); analyser.connect(audioCtx.destination);
+    initSpectrumWorker();
+  }
+  if (audioCtx.state === 'suspended') return audioCtx.resume();
+  return Promise.resolve();
+}
+
+/* ===== 绘制（5 种样式） ===== */
+/* 渐变按高度缓存。原来每一帧、每一次绘制都 createLinearGradient（每秒上百个对象），
+   纯粹给 GC 和 GPU 添负担；高度只在窗口尺寸变化时变，缓存命中率接近 100%。 */
+const gradCache = { key: '', grad: null };
+function makeGrad(ctx, h) {
+  const key = 'g' + h;
+  if (gradCache.key !== key) {
+    const g = ctx.createLinearGradient(0, 0, 0, h);
+    g.addColorStop(0, accentLight);
+    g.addColorStop(0.5, accentStrong);
+    g.addColorStop(1, 'rgba(8,12,26,.9)');
+    gradCache.key = key; gradCache.grad = g;
+  }
+  return gradCache.grad;
+}
+function drawBars(ctx, w, h) {
+  const gap = w / BAR_N, bw = Math.max(1, gap * 0.7);
+  ctx.fillStyle = makeGrad(ctx, h);
+  for (let i = 0; i < BAR_N; i++) {
+    const v = bars[i];
+    const bh = Math.max(2, v * (h - 8));
+    const x = i * gap + (gap - bw) / 2;
+    ctx.globalAlpha = 0.45 + 0.55 * v;
+    ctx.fillRect(x, h - bh, bw, bh);
+    const ph = Math.max(2, peaks[i] * (h - 8));
+    ctx.globalAlpha = 0.85;
+    ctx.fillRect(x, h - ph - 3, bw, 2);
+  }
+  ctx.globalAlpha = 1;
+}
+function drawMix(ctx, w, h) {
+  // 融合：频率谱 + 音色（鼓点已在 computeBars 中并入条高，此处不再二次增强）
+  const gap = w / BAR_N, bw = Math.max(1, gap * 0.7);
+  ctx.fillStyle = makeGrad(ctx, h);
+  for (let i = 0; i < BAR_N; i++) {
+    const v = bars[i];
+    const bh = Math.max(2, v * (h - 8));
+    const x = i * gap + (gap - bw) / 2;
+    ctx.globalAlpha = 0.45 + 0.55 * v;
+    ctx.fillRect(x, h - bh, bw, bh);
+    const ph = Math.max(2, peaks[i] * (h - 8));
+    ctx.globalAlpha = 0.85;
+    ctx.fillRect(x, h - ph - 3, bw, 2);
+  }
+  ctx.globalAlpha = 1;
+}
+function drawTimbre(ctx, w, h) {
+  // 音色：按频段区分鼓点/贝斯/中高频（三种色相）
+  const gap = w / BAR_N, bw = Math.max(1, gap * 0.7);
+  const gLow = ctx.createLinearGradient(0, 0, 0, h);
+  gLow.addColorStop(0, '#ff9a6b'); gLow.addColorStop(0.5, '#ff5f7e'); gLow.addColorStop(1, 'rgba(60,20,30,.9)');
+  const gBass = ctx.createLinearGradient(0, 0, 0, h);
+  gBass.addColorStop(0, '#7c6cf0'); gBass.addColorStop(1, 'rgba(20,24,50,.9)');
+  const gHigh = ctx.createLinearGradient(0, 0, 0, h);
+  gHigh.addColorStop(0, '#4fe0c8'); gHigh.addColorStop(1, 'rgba(10,40,40,.9)');
+  for (let i = 0; i < BAR_N; i++) {
+    const v = bars[i];
+    const bh = Math.max(2, v * (h - 8));
+    const x = i * gap + (gap - bw) / 2;
+    if (i < BAR_N * 0.07) ctx.fillStyle = gLow;
+    else if (i < BAR_N * 0.35) ctx.fillStyle = gBass;
+    else ctx.fillStyle = gHigh;
+    ctx.globalAlpha = 0.45 + 0.55 * v;
+    ctx.fillRect(x, h - bh, bw, bh);
+    ctx.globalAlpha = 0.85;
+    const ph = Math.max(2, peaks[i] * (h - 8));
+    ctx.fillRect(x, h - ph - 3, bw, 2);
+  }
+  ctx.globalAlpha = 1;
+}
+function drawRing(ctx, w, h) {
+  // 圆环：径向排列
+  const cx = w / 2, cy = h / 2;
+  const r0 = Math.min(w, h) * 0.22, r1 = Math.min(w, h) * 0.46;
+  for (let i = 0; i < BAR_N; i++) {
+    const v = bars[i];
+    const ang = (i / BAR_N) * Math.PI * 2 - Math.PI / 2;
+    const len = v * (r1 - r0);
+    ctx.strokeStyle = v > 0.5 ? accentStrong : accentLight;
+    ctx.lineWidth = Math.max(1.5, (Math.PI * 2 * r0 / BAR_N) * 0.6);
+    ctx.globalAlpha = 0.35 + 0.65 * v;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(ang) * r0, cy + Math.sin(ang) * r0);
+    ctx.lineTo(cx + Math.cos(ang) * (r0 + len), cy + Math.sin(ang) * (r0 + len));
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+function drawWave(ctx, w, h) {
+  analyser.getByteTimeDomainData(waveBuf);
+  ctx.strokeStyle = accentLight;
+  ctx.lineWidth = 2;
+  ctx.globalAlpha = 0.9;
+  ctx.beginPath();
+  const n = waveBuf.length;
+  const my = h / 2;
+  for (let i = 0; i < n; i++) {
+    const x = i / (n - 1) * w;
+    const y = my + ((waveBuf[i] - 128) / 128) * (h / 2 - 6);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+let lastFrameT = 0, fpsStat = { frames: 0, t0: performance.now(), fps: 0 };
+/* 暂停后的"回落加速窗"：暂停时柱子靠自由衰减落到底，
+   如果这时循环还在 20ms→120ms 的低帧率上，每帧掉同样的比例就会
+   "一格一格跳"——这正是"暂停时音频条回落卡顿"的来源。
+   所以暂停瞬间起 1s 内仍按 50fps 跑（柱子 0.94^n 到 1s 只剩 5%，早已落到底），
+   落完之后再降到低帧率省电：既平滑又不浪费。 */
+let vizFastUntil = 0;
+function keepVizFast(ms) {
+  const v = performance.now() + (ms || 1000);
+  if (v > vizFastUntil) vizFastUntil = v;
+}
+function drawViz() {
+  const cv = $('#viz');
+  const w = cv.width, h = cv.height;
+  if (!w || !h) return;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+  const playing = !!analyser && !audio.paused;
+  if (playing) { requestSpectrum(); computeBars(); armSpectrumWatchdog(); }
+  else {
+    /* 回落改成按【时间】衰减，不再按【帧】：
+       0.94^n 是"每帧"的比例，帧率一变（20ms→120ms）视觉速度就差 6 倍，
+       大跨步还天然带着阶梯感。这里把真实帧间隔折算成"等效 50fps 帧数"，
+       于是任何帧率下回落速度都和改动前完全一致、且是一条平滑曲线。 */
+    const now = performance.now();
+    const k = Math.min(12.5, Math.max(0.2, (lastFrameT ? now - lastFrameT : 20) / 20));
+    const fb = Math.pow(0.94, k), fp = Math.pow(0.96, k), fk = Math.pow(0.9, k);
+    let mx = 0;
+    for (let i = 0; i < BAR_N; i++) {
+      bars[i] *= fb; peaks[i] *= fp;
+      if (bars[i] > mx) mx = bars[i];
+    }
+    kickEnergy *= fk;
+    /* 只要还剩肉眼能看出的余量（>1.2%），就把"回落期"再续 200ms —— 自己终止、
+       不需要猜一个固定时长：落到底后立刻回到 8fps，落的过程中一直是 50fps。 */
+    if (mx > 0.012) keepVizFast(200);
+  }
+  if (vizMode === 'mix') drawMix(ctx, w, h);
+  else if (vizMode === 'timbre') drawTimbre(ctx, w, h);
+  else if (vizMode === 'ring') drawRing(ctx, w, h);
+  else if (vizMode === 'wave') drawWave(ctx, w, h);
+  else drawBars(ctx, w, h);
+}
+function resizeViz() {
+  const cv = $('#viz');
+  const r = cv.getBoundingClientRect();
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.0);
+  const maxW = 900, w = Math.min(r.width, maxW);
+  cv.width = Math.max(10, w * dpr);
+  cv.height = Math.max(10, r.height * dpr);
+}
+
+/* 可视化样式切换 */
+function setVizModeUI() {
+  const m = VIZ_MODES.find(x => x.key === vizMode) || VIZ_MODES[0];
+  $('#vizModeBtn').textContent = m.label;
+}
+$('#vizModeBtn').addEventListener('click', () => {
+  const i = VIZ_MODES.findIndex(x => x.key === vizMode);
+  vizMode = VIZ_MODES[(i + 1) % VIZ_MODES.length].key;
+  setVizModeUI();
+  try { localStorage.setItem('mp_viz', vizMode); } catch (e) {}
+  toast('可视化样式：' + VIZ_MODES.find(x => x.key === vizMode).label);
+});
+$('#tiltSlider').addEventListener('input', e => {
+  tiltStrength = parseInt(e.target.value, 10);
+  try { localStorage.setItem('mp_tilt', tiltStrength); } catch (e) {}
+  // 倾斜会改变左峰中心的补偿量 → 必须按新的倾斜重算低频增益，
+  // 否则"静态总增益 ≈1.05"这个目标会被打破（倾斜一拉大又把左峰顶死）
+  rebuildBandBoost();
+  refreshBassWidthUI();
+});
+/* 左峰宽：滑块值 = σ×1000（20~80 对应 σ 0.020~0.080）。
+   改完立刻重建 bandBoost，下一帧就生效，不必重启动画循环。 */
+function applyBassSigma(v) {
+  bassSigma = Math.max(0.020, Math.min(0.080, v / 1000));
+  rebuildBandBoost();
+  refreshBassWidthUI();
+}
+$('#bassWSlider').addEventListener('input', e => {
+  const v = parseInt(e.target.value, 10);
+  applyBassSigma(v);
+  try { localStorage.setItem('mp_bassw2', String(v)); } catch (e) {}
+});
+/* 抖动强度：滑块值 = jitterK×100（40~200 → 0.40~2.00 倍）。
+   三个量（预钳位幅度 / 相位推进 / 量化后单边抖动）一起缩放，下一帧即生效。 */
+function applyJitterK(k) {
+  jitterK = Math.max(0.40, Math.min(2.00, k));
+  jitterAmp = 0.45 * jitterK;
+  jitterFreq = 0.10 + 0.20 * (jitterK - 0.4);   // 0.4→0.10（连续） 1.0→0.22  2.0→0.42（细密穿插）
+  jitterStep = 0.03 * jitterK;
+  jitterWobble = 0.055 * jitterK;
+  refreshJitterUI();
+}
+function refreshJitterUI() {
+  const el = $('#jitLabel');
+  if (!el) return;
+  const period = 1 / jitterFreq;
+  el.textContent = `抖动×${jitterK.toFixed(2)}`;
+  el.title = `逐条抖动强度 ×${jitterK.toFixed(2)}：`
+    + `幅度 ±${(jitterAmp * 100).toFixed(0)}%，空间周期 ${period.toFixed(1)} 根柱`
+    + `（${period > 3 ? '连续起伏' : period > 2 ? '中等' : '细密穿插'}），`
+    + `相位推进 ${jitterStep.toFixed(3)}/帧，满高条顶端颤动 ${(jitterWobble * 100).toFixed(1)}%。`
+    + `　往小拉 = 更连续；往大拉 = 更碎更抖。`;
+}
+$('#kickSlider').addEventListener('input', e => {
+  const v = parseInt(e.target.value, 10);
+  applyKickGain(v / 100);
+  try { localStorage.setItem('mp_kick', String(v)); } catch (e) {}
+});
+/* 左峰静态高度：bassGainTarget（左峰中心的总增益目标）。
+   ≈1.05 → 平时 0.6~0.95 随低音起伏、鼓点顶到满高；
+   ≥1.3 → 经常顶满（就是"一直高耸"）；≤0.8 → 明显留出余量，起伏更大。 */
+function applyPeakTarget(t) {
+  bassGainTarget = Math.max(0.55, Math.min(1.45, t));
+  rebuildBandBoost();
+  refreshBassWidthUI();
+  const el = $('#peakLabel');
+  if (el) {
+    el.textContent = `峰高${bassGainTarget.toFixed(2)}`;
+    el.title = `左峰静态高度 ${bassGainTarget.toFixed(2)}（左峰中心总增益目标）：`
+      + (bassGainTarget >= 1.25 ? '偏高，容易一直顶满' : bassGainTarget <= 0.85 ? '偏低，起伏最明显' : '适中：平时留余量，鼓点上顶');
+  }
+}
+$('#peakSlider').addEventListener('input', e => {
+  const v = parseInt(e.target.value, 10);
+  applyPeakTarget(v / 100);
+  try { localStorage.setItem('mp_peakh', String(v)); } catch (e) {}
+});
+function applyKickGain(g) {
+  kickPump = Math.max(0, Math.min(0.60, g));
+  const el = $('#kickLabel');
+  if (el) {
+    el.textContent = kickPump > 0 ? `鼓点${(kickPump * 100).toFixed(0)}%` : '鼓点关';
+    el.title = `鼓点泵动深度 ${(kickPump * 100).toFixed(0)}%：没有鼓点时左侧峰区回落到 ${(100 - kickPump * 100).toFixed(0)}%，鼓点一来顶回满高。`
+      + `　0 = 关闭（峰区一直顶在高位，反而容易显得方正）；往大拉 = 每一下鼓点的起落更明显。`;
+  }
+}
+$('#jitSlider').addEventListener('input', e => {
+  const v = parseInt(e.target.value, 10);
+  applyJitterK(v / 100);
+  try { localStorage.setItem('mp_jit2', String(v)); } catch (e) {}
+});
+
+/* 定时器驱动的可视化循环（脱离 rAF/BeginFrame 节流）
+   ── 自适应帧率：只在"播放中且画面可见"时跑满 50fps（与改动前完全一致，帧率不变）；
+   暂停时约 8fps、主窗口最小化且没开小窗时约 2.5fps。
+   目的：空闲/后台时把 CPU 与 GPU 让给正在玩的游戏或别的应用，
+   避免"开着播放器就一起卡"——既不是降帧率换性能，也不额外占用。 */
+let vizToken = 0;
+let winMinimized = false;
+if (window.desktop && window.desktop.on) {
+  window.desktop.on('win-state', (st) => { winMinimized = !!(st && st.minimized); });
+}
+/* 暂停时画面上还有没有"看得见"的柱子（>1.2% 高，或余辉峰值线 >2%）。
+   这是"暂停后该用多快刷新"的判据：只要还有可见余量就必须 50fps，
+   否则 8fps 的大跨步就是肉眼看到的卡顿。96 次比较，开销可忽略。 */
+function barsStillVisible() {
+  for (let i = 0; i < BAR_N; i++) if (bars[i] > 0.012 || peaks[i] > 0.02) return true;
+  return false;
+}
+function vizInterval() {
+  if (winMinimized && !miniVisible) return 400;   // 画面看不见：2.5fps 维持状态
+  if (performance.now() < vizFastUntil) return 20; // 刚暂停/切歌：回落期跑满 50fps
+  if (audio.paused) return barsStillVisible() ? 20 : 120;  // 还有可见余量→50fps平滑落到底；落干净了→8fps静止
+  return 20;                                      // 播放中：50fps（保持原帧率）
+}
+function scheduleViz() {
+  const tok = ++vizToken;
+  setTimeout(() => {
+    if (tok !== vizToken) return;
+    const now = performance.now();
+    lastFrameT = now;
+    fpsStat.frames++;
+    if (now - fpsStat.t0 >= 1000) {
+      fpsStat.fps = Math.round(fpsStat.frames * 1000 / (now - fpsStat.t0));
+      fpsStat.frames = 0; fpsStat.t0 = now;
+      const el = $('#fpsReadout'); if (el) el.textContent = fpsStat.fps + ' fps';
+    }
+    drawViz();
+    if (miniVisible) pushMiniBars();   // 小窗只要柱形流（meta 变化时才发，见 pushMiniMeta）
+    scheduleViz();
+  }, vizInterval());
+}
+
+/* ================= 歌词 ================= */
+let lyrics = []; // [{t, text}]
+let lyricsReady = false;
+function parseLrc(text) {
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  for (const line of lines) {
+    const m = line.match(/\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]/);
+    if (!m) continue;
+    const t = (+m[1]) * 60 + (+m[2]) + ((+m[3]) || 0) / 1000;
+    const text = line.replace(/\[[^\]]*\]/g, '').trim();
+    out.push({ t, text });
+  }
+  out.sort((a, b) => a.t - b.t);
+  return out;
+}
+function setLyrics(s) {
+  lyricsReady = false;
+  const body = $('#lyricsBody');
+  if (s && s.lrc) {
+    lyrics = parseLrc(s.lrc);
+    lyricsReady = !!lyrics.length;
+    body.innerHTML = lyrics.map(l => `<div class="l">${l.text || '♪'}</div>`).join('');
+    updateLyricsHighlight(true);
+  } else {
+    lyrics = [];
+    body.innerHTML = '<div class="l">暂无歌词</div>';
+  }
+}
+function updateLyricsHighlight(force) {
+  if (!lyricsReady) return;
+  const t = audio.currentTime;
+  let idx = -1;
+  for (let i = 0; i < lyrics.length; i++) if (lyrics[i].t <= t) idx = i; else break;
+  const body = $('#lyricsBody');
+  const items = body.children;
+  for (let i = 0; i < items.length; i++) items[i].classList.toggle('active', i === idx);
+  if (idx >= 0 && (force || !body._pinnedIdx || body._pinnedIdx !== idx)) {
+    body._pinnedIdx = idx;
+    const el = items[idx];
+    if (el) body.scrollTop = el.offsetTop - body.clientHeight / 2;
+  }
+}
+
+/* ================= 播放控制 ================= */
+let userPlay = true;
+/* 大封面 + 其"模糊外溢"层：两者用同一张图，外溢层向右渐隐形成渐变模糊过渡 */
+function setBigCover(src) {
+  const img = $('#bigCoverImg'), bleed = $('#coverBleed');
+  if (img) img.src = src;
+  if (bleed) bleed.style.backgroundImage = 'url("' + String(src).replace(/"/g, '%22') + '")';
+}
+function renderNowPlaying() {
+  const s = songs.find(x => x.id === currentId);
+  if (!s) {
+    $('#coverImg').src = defaultCover('', '');
+    $('#songTitle').textContent = '还没有播放任何歌曲';
+    $('#songArtist').textContent = ''; $('#songAlbum').textContent = '点击「＋ 添加音乐」导入本地音频';
+    $('#durTime').textContent = '0:00'; $('#curTime').textContent = '0:00';
+    setBarUI(0);
+    $('#favBtn').innerHTML = IC.heart; $('#favBtn').classList.remove('on');
+    setBigCover(defaultCover('', ''));
+    $('#bigTitle').textContent = '还没有播放任何歌曲';
+    $('#bigArtist').textContent = '点击「＋ 添加音乐」导入本地音频';
+    $('#bigFavBtn').innerHTML = IC.heart; $('#bigFavBtn').classList.remove('on');
+    updateMediaSessionMeta(null);
+    return;
+  }
+  $('#coverImg').src = s.cover;
+  setBigCover(s.cover);
+  $('#bigTitle').textContent = s.title;
+  $('#bigArtist').textContent = s.album ? `${s.artist} · ${s.album}` : s.artist;
+  $('#bigFavBtn').innerHTML = IC.heart; $('#bigFavBtn').classList.toggle('on', !!s.fav);
+  $('#songTitle').textContent = s.title;
+  $('#songArtist').textContent = s.artist;
+  $('#songAlbum').textContent = `《${s.album}》`;
+  $('#durTime').textContent = s.duration && isFinite(s.duration) ? fmt(s.duration) : '--:--';
+  $('#favBtn').innerHTML = IC.heart; $('#favBtn').classList.toggle('on', !!s.fav);
+  updateMediaSessionMeta(s);
+}
+/* B 站缓存的音源：列表里存的是【原始 .m4s 路径】，播放前让主进程按需生成"可播放副本"。
+   为什么必须每次 ensure：
+     · 电脑端缓存会在 mp4 前面塞 9 字节自定义头，Chromium 解复用器不认 → 直接报
+       MediaError 4（格式不支持）。主进程会把头去掉另存一份。
+     · 这一步是幂等的，已经正确时几乎零开销；而且能自动修好旧版本留下的坏副本
+       （重启 app 不会重写那个文件，必须重新生成）。
+   主进程不可用（浏览器里打开）时直接跳过。 */
+async function ensurePlayableSource(s, force) {
+  if (!s || !s.path) return false;
+  if (!window.desktop || !window.desktop.prepareBiliAudio) return false;
+  try {
+    const r = await window.desktop.prepareBiliAudio(s.path, !!force);
+    if (r && r.ok && r.url) {
+      const changed = (s.srcUrl !== r.url);
+      s.srcUrl = r.url; s._prepareFailed = false;
+      return changed;
+    }
+    s._prepareFailed = true;
+    console.warn('[音源] 生成可播放副本失败', s.path, r && r.error);
+  } catch (e) { s._prepareFailed = true; }
+  return false;
+}
+/* 启动时把所有"路径型音源"（B 站缓存）统一刷新一遍。
+   为什么不放在 selectSong 里 await：playAt 是"selectSong 之后立刻 play()"，
+   一旦 await 就会拿旧音源起播，时序会乱。放在启动阶段后台跑，既不碰播放时序，
+   又能自动修好旧版本遗留的坏副本（重启不会重写那些文件）。 */
+async function ensureAllPlayable() {
+  if (!window.desktop || !window.desktop.prepareBiliAudio) return 0;
+  let fixed = 0;
+  for (const s of songs) {
+    if (!s.path) continue;
+    const changed = await ensurePlayableSource(s, false);
+    if (changed) { fixed++; idbPut(s); }
+  }
+  return fixed;
+}
+function selectSong(id) {
+  currentId = id;
+  const s = songs.find(x => x.id === id);
+  if (!s) return;
+  if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; }
+  // 路径型音源（B站缓存）用主进程生成的可播放副本地址；其余用 objectURL
+  if (s.srcUrl) {
+    audio.src = s.srcUrl;
+  } else if (s.file) {
+    currentUrl = URL.createObjectURL(s.file);
+    audio.src = currentUrl;
+  }
+  s._triedBlob = false;   // 新歌重置"blob 兜底"标记
+  renderNowPlaying();
+  renderList();
+  setLyrics(s);
+  if (window.desktop) {
+    miniCache.title = s.title; miniCache.artist = s.artist; miniCache.album = s.album; miniCache.cover = s.cover;
+  }
+  updateMiniSongInfo();
+}
+function playAt(i) {
+  if (!songs.length) return;
+  i = ((i % songs.length) + songs.length) % songs.length;
+  selectSong(songs[i].id);
+  audio.currentTime = 0;
+  userPlay = true;
+  const ps = songs[i];
+  ps.plays = (ps.plays || 0) + 1;
+  ps.lastPlayed = Date.now();
+  idbPut(ps);
+  audio.play().catch(() => {});
+  saveState();
+}
+function playRandom() {
+  if (songs.length < 2) { playAt(0); return; }
+  let i; do { i = Math.floor(Math.random() * songs.length); } while (songs[i].id === currentId);
+  playAt(i);
+}
+function queueNext(id) {
+  if (id === currentId) { toast('当前正在播放这首歌'); return; }
+  const i = nextQueue.indexOf(id);
+  if (i >= 0) nextQueue.splice(i, 1);
+  nextQueue.unshift(id);
+  renderList();
+  toast('已设为下一首播放');
+}
+function playNextSong() {
+  if (nextQueue.length) {
+    const id = nextQueue.shift();
+    const s = songs.find(x => x.id === id);
+    if (s) { playAt(songs.indexOf(s)); renderList(); return; }
+  }
+  const i = songs.findIndex(s => s.id === currentId);
+  if (mode === 'shuffle') { playRandom(); return; }
+  if (mode === 'order') { if (i < songs.length - 1) playAt(i + 1); else { renderList(); saveState(); } return; }
+  playAt((i + 1) % songs.length);
+}
+function removeSong(id) {
+  const idx = songs.findIndex(s => s.id === id);
+  if (idx < 0) return;
+  const wasCurrent = id === currentId;
+  songs.splice(idx, 1);
+  idbDelete(id);
+  nextQueue = nextQueue.filter(x => x !== id);
+  if (wasCurrent) {
+    if (songs.length) { selectSong(songs[Math.min(idx, songs.length - 1)].id); audio.currentTime = 0; }
+    else { currentId = null; audio.pause(); audio.removeAttribute('src'); if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; } renderNowPlaying(); }
+  }
+  renderList(); saveState();
+}
+
+$('#playBtn').addEventListener('click', async () => {
+  if (!currentId) { toast('请先添加音乐'); return; }
+  if (audio.paused) { userPlay = true; await ensureCtx(); audio.play().catch(() => toast('无法播放该文件')); }
+  else audio.pause();
+});
+$('#prevBtn').addEventListener('click', () => {
+  if (!songs.length) return;
+  if (audio.currentTime > 3) { audio.currentTime = 0; return; }
+  const i = songs.findIndex(s => s.id === currentId);
+  playAt((i - 1 + songs.length) % songs.length);
+});
+$('#nextBtn').addEventListener('click', () => { if (songs.length) playNextSong(); });
+$('#modeBtn').addEventListener('click', () => {
+  const idx = MODES.findIndex(x => x.key === mode);
+  mode = MODES[(idx + 1) % MODES.length].key;
+  setModeUI(); saveState();
+  toast(MODES.find(x => x.key === mode).label);
+});
+function setModeUI() { const m = MODES.find(x => x.key === mode) || MODES[0]; $('#modeBtn').innerHTML = m.icon; $('#modeBtn').title = '当前：' + m.label; }
+audio.addEventListener('ended', () => { keepVizFast(1000); if (!songs.length) return; if (mode === 'single') { audio.currentTime = 0; audio.play().catch(() => {}); return; } playNextSong(); });
+/* 播放失败必须说出来，并且自己救一次。
+   之前是静默的：文件放不了时只看到进度条不动，完全不知道发生了什么。
+   MediaError: 1 中止 / 2 网络 / 3 解码失败 / 4 格式不支持
+   自救：路径型音源若报"格式不支持"，先用主进程【重建可播放副本】再试；
+        仍不行就退回 blob 方式（主进程读字节 → Blob URL），绕开 file:// 的潜在限制。 */
+let playbackErrorHandling = false;
+audio.addEventListener('error', async () => {
+  const s = songs.find(x => x.id === currentId);
+  const e = audio.error;
+  const code = e ? e.code : 0;
+  const why = code === 4 ? '格式不支持或文件头异常' : code === 3 ? '解码失败' : code === 2 ? '读取失败' : code === 1 ? '读取被中止' : '未知错误';
+  const name = s ? `《${s.title}》` : '当前歌曲';
+  if (s && s.path && window.desktop && window.desktop.prepareBiliAudio && !playbackErrorHandling) {
+    playbackErrorHandling = true;
+    try {
+      toast(`${name}${why}，正在重建可播放副本…`);
+      const r = await window.desktop.prepareBiliAudio(s.path, true);   // true = 强制重建
+      if (r && r.ok && r.url && r.url !== s.srcUrl) {
+        s.srcUrl = r.url; idbPut(s);
+        audio.src = r.url; audio.play().catch(() => {});
+        playbackErrorHandling = false;
+        return;
+      }
+      // 副本没问题 → 试 blob 方式（绕开 file:// 限制）
+      if (!s._triedBlob && window.desktop.readAudio) {
+        s._triedBlob = true;
+        const p = decodeURIComponent(String(s.srcUrl || '').replace(/^file:\/\/\//, ''));
+        const res = await window.desktop.readAudio(p);
+        if (res && res.bytes && res.bytes.byteLength) {
+          if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; }
+          currentUrl = URL.createObjectURL(new Blob([res.bytes], { type: res.mime || 'audio/mp4' }));
+          audio.src = currentUrl; audio.play().catch(() => {});
+          playbackErrorHandling = false;
+          return;
+        }
+      }
+    } catch (err) { /* 落到下面的提示 */ }
+    playbackErrorHandling = false;
+  }
+  toast(`${name}无法播放：${why}${code ? '（MediaError ' + code + '）' : ''}`);
+  if (s && s.srcUrl) console.warn('[播放失败]', s.srcUrl, e);
+});
+audio.addEventListener('timeupdate', () => {
+  const d = audio.duration || 0;
+  $('#curTime').textContent = fmt(audio.currentTime);
+  if (d) setBarUI(audio.currentTime / d * 100);
+  if (lyricsReady) updateLyricsHighlight(false);
+});
+audio.addEventListener('loadedmetadata', () => {
+  keepVizFast(1000);   // 切歌后（尤其是暂停状态下切）让柱子平滑落新歌，而不是硬跳
+  const s = songs.find(x => x.id === currentId);
+  if (s && audio.duration && isFinite(audio.duration)) { s.duration = audio.duration; idbPut(s); $('#durTime').textContent = fmt(audio.duration); }
+});
+audio.addEventListener('play', () => { const el = $('#playBtn'); el.innerHTML = '<svg viewBox="0 0 24 24"><rect x="6.8" y="4.6" width="3.6" height="14.8" rx="1.8"/><rect x="13.6" y="4.6" width="3.6" height="14.8" rx="1.8"/></svg>'; });
+audio.addEventListener('pause', () => { $('#playBtn').innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>'; keepVizFast(1000); scheduleViz(); saveState(); });
+
+/* 进度条拖拽 */
+const bar = $('#bar');
+let seeking = false;
+bar.addEventListener('pointerdown', e => {
+  if (!audio.duration) return;
+  seeking = true; bar.setPointerCapture(e.pointerId);
+  const r = bar.getBoundingClientRect();
+  const pct = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  setBarUI(pct * 100);
+  audio.currentTime = pct * audio.duration;
+});
+bar.addEventListener('pointermove', e => {
+  if (!seeking) return;
+  const r = bar.getBoundingClientRect();
+  const pct = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  setBarUI(pct * 100);
+  audio.currentTime = pct * (audio.duration || 0);
+});
+bar.addEventListener('pointerup', () => { seeking = false; });
+/* 进度条统一更新入口：填充宽度与圆形滑块位置必须一起走，否则滑块会卡在最左端 */
+function setBarUI(pct) {
+  pct = Math.max(0, Math.min(100, pct || 0));
+  const f = $('#barFill'), t = $('#barThumb');
+  if (f) f.style.width = pct + '%';
+  if (t) t.style.left = pct + '%';
+}
+/* 音量 */
+function setVolume(v, fromUI) {
+  volume = Math.max(0, Math.min(1, v));
+  audio.volume = volume;
+  $('#volFill').style.width = (volume * 100) + '%';
+  $('#vicon').textContent = volume === 0 ? '🔇' : (volume < 0.5 ? '🔉' : '🔊');
+  if (fromUI) saveState();
+}
+$('#vicon').addEventListener('click', () => setVolume(audio.volume > 0 ? 0 : (volume || 0.7), true));
+$('#volBar').addEventListener('pointerdown', e => {
+  const r = $('#volBar').getBoundingClientRect();
+  setVolume((e.clientX - r.left) / r.width, true);
+  $('#volBar').setPointerCapture(e.pointerId);
+  const mv = ev => setVolume((ev.clientX - r.left) / r.width, true);
+  const up = () => { $('#volBar').removeEventListener('pointermove', mv); };
+  $('#volBar').addEventListener('pointermove', mv);
+  $('#volBar').addEventListener('pointerup', up, { once: true });
+});
+
+/* 变速 */
+const SPEEDS = [1, 1.25, 1.5, 2, 0.75, 0.5];
+function applySpeedUI() { $('#speedBtn').textContent = speed + 'x'; audio.playbackRate = speed; }
+$('#speedBtn').addEventListener('click', () => {
+  const i = SPEEDS.indexOf(speed);
+  speed = SPEEDS[(i + 1) % SPEEDS.length];
+  applySpeedUI();
+  try { localStorage.setItem('mp_speed', speed); } catch (e) {}
+  toast('播放速度：' + speed + 'x');
+});
+
+/* 收藏 */
+function toggleFav(id) {
+  const s = songs.find(x => x.id === id);
+  if (!s) return;
+  s.fav = !s.fav;
+  idbPut(s);
+  renderList(); renderNowPlaying();
+  toast(s.fav ? '已收藏 ♥' : '已取消收藏');
+}
+$('#favBtn').addEventListener('click', () => { if (currentId) toggleFav(currentId); });
+$('#bigFavBtn').addEventListener('click', () => { if (currentId) toggleFav(currentId); });
+$('#favFilterBtn').addEventListener('click', () => {
+  favOnly = !favOnly;
+  $('#favFilterBtn').classList.toggle('on', favOnly);
+  renderList();
+});
+
+/* ================= 媒体会话（耳机按键） =================
+   单击 = 播放/暂停；双击 = 下一首；三击 = 上一首（系统把耳机按键映射为媒体键）。
+   两条通路都汇入 handleMediaKey()：
+     ① Media Session API（Chromium 媒体键 → SMTC，需 main.js 开启 HardwareMediaKeyHandling）
+     ② 主进程 globalShortcut（系统级 RegisterHotKey，独占全屏游戏里也能用）
+   300ms 防抖保证两条通路同时触发时只执行一次，不会"双击跳两首"。 */
+let lastMediaKeyT = 0;
+function handleMediaKey(action) {
+  const now = performance.now();
+  if (now - lastMediaKeyT < 300) return; // 防抖：合并两条通路的重复触发
+  lastMediaKeyT = now;
+  if (action === 'play' || action === 'playpause') {
+    if (audio.paused) $('#playBtn').click(); else audio.pause();
+  } else if (action === 'pause') {
+    if (!audio.paused) audio.pause();
+  } else if (action === 'next') {
+    $('#nextBtn').click();
+  } else if (action === 'prev') {
+    $('#prevBtn').click();
+  }
+}
+function setupMediaSession() {
+  // 主进程 globalShortcut 通路（耳机键／媒体键）
+  if (window.desktop && window.desktop.on) {
+    window.desktop.on('media-key', a => handleMediaKey(a));
+  }
+  if (!('mediaSession' in navigator)) return;
+  try {
+    navigator.mediaSession.setActionHandler('play', () => handleMediaKey('play'));
+    navigator.mediaSession.setActionHandler('pause', () => handleMediaKey('pause'));
+    navigator.mediaSession.setActionHandler('nexttrack', () => handleMediaKey('next'));
+    navigator.mediaSession.setActionHandler('previoustrack', () => handleMediaKey('prev'));
+    navigator.mediaSession.setActionHandler('seekbackward', () => { audio.currentTime = Math.max(0, audio.currentTime - 5); });
+    navigator.mediaSession.setActionHandler('seekforward', () => { audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + 5); });
+  } catch (e) {}
+}
+function updateMediaSessionMeta(s) {
+  if (!('mediaSession' in navigator) || !window.MediaMetadata) return;
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({ title: (s && s.title) || '音乐播放器', artist: (s && s.artist) || '', album: (s && s.album) || '' });
+    navigator.mediaSession.playbackState = (!s) ? 'none' : (audio.paused ? 'paused' : 'playing');
+  } catch (e) {}
+}
+
+/* ================= 播放列表渲染 ================= */
+function renderList() {
+  const list = $('#list');
+  list.innerHTML = '';
+  $('#listBtnCount').textContent = songs.length;
+  let view = songs.slice();
+  if (favOnly) view = view.filter(s => s.fav);
+  if (sortMode === 'title') view.sort((a, b) => normalizeStr(a.title).localeCompare(normalizeStr(b.title), 'zh'));
+  else if (sortMode === 'recent') view.sort((a, b) => (b.lastPlayed || 0) - (a.lastPlayed || 0));
+  else if (sortMode === 'artist') view.sort((a, b) => normalizeStr(a.artist).localeCompare(normalizeStr(b.artist), 'zh'));
+  else if (sortMode === 'album') view.sort((a, b) => normalizeStr(a.album).localeCompare(normalizeStr(b.album), 'zh'));
+  else if (sortMode === 'plays') view.sort((a, b) => (b.plays || 0) - (a.plays || 0));
+  else view.sort((a, b) => (a.order || 0) - (b.order || 0));
+  const tip = $('#emptyTip');
+  if (!view.length) {
+    tip.style.display = 'block';
+    tip.innerHTML = favOnly && songs.length ? '<span class="big">💜</span>收藏夹还是空的' : '<span class="big">🎵</span>列表还是空的<br>点击「添加音乐」或拖入音频文件';
+  } else tip.style.display = 'none';
+  for (const s of view) {
+    const item = document.createElement('div');
+    item.className = 'item' + (s.id === currentId ? ' active' : '');
+    item.innerHTML = `
+      <span class="idx"></span>
+      <div class="thumb"><img src="${s.cover}" alt="" loading="lazy"></div>
+      <div class="info"><div class="t"></div><div class="m"></div></div>
+      <span class="dur"></span>
+      <button class="playnext${nextQueue.includes(s.id) ? ' on' : ''}" title="下一首播放"><svg viewBox="0 0 24 24"><path d="M3.6 7.2h11.6"/><path d="M3.6 12h7.6"/><path d="M3.6 16.8h11.6"/><path d="M17.4 10.4 21.4 14l-4 3.6z"/></svg></button>
+      <button class="edit" title="编辑歌曲信息（修正识别错的歌名/歌手/封面）"><svg viewBox="0 0 24 24"><path d="M4 20h4.2L20.2 8 16 3.8 4 15.8z"/><path d="M14.6 5.4 18.8 9.6"/></svg></button>
+      <button class="del" title="从列表移除"><svg viewBox="0 0 24 24"><path d="M6.4 6.4 17.6 17.6"/><path d="M17.6 6.4 6.4 17.6"/></svg></button>`;
+    // 网易云那种行首序号：正在播放的那行显示小喇叭
+    item.querySelector('.idx').textContent = (s.id === currentId) ? '♪' : String(view.indexOf(s) + 1);
+    item.querySelector('.t').textContent = s.title;
+    item.querySelector('.m').textContent = `${s.artist} · ${s.album}${(s.plays || 0) > 0 ? ` · ♪${s.plays}次` : ''}`;
+    item.querySelector('.dur').textContent = s.duration && isFinite(s.duration) ? fmt(s.duration) : '--:--';
+    item.addEventListener('click', () => {
+      if (s.id === currentId && !audio.paused) { audio.pause(); return; }
+      playAt(songs.indexOf(s));
+    });
+    item.querySelector('.del').addEventListener('click', e => { e.stopPropagation(); removeSong(s.id); });
+    item.querySelector('.playnext').addEventListener('click', e => { e.stopPropagation(); queueNext(s.id); });
+    item.querySelector('.edit').addEventListener('click', e => { e.stopPropagation(); openSongEditor(s.id); });
+    // 右键也能编辑（导入识别错时最顺手）
+    item.addEventListener('contextmenu', e => { e.preventDefault(); openSongEditor(s.id); });
+    list.appendChild(item);
+  }
+}
+
+/* ================= 歌曲信息编辑 =================
+   用途：导入时识别错的歌名/歌手/专辑/封面可以手动改（B站缓存、文件名不规范、ID3 缺失都用得上）。
+   只改列表里的元数据，不动磁盘上的音频文件——原文件保持原样，随时可回退。 */
+let editingId = null;
+let editingCover = null;   // 本次编辑中待保存的封面（dataURL）
+
+function openSongEditor(id) {
+  const s = songs.find(x => x.id === id);
+  if (!s) return;
+  editingId = id;
+  editingCover = s.cover || null;
+  $('#edTitle').value = s.title || '';
+  $('#edArtist').value = s.artist || '';
+  $('#edAlbum').value = s.album || '';
+  $('#edCover').src = editingCover || defaultCover(s.title || '', s.artist || '');
+  const srcName = s.srcUrl ? decodeURIComponent(String(s.srcUrl).replace(/^file:\/\/\//, '')) : (s.name || '');
+  $('#edFileName').textContent = srcName ? '（' + srcName.split(/[\\/]/).pop() + '）' : '';
+  // 音质行：只对 B 站缓存这类有码率信息的歌曲显示
+  const q = s.quality;
+  const qRow = $('#edQualityRow');
+  if (q && (q.kbps || q.sampleRate)) {
+    const ch = q.channels === 1 ? '单声道' : (q.channels === 2 ? '立体声' : (q.channels ? q.channels + '声道' : ''));
+    let txt = `${q.codec || 'AAC'} ${q.sampleRate ? (q.sampleRate / 1000).toFixed(1) + 'kHz' : ''} ${ch}`.trim();
+    txt += ` · 约 ${q.kbps}kbps`;
+    if (q.candidates > 1) {
+      txt += `　（该集有 ${q.candidates} 档音轨，已选最高：目录 ${q.tag}）`;
+      const alt = (q.others || []).map(o => o.tag).join('/');
+      if (alt) txt += `，其余：${alt}`;
+    } else if (q.tag) {
+      txt += `　（目录 ${q.tag}）`;
+    }
+    if (q.kbps && q.kbps < 96) txt += '　⚠ 偏低：缓存里本来就只有这档音质';
+    if (q.bytes) txt += `　文件 ${(q.bytes / 1048576).toFixed(1)}MB${q.durationSec ? ' / ' + Math.floor(q.durationSec / 60) + ':' + String(q.durationSec % 60).padStart(2, '0') : ''}`;
+    $('#edQuality').textContent = txt;
+    qRow.style.display = '';
+  } else {
+    qRow.style.display = 'none';
+  }
+  $('#editMask').classList.add('show');
+  setTimeout(() => $('#edTitle').focus(), 30);
+}
+function closeSongEditor() {
+  $('#editMask').classList.remove('show');
+  editingId = null; editingCover = null;
+}
+/* 保存后要把所有跟这首歌有关的地方都刷新一遍：列表、正在播放、小窗、系统媒体信息 */
+function applySongMeta(s) {
+  idbPut(s);
+  renderList();
+  if (s.id === currentId) {
+    renderNowPlaying();
+    if (window.desktop) {
+      miniCache.title = s.title; miniCache.artist = s.artist; miniCache.album = s.album; miniCache.cover = s.cover;
+      updateMiniSongInfo();
+    }
+    if (typeof updateMediaSessionMeta === 'function') updateMediaSessionMeta(s);
+  }
+  if (typeof miniVisible !== 'undefined' && miniVisible) pushMiniState();
+}
+$('#edCancel').addEventListener('click', closeSongEditor);
+$('#editMask').addEventListener('click', e => { if (e.target === $('#editMask')) closeSongEditor(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('#editMask').classList.contains('show')) closeSongEditor();
+  // 弹层里回车 = 保存
+  if (e.key === 'Enter' && $('#editMask').classList.contains('show') && e.target && e.target.tagName === 'INPUT' && e.target.type === 'text') {
+    e.preventDefault(); $('#edSave').click();
+  }
+});
+/* 取内嵌封面：NCM / MP3(ID3v2 APIC) / FLAC(PICTURE) / M4A(covr) / OGG / WAV / APE 全走同一条路，
+   主进程读文件、按格式精确定位（封面在标签深处也照样取到）；实在没有内嵌图，
+   退回同目录的 cover/folder/front… 图片。
+   优先用导入时记下的原始路径（.ncm 的 ncmPath 或本地文件的 filePath）；
+   路径没了（被移走/改名）或这条路上什么都没有，就让用户手动选一个文件。 */
+const COVER_SRC_LABEL = { ncm: '文件自带封面', id3v2: 'MP3/ID3 内嵌封面', flac: 'FLAC 内嵌封面', mp4: 'M4A 内嵌封面', vorbis: 'OGG 内嵌封面', riff: 'WAV 内嵌封面', ape: 'APE 标签封面', sibling: '同目录封面图片' };
+function coverSourceLabel(src) {
+  const tail = String(src || '').split(':').pop();
+  return COVER_SRC_LABEL[tail] || '内嵌封面';
+}
+async function takeCoverFromFile(song, filePath, allowFallback) {
+  const api = window.desktop && (window.desktop.readCover || window.desktop.ncmCover);
+  if (!api) { toast('取内嵌封面需在桌面版使用'); return; }
+  let res = null, usedName = '';
+  try {
+    if (filePath) {
+      toast('正在读取内嵌封面…');
+      res = await (window.desktop.readCover ? window.desktop.readCover({ path: filePath }) : window.desktop.ncmCover({ path: filePath }));
+      usedName = filePath.split(/[\\/]/).pop();
+      /* 路径是导入时记下的，文件可能已被移走/改名。取不到就自动接一次手动选择，
+         否则每次点都撞同一个坏路径，用户永远没机会换文件。 */
+      if ((!res || res.error || !res.dataUrl) && allowFallback) {
+        toast('按记录的原路径没取到封面，改手动选一个文件');
+        return takeCoverFromFile(song, null, false);
+      }
+    } else {
+      const f = await new Promise((resolve) => {
+        const inp = $('#edNcmInput');
+        inp.value = '';
+        inp.onchange = () => resolve(inp.files && inp.files[0]);
+        inp.click();
+      });
+      if (!f) return;
+      toast('正在读取内嵌封面…');
+      usedName = f.name;
+      const isNcm = /\.ncm$/i.test(f.name);
+      if (isNcm && !window.desktop.readCover) res = await window.desktop.ncmCover({ bytes: await f.arrayBuffer() });
+      else {
+        // 注意：直接传 ArrayBuffer（结构化克隆），别用 Array.from —— 那会把每个字节变成
+        // 一个 JS 数字再序列化，几十 MB 的无损文件会卡住整个渲染进程。
+        const bytes = await f.arrayBuffer();
+        res = window.desktop.readCover ? await window.desktop.readCover({ bytes: bytes, name: f.name }) : null;
+      }
+    }
+  } catch (e) { toast('读取失败：' + ((e && e.message) || e)); return; }
+  if (!res || res.error || !res.dataUrl) {
+    const why = (res && res.error) || '这个文件里没有内嵌封面，也没有同目录封面图';
+    toast(`没取到封面：${why}（可点「取内嵌封面」换一个文件，或用「换封面…」直接指定图片）`);
+    return;
+  }
+  const data = await coverToDataUrl(res.dataUrl);   // 统一缩到 512×512 JPEG，和别的封面一致
+  if (!data) { toast('封面读出来了，但转换失败'); return; }
+  editingCover = data;
+  $('#edCover').src = data;
+  toast(`已取出${coverSourceLabel(res.source)}：${usedName}（${(res.size / 1024).toFixed(0)}KB ${String(res.mime || '').replace('image/', '')}）`);
+}
+$('#edNcmCover').addEventListener('click', () => {
+  const s = songs.find(x => x.id === editingId);
+  const p = s && (s.ncmPath || s.filePath);
+  takeCoverFromFile(s, p || null, true);   // 有原始路径就直接读这首歌自己的文件；路径失效会自动接手动选择
+});
+$('#edPickCover').addEventListener('click', () => $('#edCoverInput').click());
+$('#edCoverInput').addEventListener('change', async e => {
+  const f = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  const url = URL.createObjectURL(f);
+  const data = await coverToDataUrl(url);
+  URL.revokeObjectURL(url);
+  if (!data) { toast('这张图片读不出来，换一张试试'); return; }
+  editingCover = data;
+  $('#edCover').src = data;
+});
+$('#edResetCover').addEventListener('click', () => {
+  const t = $('#edTitle').value.trim() || '未知歌曲';
+  const a = $('#edArtist').value.trim() || '未知艺术家';
+  editingCover = defaultCover(t, a);
+  $('#edCover').src = editingCover;
+});
+$('#edSave').addEventListener('click', () => {
+  const s = songs.find(x => x.id === editingId);
+  if (!s) { closeSongEditor(); return; }
+  const title = $('#edTitle').value.trim() || '未知歌曲';
+  const artist = $('#edArtist').value.trim() || '未知艺术家';
+  const album = $('#edAlbum').value.trim() || '未知专辑';
+  const changed = (title !== s.title) || (artist !== s.artist) || (album !== s.album) || (editingCover !== s.cover);
+  s.title = title;
+  s.artist = artist;
+  s.album = album;
+  if (editingCover) s.cover = editingCover;
+  applySongMeta(s);
+  closeSongEditor();
+  toast(changed ? `已更新《${title}》的信息` : '信息没有变化');
+});
+// 正在播放面板上的入口：直接编辑当前这首
+$('#npEditBtn').addEventListener('click', () => {
+  if (!currentId) { toast('还没有播放任何歌曲'); return; }
+  openSongEditor(currentId);
+});
+$('#sortSel').addEventListener('change', e => { sortMode = e.target.value; renderList(); });
+/* 播放列表伸缩栏：改用 .collapsed 做宽度过渡（原来是 display:none 的硬切换，没有"伸缩"感），
+   状态写进 localStorage，重开还是上次的样子。 */
+function setDrawerOpen(open, save) {
+  const d = $('#playlistDrawer');
+  if (!d) return;
+  d.classList.remove('hidden');
+  d.classList.toggle('collapsed', !open);
+  const btn = $('#listToggleBtn');
+  if (btn) btn.classList.toggle('on', open);
+  if (save) { try { localStorage.setItem('mp_drawer', open ? '1' : '0'); } catch (e) {} }
+}
+$('#listToggleBtn').addEventListener('click', () => setDrawerOpen($('#playlistDrawer').classList.contains('collapsed'), true));
+try { setDrawerOpen(localStorage.getItem('mp_drawer') === '1', false); } catch (e) { setDrawerOpen(false, false); }
+/* ⚙ 可视化调音弹层（把 5 个滑块收纳起来，播放栏保持干净） */
+const settingsPop = $('#settingsPop');
+$('#settingsBtn').addEventListener('click', (e) => { e.stopPropagation(); settingsPop.classList.toggle('show'); });
+/* ===== 媒体键自检：直接显示注册结果（是"被别的程序占用"还是"正常"） =====
+   注册失败时 Electron 是静默返回 false 的，界面上看不出来；这里把主进程回报的
+   状态显示出来，并每 5 秒复核一次（重试成功后会自动变回"已注册"）。 */
+function refreshHotkeyUI(st) {
+  const el = $('#hkLabel');
+  if (!el || !st) return;
+  const d = st.detail || {};
+  const miss = Object.keys(d).filter((k) => !d[k]);
+  if (st.media) {
+    el.textContent = '✓ 已注册';
+    el.style.color = 'var(--accent)';
+    el.title = '耳机：单击=播放/暂停，双击=下一首，三击=上一首';
+  } else if (st.fallback) {
+    el.textContent = '⚠ 被占用';
+    el.style.color = '#e0a24a';
+    el.title = '媒体键被其他程序占用了' + (miss.length ? '（没拿到：' + miss.join('、') + '）' : '')
+      + '；备用键：Ctrl+Alt+空格 播放/暂停、Ctrl+Alt+N 下一首、Ctrl+Alt+B 上一首';
+  } else {
+    el.textContent = '✕ 全被占用';
+    el.style.color = '#e06b6b';
+    el.title = '媒体键与备用键都被占用' + (miss.length ? '（没拿到：' + miss.join('、') + '）' : '');
+  }
+}
+if (window.desktop && window.desktop.getHotkeyStatus) {
+  const probeHotkey = () => window.desktop.getHotkeyStatus().then(refreshHotkeyUI).catch(() => {});
+  $('#settingsBtn').addEventListener('click', probeHotkey);
+  setInterval(probeHotkey, 5000);
+  probeHotkey();
+}
+document.addEventListener('click', (e) => {
+  if (!settingsPop.classList.contains('show')) return;
+  if (settingsPop.contains(e.target) || e.target === $('#settingsBtn')) return;
+  settingsPop.classList.remove('show');
+});
+/* 点封面 = 编辑这首歌的信息（网易云也是点封面进详情） */
+$('#coverImg').addEventListener('click', () => { if (currentId) openSongEditor(currentId); });
+$('#bigCover').addEventListener('click', (e) => {
+  if (e.target && e.target.id === 'bigFavBtn') return;   // 收藏按钮不触发编辑
+  if (currentId) openSongEditor(currentId);
+});
+/* 歌词显示/隐藏：顶部专区已经为歌词留好位置，默认就是显示，
+   点 🎤 收起（收起后信息行竖直居中，右边不留空洞），状态记住。 */
+function setLyricsShown(on, save) {
+  const box = $('#lyrics'), head = $('#stageHead'), btn = $('#lyrToggleBtn');
+  if (box) box.classList.toggle('hide', !on);
+  if (head) head.classList.toggle('no-lyr', !on);
+  if (btn) btn.classList.toggle('on', !!on);
+  if (save) { try { localStorage.setItem('mp_lyr', on ? '1' : '0'); } catch (e) {} }
+}
+$('#lyrToggleBtn').addEventListener('click', () => setLyricsShown($('#lyrics').classList.contains('hide'), true));
+try { setLyricsShown(localStorage.getItem('mp_lyr') !== '0', false); } catch (e) { setLyricsShown(true, false); }
+
+/* ================= 导入 ================= */
+function songKeys(s) {
+  const set = new Set();
+  const ta = 'ta:' + normalizeStr(s.title) + '|' + normalizeStr(s.artist);
+  set.add(ta);
+  if (s.file) set.add('file:' + (s.name || '').replace(/\.[^.]+$/i, '').toLowerCase() + '|' + (s.file.size || 0));
+  // 路径型音源（B站缓存）用原始路径当键：同名同歌手的不同投稿不会被误判为重复
+  if (s.path) set.add('path:' + s.path.toLowerCase());
+  return set;
+}
+function buildDedupKeys() { const set = new Set(); for (const s of songs) songKeys(s).forEach(k => set.add(k)); return set; }
+function probeDuration(song) {
+  const made = !song.srcUrl;
+  const u = song.srcUrl || URL.createObjectURL(song.file);
+  const a = new Audio();
+  a.addEventListener('loadedmetadata', () => { if (a.duration && isFinite(a.duration)) { song.duration = a.duration; idbPut(song); renderList(); if (song.id === currentId) $('#durTime').textContent = fmt(a.duration); } if (made) URL.revokeObjectURL(u); });
+  a.src = u;
+}
+function coverToDataUrl(src) { return new Promise(res => { const img = new Image(); img.onload = () => { const c = document.createElement('canvas'); const m = 512; c.width = c.height = m; const g = c.getContext('2d'); const s = Math.min(m / img.width, m / img.height); g.drawImage(img, 0, 0, img.width * s, img.height * s); res(c.toDataURL('image/jpeg', 0.85)); }; img.onerror = () => res(null); img.src = src; }); }
+async function addFiles(fileList, fromFolder) {
+  const all = [...fileList];
+  const arr = all.filter(f => (f.type && f.type.startsWith('audio/')) || /\.(mp3|flac|wav|m4a|aac|ogg|opus|webm|aiff?|ncm)$/i.test(f.name));
+  if (!arr.length) { toast('没有找到音频文件'); return; }
+  toast(`正在解析 ${arr.length} 首歌曲…`);
+  const keySet = buildDedupKeys();
+  let added = 0, skipped = 0;
+  for (const f of arr) {
+    let title = '', artist = '', album = '', cover = null;
+    let audioFile = f;
+    let ncmPath = '';   // 原始 .ncm 路径（编辑弹层里"从 NCM 取封面"要用）
+    if (/\.ncm$/i.test(f.name)) {
+      ncmPath = f.path || '';
+      if (window.desktop && window.desktop.convertNcm) {
+        try {
+          const res = await window.desktop.convertNcm(await f.arrayBuffer());
+          if (res && res.error) { toast(`《${f.name}》解密失败：${res.error}`); continue; }
+          const ext = (res && res.ext) || 'mp3';
+          const type = ext === 'flac' ? 'audio/flac' : 'audio/mpeg';
+          audioFile = new File([res.bytes], f.name.replace(/\.ncm$/i, '.' + ext), { type });
+          title = (res && res.title) || ''; artist = (res && res.artist) || ''; album = (res && res.album) || '';
+        } catch (e) { toast(`《${f.name}》解密失败，已跳过`); continue; }
+      } else { toast('NCM 解密需在桌面版使用'); continue; }
+    }
+    try {
+      const buf = await audioFile.slice(0, 1024 * 1024).arrayBuffer();
+      const meta = parseID3Bytes(new Uint8Array(buf));
+      if (!title) title = meta.title || '';
+      if (!artist) artist = meta.artist || '';
+      if (!album) album = meta.album || '';
+      if (!cover) cover = meta.cover || null;
+    } catch (e) {}
+    /* 上面只切了头 1MB 的 ID3（MP3 的 APIC 通常在里面）。
+       没拿到就交给主进程按格式全量找：FLAC 的 PICTURE、M4A 的 covr、被大帧推到深处的 ID3，
+       以及最后的兜底——同目录的 cover/folder/front… 图片。 */
+    if (!cover && window.desktop && window.desktop.readCover && f.path) {
+      try {
+        const rc = await window.desktop.readCover({ path: f.path });
+        if (rc && rc.dataUrl) cover = rc.dataUrl;
+      } catch (e) {}
+    }
+    const fb = niceName(f.name);
+    if (!title) title = fb.title || f.name.replace(/\.[^.]+$/, '');
+    if (!artist) artist = fb.artist || '未知艺术家';
+    if (!album) album = '未知专辑';
+    if (cover) cover = await coverToDataUrl(cover);
+    const song = { id: uid(), name: audioFile.name, file: audioFile, ncmPath: ncmPath || '', filePath: f.path || '', title, artist, album, cover: cover || defaultCover(title, artist), duration: 0, order: orderSeq++ };
+    const sk = songKeys(song);
+    let isDup = false;
+    for (const k of sk) if (keySet.has(k)) { isDup = true; break; }
+    if (isDup) { skipped++; continue; }
+    songs.push(song);
+    sk.forEach(k => keySet.add(k));
+    idbPut(song);
+    probeDuration(song);
+    added++;
+    if (window.desktop && f.path && !song.lrc) {
+      const bindSong = song;
+      window.desktop.findLyrics(f.path, title, artist).then(lrcTxt => {
+        if (lrcTxt && lrcTxt.trim() && !bindSong.lrc) { bindSong.lrc = lrcTxt; idbPut(bindSong); if (bindSong.id === currentId) setLyrics(bindSong); toast(`已为《${bindSong.title}》绑定歌词`); }
+      }).catch(() => {});
+    }
+  }
+  renderList();
+  if (!currentId && songs.length) selectSong(songs[0].id);
+  const extra = skipped ? `，跳过重复 ${skipped} 首` : '';
+  toast(`导入完成：新增 ${added} 首${extra}`);
+}
+$('#addBtn').addEventListener('click', () => $('#fileInput').click());
+$('#fileInput').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
+$('#folderBtn').addEventListener('click', () => $('#folderInput').click());
+$('#folderInput').addEventListener('change', e => { addFiles(e.target.files, true); e.target.value = ''; });
+
+/* ================= B 站缓存导入 =================
+   缓存文件夹里只有 entry.json（歌名/歌手/封面链接）+ audio.m4s，
+   解析在桌面主进程完成（见 main.js / bili.js），这里只负责落进播放列表。
+   audio.m4s 不能直接喂给 <audio>（Chromium 按扩展名判类型，.m4s 会被拒），
+   主进程已建好同名 .m4a 硬链接，所以这里拿到的是可播放的 file:// 地址。 */
+async function addBiliSongs(items) {
+  const keySet = buildDedupKeys();
+  let added = 0, skipped = 0;
+  for (const it of items) {
+    const title = (it.title || '').trim() || '未知歌曲';
+    const artist = (it.artist || '').trim() || '未知艺术家';
+    const song = {
+      id: uid(),
+      name: (it.title || 'audio') + '.m4a',
+      srcUrl: it.path,                 // 路径型音源（不走 File 对象）
+      path: it.audioPath || '',        // 原始 audio.m4s 路径，用于持久化与重新建链
+      title,
+      artist,
+      album: it.album || 'B站缓存',
+      cover: it.cover || defaultCover(title, artist),
+      duration: it.durationHint || 0,   // 电脑端 videoInfo.json 直接给了时长，先填上
+      order: orderSeq++,
+      quality: it.quality || null      // 音质（码率/采样率/声道 + 是哪个清晰度目录）
+    };
+    const sk = songKeys(song);
+    let isDup = false;
+    for (const k of sk) if (keySet.has(k)) { isDup = true; break; }
+    if (isDup) { skipped++; continue; }
+    songs.push(song);
+    sk.forEach(k => keySet.add(k));
+    idbPut(song);
+    probeDuration(song);
+    added++;
+  }
+  renderList();
+  if (!currentId && songs.length) selectSong(songs[0].id);
+  const extra = skipped ? `，跳过重复 ${skipped} 首` : '';
+  const needFix = items.filter(it => !it.title || it.title === '未知歌曲' || !it.artist || it.artist === '未知艺术家').length;
+  // 音质汇总：B 站缓存里同一集可能有多档音轨，现在会挑最高的那档，这里把实际码率报出来
+  const kbps = items.map(it => (it.quality && it.quality.kbps) || 0).filter(v => v > 0);
+  let qmsg = '';
+  if (kbps.length) {
+    const lo = Math.min.apply(null, kbps), hi = Math.max.apply(null, kbps);
+    qmsg = `；音质 ${lo === hi ? hi : lo + '~' + hi}kbps`;
+    const up = items.filter(it => it.quality && it.quality.candidates > 1).length;
+    if (up) qmsg += `（${up} 首有多个清晰度候选，已自动选最高的）`;
+    if (lo < 96) {
+      qmsg += `；有 ${kbps.filter(v => v < 96).length} 首低于 96kbps —— 这是缓存里本来就只有低音质，`
+        + `软件补不回信息，需要重新按更高清晰度缓存后重导（点 ✎ 可查看每首的音质）`;
+    }
+  }
+  toast(`B站缓存导入：新增 ${added} 首${extra}${qmsg}${needFix ? `；有 ${needFix} 首信息没识别准，点 ✎ 改` : ''}`);
+}
+$('#biliBtn').addEventListener('click', async () => {
+  if (!window.desktop || !window.desktop.scanBiliCache) { toast('B站缓存导入需在桌面版使用'); return; }
+  toast('正在扫描 B 站缓存…');
+  let res = null;
+  try { res = await window.desktop.scanBiliCache(); }
+  catch (e) { toast('扫描失败：' + ((e && e.message) || e)); return; }
+  if (!res) { toast('扫描失败'); return; }
+  if (res.canceled) { toast('已取消'); return; }
+  if (res.error) { toast('扫描出错：' + res.error); return; }
+  const items = res.items || [];
+  if (!items.length) { toast('没有找到 B 站缓存（需要 entry.json 或 audio.m4s）'); return; }
+  await addBiliSongs(items);
+});
+$('#clearBtn').addEventListener('click', async () => {
+  if (!songs.length) return;
+  if (!confirm('确定清空整个播放列表吗？')) return;
+  await idbClear();
+  songs = []; nextQueue = []; currentId = null; orderSeq = 0;
+  audio.pause(); if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; } audio.removeAttribute('src');
+  localStorage.removeItem('mp_state');
+  renderList(); renderNowPlaying();
+});
+
+/* 拖放 */
+let dragDepth = 0;
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('dragenter', e => { e.preventDefault(); dragDepth++; document.body.classList.add('dragging'); });
+window.addEventListener('dragleave', e => { e.preventDefault(); dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) document.body.classList.remove('dragging'); });
+window.addEventListener('drop', e => {
+  e.preventDefault(); dragDepth = 0; document.body.classList.remove('dragging');
+  const files = e.dataTransfer && e.dataTransfer.files ? [...e.dataTransfer.files] : [];
+  if (files.length) addFiles(files);
+});
+
+/* 快捷键 */
+document.addEventListener('keydown', e => {
+  if (e.target.matches('input,textarea,select')) return;
+  if (e.code === 'Space') { e.preventDefault(); $('#playBtn').click(); }
+  else if (e.code === 'ArrowRight') { audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + 5); }
+  else if (e.code === 'ArrowLeft') { audio.currentTime = Math.max(0, audio.currentTime - 5); }
+  else if (e.code === 'ArrowUp') { e.preventDefault(); setVolume(audio.volume + 0.05, true); }
+  else if (e.code === 'ArrowDown') { e.preventDefault(); setVolume(audio.volume - 0.05, true); }
+  else if (e.key.toLowerCase() === 'm') { $('#vicon').click(); }
+  else if (e.key.toLowerCase() === 'l') { $('#listToggleBtn').click(); }
+  else if (e.key.toLowerCase() === 'f') { if (currentId) toggleFav(currentId); }
+});
+
+/* ================= 桌面悬浮小窗 ================= */
+let miniVisible = false;
+const miniCache = { title: '', artist: '', album: '', cover: '', lyric: '' };
+function updateMiniSongInfo() {
+  const s = songs.find(x => x.id === currentId);
+  if (s) { miniCache.title = s.title; miniCache.artist = s.artist; miniCache.album = s.album; miniCache.cover = s.cover; }
+  pushMiniMeta(true);   // 换歌/改信息：强制推一次元数据（封面、标题变了）
+}
+$('#miniToggleBtn').addEventListener('click', () => {
+  if (!window.desktop) { toast('悬浮小窗需在桌面版使用'); return; }
+  miniVisible = !miniVisible;
+  $('#miniToggleBtn').classList.toggle('on', miniVisible);
+  window.desktop.send(miniVisible ? 'mini-open' : 'mini-close');
+  if (miniVisible) {
+    /* 小窗刚创建，页面还没加载好：稍等再推首帧（否则第一条 meta 丢了，
+       小窗会一直停在占位状态）。之后只靠"变化才发"的 meta + 每帧 bars。 */
+    miniMetaKey = '';
+    setTimeout(() => { pushMiniMeta(true); pushMiniBars(); }, 300);
+    setTimeout(() => { pushMiniMeta(true); pushMiniBars(); }, 900);
+  }
+});
+function pushMiniState() {
+  // 兼容入口：现在拆成两条通道。meta 只在变化时发，bars 每帧发且用 Float32Array。
+  pushMiniMeta();
+  pushMiniBars();
+}
+let miniMetaKey = '';
+/* 只在"会变的东西"真的变了才发（换歌/换主题/换封面）。原来每帧都发这一包，
+   里面还带着几百 KB 的封面 data URL —— 每秒几十 MB 的 IPC，是整机卡顿的主因之一。 */
+function pushMiniMeta(force) {
+  if (!miniVisible || !window.desktop) return;
+  const curTheme = THEMES.find(t => t.key === theme) || THEMES[0];
+  const meta = {
+    title: miniCache.title || '',
+    artist: miniCache.artist || '',
+    album: miniCache.album || '',
+    cover: miniCache.cover || '',
+    c1: accentLight, c2: accentStrong,
+    barsN: BAR_N,
+    light: !!(curTheme && curTheme.light)
+  };
+  const key = meta.title + '\u0001' + meta.artist + '\u0001' + meta.album + '\u0001' + meta.light + '\u0001' + meta.c1 + '\u0001' + meta.c2 + '\u0001' + meta.barsN + '\u0001' + (meta.cover ? meta.cover.length + ':' + meta.cover.slice(-24) : '');
+  if (!force && key === miniMetaKey) return;
+  miniMetaKey = key;
+  window.desktop.send('mini-meta', meta);
+}
+/* 每帧发：96 根柱用 Float32Array（结构化克隆是整体拷贝，比 Array.from 的普通数组便宜得多），
+   其余只有几个标量。不再包含封面/标题等不变内容。 */
+function pushMiniBars() {
+  if (!miniVisible || !window.desktop) return;
+  let lyric = '';
+  if (lyricsReady) { const t = audio.currentTime; for (let i = 0; i < lyrics.length; i++) if (lyrics[i].t <= t) lyric = lyrics[i].text; else break; }
+  window.desktop.send('mini-bars', {
+    /* 柱形用普通数组：Electron 的 IPC 在带 transfer list 时会"搬运" ArrayBuffer，
+       复用同一个 Float32Array 有被 detach 的风险（之后 set() 就写进失效缓冲区，小窗永远空白），
+       而这个沙箱跑不了 Electron，我无法实测它的行为 —— 那就选验证过能工作的那条路。
+       每帧只多 96 个数的序列化（几十 KB/秒），与"封面几百 KB × 50 次/秒"不在一个量级。 */
+    bars: Array.from(bars), barsN: BAR_N,   // 同时带 barsN：小窗不依赖 meta 是否先到
+    t: audio.currentTime, d: audio.duration || 0,
+    p: !audio.paused, l: lyric || '♪'
+  });
+}
+
+/* ================= 渲染模式 / GPU 状态 ================= */
+(function initRenderMode() {
+  let cur = 'gpu';
+  try { cur = localStorage.getItem('mp_renderMode') || 'gpu'; } catch (e) {}
+  const btn = $('#renderModeBtn');
+  btn.innerHTML = (cur === 'software' ? IC.soft + ' 软件' : IC.gpu + ' GPU');
+  btn.addEventListener('click', () => {
+    const next = cur === 'gpu' ? 'software' : 'gpu';
+    cur = next;
+    try { localStorage.setItem('mp_renderMode', next); } catch (e) {}
+    btn.innerHTML = (next === 'software' ? IC.soft + ' 软件' : IC.gpu + ' GPU');
+    if (window.desktop && window.desktop.setRenderMode) window.desktop.setRenderMode(next);
+    toast(next === 'software' ? '已切换软件渲染，重启应用生效' : '已切回 GPU 渲染，重启应用生效');
+  });
+  if (window.desktop && window.desktop.getGpuStatus) {
+    window.desktop.getGpuStatus().then(s => {
+      const f = $('#fpsReadout');
+      if (f && s) {
+        const fe = s.features || {};
+        f.title = '2D画布:' + (fe['2d_canvas'] || '?') + ' | 合成:' + (fe.gpu_compositing || '?') + ' | 光栅化:' + (fe.gpu_rasterization || '?');
+      }
+    }).catch(() => {});
+  }
+  if (window.desktop && window.desktop.getDisplayInfo) {
+    window.desktop.getDisplayInfo().then(d => {
+      if (d && d.refreshRate >= 30) { const f = $('#fpsReadout'); if (f) f.title = (f.title ? f.title + ' | ' : '') + Math.round(d.refreshRate) + 'Hz屏'; }
+    }).catch(() => {});
+  }
+})();
+
+/* ================= 初始化 ================= */
+(async function init() {
+  try { db = await idbOpen(); } catch (e) { toast('无法访问浏览器存储，列表将不会被保存'); }
+  try {
+    const stored = await idbGetAll();
+    songs = stored.sort((a, b) => (a.order || 0) - (b.order || 0));
+    orderSeq = songs.length ? Math.max(...songs.map(s => s.order || 0)) + 1 : 0;
+    for (const s of songs) if (!s.cover) s.cover = defaultCover(s.title, s.artist);
+  } catch (e) {}
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem('mp_state') || 'null'); } catch (e) {}
+  if (saved) {
+    if (MODES.some(m => m.key === saved.mode)) mode = saved.mode;
+    if (typeof saved.volume === 'number' && isFinite(saved.volume)) volume = saved.volume;
+    audio.volume = volume;
+  }
+  let savedTheme = 'auto';
+  try { savedTheme = localStorage.getItem('mp_theme') || 'auto'; } catch (e) {}
+  applyTheme(savedTheme);
+  try { const sp = parseFloat(localStorage.getItem('mp_speed')); if (SPEEDS.includes(sp)) speed = sp; } catch (e) {}
+  try { const sm = localStorage.getItem('mp_sort'); if (sm) sortMode = sm; } catch (e) {}
+  try { const vz = localStorage.getItem('mp_viz'); if (VIZ_MODES.some(m => m.key === vz)) vizMode = vz; } catch (e) {}
+  try { const tl = parseInt(localStorage.getItem('mp_tilt'), 10); if (tl >= 0 && tl <= 100) { tiltStrength = tl; $('#tiltSlider').value = tl; } } catch (e) {}
+  // 左峰宽：恢复上次的 σ，并把 bandBoost 按它重建一次（bandBoost 初值用的是默认 σ）
+  try {
+    const bw = parseInt(localStorage.getItem('mp_bassw2'), 10);
+    if (bw >= 20 && bw <= 80) { $('#bassWSlider').value = bw; applyBassSigma(bw); }
+    else refreshBassWidthUI();
+  } catch (e) { refreshBassWidthUI(); }
+  // 抖动强度：恢复上次的倍率
+  try {
+    const jv = parseInt(localStorage.getItem('mp_jit2'), 10);
+    if (jv >= 40 && jv <= 200) { $('#jitSlider').value = jv; applyJitterK(jv / 100); }
+    else refreshJitterUI();
+  } catch (e) { refreshJitterUI(); }
+  // 鼓点强度：恢复上次的倍率
+  try {
+    const kv = parseInt(localStorage.getItem('mp_kick2'), 10);
+    if (kv >= 0 && kv <= 60) { $('#kickSlider').value = kv; applyKickGain(kv / 100); }
+    else applyKickGain(kickPump);
+  } catch (e) { applyKickGain(kickPump); }
+  // 倾斜/宽度都恢复完之后，按最终倾斜值重建一次低频增益（保证"静态总增益≈目标"成立）
+  rebuildBandBoost();
+  refreshBassWidthUI();
+  // 左峰静态高度
+  try {
+    const pv = parseInt(localStorage.getItem('mp_peakh'), 10);
+    if (pv >= 55 && pv <= 145) { $('#peakSlider').value = pv; applyPeakTarget(pv / 100); }
+    else applyPeakTarget(bassGainTarget);
+  } catch (e) { applyPeakTarget(bassGainTarget); }
+  applySpeedUI();
+  setModeUI();
+  setVizModeUI();
+  setVolume(volume, false);
+  setupMediaSession();
+  /* 媒体键可能注册失败：大型游戏会自己占用 MediaPlayPause 等键，RegisterHotKey 拿不到。
+     以前这是静默的 —— 耳机键突然没反应、程序里毫无痕迹。现在主进程回报状态，这里提示备用键。
+     注意：**不做键盘钩子（WH_KEYBOARD_LL）去硬抢** —— 带反作弊的游戏会把全局钩子判定为外挂，
+     风险远大于收益。 */
+  if (window.desktop && window.desktop.on) {
+    window.desktop.on('hotkey-status', (st) => {
+      refreshHotkeyUI(st);
+      if (!st || st.media) return;
+      const miss = Object.keys(st.detail || {}).filter((k) => !st.detail[k]);
+      setTimeout(() => {
+        toast('耳机媒体键被别的程序占用了；可改用 Ctrl+Alt+空格 播放/暂停、Ctrl+Alt+N 下一首、Ctrl+Alt+B 上一首'
+          + (miss.length ? '（没拿到：' + miss.slice(0, 3).join('、') + '）' : ''));
+      }, 1200);
+    });
+    window.desktop.on('mini-lock-changed', (v) => {
+      toast(v ? '小窗已锁定穿透（不挡鼠标、游戏里不误点）—— 按 Ctrl+Alt+L 解锁' : '小窗已解锁：可拖动、可点');
+    });
+  }
+  renderList();
+  /* 先把路径型音源（B 站缓存）统一刷新成"可播放副本"，再恢复上次播放位置 ——
+     否则会用旧的（坏掉的）地址起播，表现就是"一打开就报格式不支持"。 */
+  ensureAllPlayable().then((fixed) => {
+    if (fixed) { renderList(); toast(`已修复 ${fixed} 首 B 站缓存的音源`); }
+    if (saved && songs.some(s => s.id === saved.id)) {
+      const t = (typeof saved.time === 'number' && isFinite(saved.time)) ? saved.time : 0;
+      selectSong(saved.id);
+      if (t > 0) { audio.currentTime = t; }
+    } else if (songs.length) {
+      selectSong(songs[0].id);
+    } else {
+      renderNowPlaying();
+    }
+  });
+  resizeViz();
+  window.addEventListener('resize', resizeViz);
+  scheduleViz();
+  window.addEventListener('pagehide', saveState);
+  window.addEventListener('beforeunload', saveState);
+  audio.addEventListener('seeked', saveState);
+})();
+})();
+</script>
+</body>
+</html>

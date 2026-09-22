@@ -1,0 +1,30 @@
+# 默认：由 git 自动判断文本/二进制，并在提交时统一为 LF
+* text=auto eol=lf
+
+# Windows 脚本用 CRLF，方便记事本 / PowerShell ISE 打开
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制：不做行尾转换，也不参与 diff
+*.exe binary
+*.dll binary
+*.pak binary
+*.bin binary
+*.dat binary
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.zip binary
+*.7z binary
+
+# 徽章 / 统计：让 GitHub 识别为文档而非代码
+*.md linguist-documentation
+docs/** linguist-documentation
+LICENSE linguist-documentation
+
+# 生成的产物不参与语言统计
+dist/** linguist-vendored

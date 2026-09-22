@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小窗</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html,body{height:100%;}
+  body{
+    font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;
+    background:transparent;color:#e8ecf6;overflow:hidden;
+    -webkit-user-select:none;user-select:none;border-radius:16px;
+  }
+  .card{
+    height:100%;display:flex;flex-direction:column;gap:10px;padding:14px;
+    background:linear-gradient(160deg,#1c2438,#141828 60%);
+    backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);
+    border:1px solid rgba(255,255,255,.08);border-radius:16px;
+  }
+  .row{display:flex;align-items:center;gap:10px;cursor:move;-webkit-app-region:drag;app-region:drag;} /* 原生拖动，系统直接拖窗，完全跟手 */
+  .cover{width:46px;height:46px;border-radius:10px;object-fit:cover;background:#0e1322;flex:none;}
+  .meta{flex:1;min-width:0;}
+  .title{font-size:14px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .artist{font-size:11px;color:#9aa5c0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;}
+  .btns{display:flex;align-items:center;gap:6px;-webkit-app-region:no-drag;app-region:no-drag;}
+  button{
+    width:30px;height:30px;border:none;border-radius:50%;background:rgba(255,255,255,.08);
+    color:#e8ecf6;font-size:13px;cursor:pointer;line-height:1;display:inline-flex;
+    align-items:center;justify-content:center;transition:background .15s;
+  }
+  button:hover{background:rgba(255,255,255,.16);}
+  #playBtn{width:38px;height:38px;font-size:15px;background:linear-gradient(135deg,#7c6cf0,#5f8bf0);}
+  #closeBtn{position:absolute;top:8px;right:8px;width:22px;height:22px;font-size:10px;
+    background:rgba(255,255,255,.06);color:#9aa5c0;-webkit-app-region:no-drag;app-region:no-drag;}
+  /* 穿透锁定：锁上后整窗不挡鼠标（此时用 Ctrl+Alt+L 解锁，因为窗口已经不吃点击了） */
+  #lockBtn{position:absolute;top:8px;right:34px;width:22px;height:22px;font-size:10px;
+    background:rgba(255,255,255,.06);color:#9aa5c0;-webkit-app-region:no-drag;app-region:no-drag;}
+  #lockBtn.on{background:hsla(250 85% 68% / .4);color:#fff;}
+  /* ===== 简约线性图标（与主窗口同一套）：统一描边、圆头、跟随文字颜色 ===== */
+  button svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;
+    stroke-linecap:round;stroke-linejoin:round;flex:none;pointer-events:none;}
+  #playBtn svg{width:17px;height:17px;fill:currentColor;stroke:none;}
+  #closeBtn svg,#lockBtn svg{width:13px;height:13px;}
+  .card{position:relative;}
+  #viz{width:100%;flex:1 1 0;min-height:28px;border-radius:9px;background:rgba(255,255,255,.05);display:block;margin-top:4px;}
+  .lyr{height:22px;overflow:hidden;font-size:12px;color:#9aa5c0;white-space:nowrap;position:relative;}
+  .lyr .scroll{display:inline-block;white-space:nowrap;animation:marquee var(--mdur,8s) linear infinite alternate;}
+  @keyframes marquee{from{transform:translateX(0);}to{transform:translateX(var(--mshift,-100%));}}
+  .prog{height:4px;background:rgba(255,255,255,.12);border-radius:2px;cursor:pointer;-webkit-app-region:no-drag;app-region:no-drag;}
+  #fill{height:100%;width:0;background:linear-gradient(90deg,#7c6cf0,#5f8bf0);border-radius:2px;}
+  .foot{display:flex;align-items:center;gap:10px;-webkit-app-region:no-drag;app-region:no-drag;}
+  input[type=range]{flex:1;appearance:none;height:3px;background:rgba(255,255,255,.15);border-radius:2px;outline:none;}
+  input[type=range]::-webkit-slider-thumb{appearance:none;width:12px;height:12px;border-radius:50%;background:#7c6cf0;cursor:pointer;}
+  .grip{position:absolute;right:3px;bottom:3px;width:16px;height:16px;cursor:nwse-resize;
+    background:linear-gradient(135deg,transparent 50%,rgba(255,255,255,.35) 50%);-webkit-app-region:no-drag;app-region:no-drag;}
+
+  /* ===== 自适应：小窗可以被拖到很小，靠这几档把内容让出来 =====
+     原来的最小值 270×280 完全由内容撑出来（封面 46 + 4 个按钮 + 歌词行 + 进度条 + 透明度条），
+     默认 330×356 只能缩 60×76 px，用户感觉"只能放大不能缩小"。
+     现在分档：先缩小间距与控件，再依次牺牲封面 → 歌词 → 透明度条 → 进度条，
+     画布本身始终保留（它是小窗的主角）。 */
+  @media (max-width: 306px){
+    .card{gap:7px;padding:10px;border-radius:13px;}
+    .row{gap:7px;}
+    .cover{width:36px;height:36px;border-radius:8px;}
+    .btns{gap:4px;}
+    button{width:26px;height:26px;font-size:12px;}
+    #playBtn{width:32px;height:32px;font-size:13px;}
+    .title{font-size:13px;}
+    #closeBtn{top:6px;right:6px;width:19px;height:19px;font-size:9px;}
+  }
+  @media (max-width: 252px){
+    .cover{display:none;}          /* 太窄：先放弃封面 */
+    .lyr{display:none;}
+    .foot span{display:none;}      /* 透明度只留滑块，去掉文字 */
+  }
+  @media (max-width: 208px){
+    .btns button[data-a="mode"], .btns button[data-a="prev"]{display:none;}  /* 只留 播放/下一首 */
+    .foot{display:none;}
+    .title{font-size:12px;}
+    .artist{font-size:10px;}
+  }
+  @media (max-width: 168px){
+    .btns button[data-a="next"]{display:none;}   /* 极窄：只留播放键 */
+    .grip{width:12px;height:12px;}
+  }
+  @media (max-height: 250px){
+    .lyr{display:none;}
+    #viz{min-height:34px;}
+    .card{gap:7px;}
+  }
+  @media (max-height: 196px){
+    .foot{display:none;}
+    .card{gap:6px;padding:9px;}
+    #viz{min-height:26px;}
+  }
+  @media (max-height: 150px){
+    .prog{display:none;}
+    .row{padding-right:18px;}      /* 给右上角关闭按钮让位 */
+  }
+
+  body.light .card{background:linear-gradient(160deg,#f4f6fb,#e6eaf5 60%);border-color:rgba(20,32,64,.08);}
+  body.light{color:#1b2540;}
+  body.light .title{color:#1b2540;}
+  body.light .artist{color:#5a6785;}
+  body.light button{background:rgba(20,32,64,.08);color:#1b2540;}
+  body.light #viz{background:rgba(20,32,64,.06);}
+  body.light .lyr{color:#5a6785;}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="row">
+    <img class="cover" id="cover" alt="" hidden>
+    <div class="meta">
+      <div class="title" id="title">—</div>
+      <div class="artist" id="artist"></div>
+    </div>
+    <div class="btns">
+      <button data-a="mode" title="播放模式"><svg viewBox="0 0 24 24"><path d="M17 2.6 20.4 6 17 9.4"/><path d="M20.4 6H7.2A4.2 4.2 0 0 0 3 10.2"/><path d="M7 21.4 3.6 18 7 14.6"/><path d="M3.6 18h13.2A4.2 4.2 0 0 0 21 13.8"/></svg></button>
+      <button data-a="prev" title="上一首"><svg viewBox="0 0 24 24"><path d="M19.4 5.6v12.8"/><path d="M15.4 5.8 6 12l9.4 6.2z"/></svg></button>
+      <button id="playBtn" data-a="play" title="播放/暂停"><svg viewBox="0 0 24 24"><path d="M8.2 5.2v13.6L19 12z"/></svg></button>
+      <button data-a="next" title="下一首"><svg viewBox="0 0 24 24"><path d="M4.6 5.6v12.8"/><path d="M8.6 5.8 18 12l-9.4 6.2z"/></svg></button>
+    </div>
+  </div>
+  <canvas id="viz"></canvas>
+  <div class="lyr"><div class="scroll" id="lyrBox"><span id="lyric">♪</span></div></div>
+  <div class="prog" id="prog"><div id="fill"></div></div>
+  <div class="foot">
+    <span style="font-size:11px;color:#9aa5c0;">透明</span>
+    <input type="range" id="opacity" min="30" max="100" value="100">
+  </div>
+</div>
+<button id="closeBtn" title="关闭"><svg viewBox="0 0 24 24"><path d="M6.4 6.4 17.6 17.6"/><path d="M17.6 6.4 6.4 17.6"/></svg></button>
+<button id="lockBtn" title="穿透锁定：锁上后整窗不挡鼠标（按 Ctrl+Alt+L 解锁）"><svg viewBox="0 0 24 24"><rect x="4.8" y="10.6" width="14.4" height="9.4" rx="2.4"/><path d="M8.4 10.6V7.9a3.6 3.6 0 0 1 7.2 0"/></svg></button>
+<div class="grip" id="grip"></div>
+
+<script>
+(() => {
+'use strict';
+const $ = s => document.querySelector(s);
+/* 简约线性图标（与主窗口同一套） */
+const MIC = {
+  play: '<svg viewBox="0 0 24 24"><path d="M8.2 5.2v13.6L19 12z"/></svg>',
+  pause: '<svg viewBox="0 0 24 24"><rect x="6.8" y="4.6" width="3.6" height="14.8" rx="1.8"/><rect x="13.6" y="4.6" width="3.6" height="14.8" rx="1.8"/></svg>',
+  lock: '<svg viewBox="0 0 24 24"><rect x="4.8" y="10.6" width="14.4" height="9.4" rx="2.4"/><path d="M8.4 10.6V7.9a3.6 3.6 0 0 1 7.2 0v2.7"/></svg>',
+  unlock: '<svg viewBox="0 0 24 24"><rect x="4.8" y="10.6" width="14.4" height="9.4" rx="2.4"/><path d="M8.4 10.6V7.9a3.6 3.6 0 0 1 7.2 0"/></svg>'
+};
+const cv = $('#viz');
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.0); // 高帧率减负：DPR 锁 1.0
+  cv.width = Math.max(10, cv.clientWidth * dpr);
+  cv.height = Math.max(10, cv.clientHeight * dpr);
+}
+resize(); window.addEventListener('resize', resize);
+
+let cur = null;
+let meta = null;
+/* ===== 元数据：只在换歌/换主题/换封面时收到一次 =====
+   原来每帧都收到 title/artist/cover，并**每帧重设 <img src>**（几百 KB 的 data URL
+   反复赋值会重新解码），还每帧读 scrollWidth/clientWidth 算跑马灯（强制同步布局）——
+   这是小窗这边最大的浪费。现在这些只在值真的变了才做。 */
+window.desktop.on('mini-meta', d => {
+  meta = d;
+  cur = d;                                  // renderLoop 需要 barsN / 配色
+  document.body.classList.toggle('light', !!d.light);
+  const t = $('#title'), a = $('#artist'), c = $('#cover');
+  const titleTxt = d.title || '—';
+  if (t.textContent !== titleTxt) t.textContent = titleTxt;
+  const artistTxt = d.artist ? (d.artist + ' · ' + (d.album || '')) : '';
+  if (a.textContent !== artistTxt) a.textContent = artistTxt;
+  const curSrc = c.getAttribute('src');
+  if ((d.cover || '') !== (curSrc || '')) {  // 封面只在真的换了才重新赋值
+    if (d.cover) { c.removeAttribute('hidden'); c.src = d.cover; } else { c.setAttribute('hidden', ''); }
+  }
+  updateLyricMarquee($('#lyric').textContent);
+  renderLoop();
+});
+/* ===== 每帧数据：柱形（Float32Array）+ 时间/播放状态/歌词 ===== */
+let lastPlaying = null, lastLyric = null, lastFill = -1, lastLyricTxt = null;
+window.desktop.on('mini-bars', d => {
+  cur = Object.assign({}, meta, d);          // 保留 meta 里的 barsN / c1 / c2 / light
+  if (d.p !== lastPlaying) {
+    lastPlaying = d.p;
+    $('#playBtn').innerHTML = d.p ? MIC.pause : MIC.play;
+  }
+  const pct = d.d ? Math.min(100, d.t / d.d * 100) : 0;
+  if (Math.abs(pct - lastFill) > 0.15) {     // 进度条只在真的动了才改样式
+    lastFill = pct;
+    $('#fill').style.width = pct + '%';
+  }
+  if (d.l !== lastLyric) {
+    lastLyric = d.l;
+    $('#lyric').textContent = d.l || '♪';
+    updateLyricMarquee(d.l || '♪');
+  }
+  renderLoop();
+});
+/* 跑马灯：只在歌词文本变化时量一次宽度（读 scrollWidth 会强制同步布局） */
+function updateLyricMarquee(text) {
+  if (text === lastLyricTxt) return;
+  lastLyricTxt = text;
+  const lyric = $('#lyric'), box = $('#lyrBox');
+  box.classList.remove('scroll');
+  try {
+    const shift = lyric.scrollWidth - box.clientWidth;
+    if (shift > 4) {
+      box.classList.add('scroll');
+      box.style.setProperty('--mshift', shift + 'px');
+      box.style.setProperty('--mdur', Math.max(4, Math.round(shift / 30)) + 's');
+    }
+  } catch (e) { /* ignore */ }
+}
+
+/* 小窗渲染：随 mini-state 推送按需绘制（≈50fps，与桌面版同水准）。
+   70 根条、渐变着色、圆角；渐变按主题缓存避免每帧重建 */
+const miniSmooth = new Array(128).fill(0);
+let miniCtx = null, miniGrad = null, miniGradKey = '';
+function renderLoop() {
+  const d = cur;
+  if (!d) return;
+  const w = cv.width, h = cv.height;
+  const ctx = miniCtx || (miniCtx = cv.getContext('2d'));
+  ctx.clearRect(0, 0, w, h);
+  /* 柱形数据：新协议放在 d.b（Float32Array，整体拷贝、无 JSON 化）；
+     兼容旧的 d.bars（普通数组）。两处都要认，否则协议一改小窗就变空白 —— 上一版就是这么空的。 */
+  const bars = d.b || d.bars || [];
+  const n = (d.barsN && d.barsN > 0) ? d.barsN : (bars.length || 70);
+  const gap = w / n, bw = Math.max(1, gap * 0.54);
+  const gk = (d.c1 || '') + '|' + (d.c2 || '');
+  if (gk !== miniGradKey) {
+    miniGradKey = gk;
+    miniGrad = ctx.createLinearGradient(0, 0, 0, h);
+    miniGrad.addColorStop(0, d.c1 || '#b7adff');
+    miniGrad.addColorStop(0.5, d.c2 || '#7c6cf0');
+    miniGrad.addColorStop(1, 'rgba(8,12,26,.95)');
+  }
+  ctx.fillStyle = miniGrad;
+  const rr = (x, y, bw2, bh2, r) => { r = Math.min(r, bw2 / 2); ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + bw2, y, x + bw2, y + bh2, r); ctx.arcTo(x + bw2, y + bh2, x, y + bh2, r); ctx.arcTo(x, y + bh2, x, y, r); ctx.arcTo(x, y, x + bw2, y, r); ctx.closePath(); };
+  for (let i = 0; i < n; i++) {
+    const raw = bars[i];
+    const target = Math.max(0.02, isFinite(raw) ? raw : 0);
+    miniSmooth[i] = miniSmooth[i] + (target - miniSmooth[i]) * 0.85;
+    const val = Math.max(0.02, miniSmooth[i]);
+    const bh = Math.max(2, val * (h - 4));
+    ctx.globalAlpha = 0.45 + 0.55 * val;
+    rr(i * gap + (gap - bw) / 2, h - bh, bw, bh, Math.min(3, bw / 2));
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+// 暂停时用 4Hz 慢速定时器让条形缓慢衰减归零（几乎零开销）
+setInterval(() => { if (cur && !cur.p) renderLoop(); }, 250);
+
+document.querySelectorAll('button[data-a]').forEach(b =>
+  b.addEventListener('click', () => window.desktop.send('mini-control', b.dataset.a)));
+$('#closeBtn').addEventListener('click', () => window.desktop.send('mini-close'));
+$('#prog').addEventListener('click', e => {
+  const r = $('#prog').getBoundingClientRect();
+  window.desktop.send('mini-control', 'seek:' + Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)));
+});
+$('#opacity').addEventListener('input', e => {
+  window.desktop.send('mini-opacity', parseInt(e.target.value, 10) / 100);
+});
+
+/* ===== 小窗手势：拖动移动用「原生 app-region」，缩放用指针事件 =====
+   拖动改回原生 -webkit-app-region: drag（见 .row 样式）——由系统直接拖动窗口，
+   完全跟手；之前的"主进程每 16ms 轮询光标 + setPosition"有量化延迟，观感卡顿。
+   （早期之所以弃用原生拖动，是因为当时设了 setFocusable(false)，该设置已移除。） */
+const grip = $('#grip');
+let resizing = false;
+
+grip.addEventListener('pointerdown', e => {
+  resizing = true;
+  // 不传坐标：主进程用 screen.getCursorScreenPoint() 自己取，避免 Chromium screenX 的缩放问题
+  window.desktop.send('mini-resize-start');
+  try { grip.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+  e.preventDefault(); e.stopPropagation();
+});
+grip.addEventListener('pointermove', e => {
+  if (!resizing) return;
+  window.desktop.send('mini-resize-move');
+});
+function endResize() {
+  if (!resizing) return;
+  resizing = false;
+  window.desktop.send('mini-resize-end');
+}
+grip.addEventListener('pointerup', endResize);
+grip.addEventListener('pointercancel', endResize);
+window.addEventListener('pointerup', endResize);
+window.addEventListener('pointercancel', endResize);
+
+// 拖动由原生 app-region 处理（.row 样式），此处不再有 JS 拖动逻辑
+
+// 窗口失焦兜底结束缩放
+window.addEventListener('blur', endResize);
+
+/* ================= 点击穿透（游戏里不误点） =================
+   窗口默认 setIgnoreMouseEvents(true, forward:true)：鼠标事件穿透到下层（游戏），
+   但 mousemove 仍会转发到本页面。于是这里按光标位置判断——
+   悬停到控件（按钮 / 进度条 / 透明度 / 缩放角 / 顶部拖动栏）时恢复可点，
+   离开控件立刻恢复穿透。这样小窗主体区域对游戏"透明"。 */
+let ignoringNow = null;
+function setIgnore(v) {
+  if (ignoringNow === v) return;
+  ignoringNow = v;
+  window.desktop.send('mini-set-ignore', v);
+}
+const INTERACTIVE_SEL = 'button, input, #prog, #grip, .row';
+window.addEventListener('mousemove', e => {
+  if (resizing || locked) return; // 缩放进行中/已锁定：不切换穿透，避免中断或抢点击
+  let interactive = false;
+  try {
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    interactive = !!(el && el.closest && el.closest(INTERACTIVE_SEL));
+  } catch (err) { /* ignore */ }
+  setIgnore(!interactive);
+}, true);
+window.addEventListener('mouseleave', () => { if (!resizing && !locked) setIgnore(true); });
+
+/* ================= 可交互矩形回报 =================
+   主进程按 50ms 轮询光标，判断是否该让窗口吃鼠标事件。
+   为什么改成"主进程轮询 + 页面只报几何"：
+   原来全靠页面的 mousemove → IPC → 主进程切换，链路是异步的，
+   快速移动后立刻按下时状态还没切过来 → "有时候拖不动"。
+   现在即使某个 mousemove 丢了，主进程也会在 50ms 内自愈。
+   矩形只在布局变化时重报（尺寸/媒体查询档位变化会触发 resize → 重报）。 */
+const REGION_SEL = '.row, .btns button, #playBtn, #closeBtn, #lockBtn, #prog, .foot, #grip';
+let lastRegionJson = '';
+function reportRegions() {
+  try {
+    const out = [];
+    for (const el of document.querySelectorAll(REGION_SEL)) {
+      if (!el || el.hidden) continue;
+      const cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) continue;
+      out.push({ x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) });
+    }
+    const json = JSON.stringify(out);
+    if (json !== lastRegionJson) {
+      lastRegionJson = json;
+      window.desktop.send('mini-set-regions', out);
+    }
+  } catch (e) { /* ignore */ }
+}
+reportRegions();
+setInterval(reportRegions, 700);   // 兜底：媒体查询档位变化、歌词/状态变化后重报
+window.addEventListener('resize', reportRegions);
+
+/* ================= 穿透锁定 ================= */
+let locked = false;
+const lockBtn = $('#lockBtn');
+function applyLock(v) {
+  locked = !!v;
+  lockBtn.innerHTML = locked ? MIC.lock : MIC.unlock;
+  lockBtn.classList.toggle('on', locked);
+  lockBtn.title = locked
+    ? '已锁定穿透：整窗不挡鼠标（按 Ctrl+Alt+L 解锁）'
+    : '穿透锁定：锁上后整窗不挡鼠标，游戏里不会误点（按 Ctrl+Alt+L）';
+  if (locked) setIgnore(true);
+}
+lockBtn.addEventListener('click', () => window.desktop.send('mini-lock'));
+if (window.desktop.on) window.desktop.on('mini-lock-state', applyLock);
+})();
+</script>
+</body>
+</html>

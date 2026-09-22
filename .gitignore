@@ -1,0 +1,55 @@
+# ===== 构建输出 / Electron 运行时 =====
+# 运行时约 222 MB，不纳入版本管理，由 scripts/build-portable.ps1 在本地准备
+dist/
+_out/
+build/
+
+# ===== 依赖 =====
+node_modules/
+package-lock.json
+
+# ===== 编辑器 / IDE =====
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.swp
+
+# ===== Windows =====
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ===== 临时文件 =====
+*.tmp
+*.temp
+*.log
+*.bak
+*.orig
+*~
+~$*
+
+# ===== 音频 / 歌词（用户素材，不入库） =====
+*.mp3
+*.flac
+*.m4a
+*.aac
+*.wav
+*.ogg
+*.wma
+*.ncm
+*.lrc
+
+# 例外：ncmdump.exe 是随包工具，需要入库
+!app/ncmdump.exe
+
+# ===== 下载缓存 =====
+*.zip
+*.7z
+*.rar
+
+# ===== 系统 =====
+.DS_Store

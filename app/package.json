@@ -1,0 +1,7 @@
+{
+  "name": "music-player",
+  "version": "1.0.0",
+  "description": "音乐播放器（便携桌面版）",
+  "main": "main.js",
+  "license": "MIT"
+}
