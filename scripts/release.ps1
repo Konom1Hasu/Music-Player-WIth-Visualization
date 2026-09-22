@@ -225,8 +225,11 @@ $checks = @(
 foreach ($c in $checks) {
     $p = Join-Path $Root $c.file
     if (-not (Test-Path $p)) { Write-Warn2 "跳过（找不到 $($c.file)）"; continue }
-    $out = & node $p 2>&1
-    $code = $LASTEXITCODE
+    # node 在失败时会把诊断写到 stderr，EAP=Stop 下会被当成终止性错误 → 调用前后要放宽
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $out = @(& node $p 2>&1); $code = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $oldEap }
     $tail = ($out | Select-Object -Last 1)
     if ($code -ne 0) {
         Write-Host "    ✗ $($c.name)：$tail" -ForegroundColor Red
