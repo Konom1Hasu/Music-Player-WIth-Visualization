@@ -18,6 +18,7 @@
 - [项目结构](#项目结构)
 - [构建](#构建)
 - [安装](#安装)
+- [版本回滚](#版本回滚)
 - [常见问题](#常见问题)
 - [文档](#文档)
 - [许可](#许可)
@@ -197,9 +198,13 @@ cd Music-Player-WIth-Visualization
 │   ├── cover.js                # 封面读取与解析
 │   ├── ncmdump.exe             # 官方 ncmdump，用于兼容全部 NCM 变体
 │   └── package.json            # Electron 入口声明
+├── versions/                   # 历史版本快照（可视化回滚用）
+│   ├── README.md               # 版本对照表 + 回滚说明
+│   └── *.html                  # 12 个关键节点的逐字节快照
 ├── scripts/
 │   ├── build-portable.ps1      # 构建便携版（同步 app/ 并准备 Electron 运行时）
 │   ├── install.ps1             # 安装到本机 + 创建快捷方式 + 生成卸载脚本
+│   ├── use-version.ps1         # 回滚 app/index.html 到某个历史版本
 │   └── push-to-github.ps1      # 设置 origin 并推送到 GitHub
 ├── docs/
 │   ├── 功能说明.md
@@ -275,6 +280,33 @@ cd Music-Player-WIth-Visualization
 ```
 
 卸载：运行安装目录下的 `卸载.bat`，或直接删除该文件夹。
+
+---
+
+## 版本回滚
+
+`versions/` 里保存了 `musicplayer.html` 历史上 12 个关键节点的**逐字节快照**
+（从 DSH 会话日志反向重放还原，204 处编辑 0 失败），用于可视化效果调坏了快速退回已知可用状态。
+
+```powershell
+# 列出全部版本（同时显示当前用的是哪一个）
+.\scripts\use-version.ps1 -List
+
+# 回滚到某个版本（自动备份当前版本 → 替换 → 重新构建）
+.\scripts\use-version.ps1 -Version Q1
+```
+
+`-Version` 接受完整文件名（`Q1_preWave.html`）、前缀（`Q1`）或关键字（`preWave`），唯一匹配即可。
+
+- 执行前会把当前 `app/index.html` 备份到 `dist\版本备份\`，随时可切回
+- 切回最新开发版：`git checkout -- app/index.html`，或 `-Version <备份文件名>`
+- `-NoBuild` 可只换源码不重新构建
+
+这些快照都是自包含单文件 HTML，只调用当前 `preload.js` 里仍存在的 IPC，
+因此**可以直接当 `app/index.html` 跑**，不需要一并回滚 `main.js`。
+代价是它们不认识后来加入的 B 站缓存、迷你悬浮窗、多歌手识别等功能。
+
+版本对照表、兼容性说明与一段已被推翻的历史约束记录见 [versions/README.md](versions/README.md)。
 
 ---
 
