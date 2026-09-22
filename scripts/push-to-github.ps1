@@ -163,11 +163,28 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+# ---------------------------------------------------------------- 6. 推送版本标签
+$tags = @(git tag --list)
+if ($tags.Count -gt 0) {
+    Write-Step "推送 $($tags.Count) 个版本标签"
+    git push origin --tags
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn2 "标签推送失败（退出码 $LASTEXITCODE）—— 代码已推送成功，可稍后单独执行 git push origin --tags"
+    }
+    else {
+        $tags | ForEach-Object { Write-Ok $_ }
+    }
+}
+else {
+    Write-Warn2 '没有标签可推送（可用 git tag -a v1.1.0 -m "说明" 创建版本标签）'
+}
+
 Write-Host ''
 Write-Host '推送成功' -ForegroundColor Green
 $web = $RepoUrl -replace '\.git$', '' -replace '^git@github\.com:', 'https://github.com/'
 Write-Host "  仓库地址 : $web"
 Write-Host "  分支     : $Branch"
+if ($tags.Count -gt 0) { Write-Host "  版本标签 : $($tags -join ', ')" }
 Write-Host ''
 Write-Host '如果认证失败，通常是以下原因：' -ForegroundColor DarkGray
 Write-Host '  · 密码认证已被 GitHub 取消 —— 需用 Personal Access Token 代替密码' -ForegroundColor DarkGray
