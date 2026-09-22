@@ -281,10 +281,39 @@
     <div class="row2"><span style="width:30px" id="kickLabel" title="鼓点泵动深度">鼓点</span><input type="range" id="kickSlider" min="0" max="60" step="5" value="40" style="width:110px;accent-color:var(--accent);"></div>
     <div class="row2"><span style="width:30px" id="peakLabel" title="左峰静态高度：>1 更容易顶满，<1 留余量只在鼓点上顶">峰高</span><input type="range" id="peakSlider" min="55" max="145" step="5" value="105" style="width:110px;accent-color:var(--accent);"></div>
     <div class="row2" style="border-top:1px solid var(--card-border);padding-top:8px;"><span style="width:44px" title="耳机/键盘媒体键的注册状态：被游戏占用时会在这里显示">媒体键</span><span id="hkLabel" style="font-size:12px;color:var(--muted)">自检中…</span></div>
+    <div class="row2"><span style="width:44px" title="派生数据的管控状态：解密结果只在内存、解出的音频只落在会话临时目录、退出即擦除">数据管控</span><span id="dcLabel" style="font-size:12px;color:var(--muted)">自检中…</span><button class="btn" id="dcClearBtn" style="padding:3px 8px;font-size:11px;" title="清空本机审计日志（只删记录，不动任何音频文件）">清日志</button></div>
+    <div class="row2"><span style="width:44px" title="当前程序版本">版本</span><span id="verLabel" style="font-size:12px;color:var(--muted)">—</span></div>
   </div>
 </div>
 <div class="drag-overlay">拖入音频文件即可播放</div>
 <div id="toast"></div>
+
+<!-- 首次启动的使用边界告知：派生数据管控 + 合法来源要求 -->
+<div class="modal-mask" id="noticeMask">
+  <div class="modal" style="max-width:440px;">
+    <h3>使用边界与数据管控</h3>
+    <div style="font-size:13px;line-height:1.85;color:var(--muted);margin:10px 0 4px;">
+      本程序<b style="color:var(--text)">只播放你本机已有的音频文件</b>，不含任何在线音源，
+      也不下载任何内容。<br><br>
+      针对能解出音频的两项功能（<b style="color:var(--text)">NCM 解密</b>、
+      <b style="color:var(--text)">B 站缓存提取</b>），程序做了这些管控：
+      <ul style="margin:8px 0 0;padding-left:18px;">
+        <li>解密结果<b style="color:var(--text)">只在内存中传递</b>，绝不写入你的音乐目录</li>
+        <li>解出的音频只存在于<b style="color:var(--text)">本次会话专属临时目录</b>，退出程序即开始擦除</li>
+        <li><b style="color:var(--text)">不提供任何导出 / 另存为 / 分享</b>功能，没有任何接口能把派生数据写到指定路径</li>
+        <li>每次解密与提取都会记一条<b style="color:var(--text)">本机审计日志</b>，可随时查看与清空</li>
+      </ul>
+      <div style="margin-top:12px;padding:8px 10px;border-radius:10px;background:rgba(236,65,65,.12);color:var(--text);font-size:12px;line-height:1.7;">
+        请仅将本程序用于<b>个人本地播放</b>你已合法获得的内容。
+        解出的音频受原平台版权约束，<b>请勿传播、分发或用于任何商业用途</b>；
+        由此产生的法律责任由使用者自行承担。
+      </div>
+    </div>
+    <div class="modal-btns">
+      <button class="btn primary" id="noticeOk">我已了解</button>
+    </div>
+  </div>
+</div>
 
 <!-- 歌曲信息编辑弹层（修正导入时识别错的歌名/歌手/专辑/封面） -->
 <div class="modal-mask" id="editMask">
@@ -1854,6 +1883,62 @@ if (window.desktop && window.desktop.getHotkeyStatus) {
   setInterval(probeHotkey, 5000);
   probeHotkey();
 }
+
+/* ===== 数据管控自检 =====
+   派生数据（NCM 解出的音频、B 站缓存剥离头后的副本）的管控状态直接显示出来，
+   而不是只写在文档里 —— 用户能一眼确认"解密产物没有落进我的音乐目录"。
+   顺带显示审计日志条数，并提供一键清空。 */
+function refreshDataPolicy(st) {
+  const el = $('#dcLabel'), ver = $('#verLabel');
+  if (st && st.version && ver) ver.textContent = 'v' + st.version;
+  if (!el) return;
+  if (!st || !st.policy) {
+    el.textContent = '不可用（非桌面版）';
+    el.style.color = 'var(--muted)';
+    return;
+  }
+  const p = st.policy;
+  el.textContent = '内存解密 · 会话级临时目录 · 无导出 · 审计 ' + (st.auditCount || 0) + ' 条';
+  el.style.color = 'var(--accent)';
+  el.title = '解密结果只在内存中传递，不写入音乐目录；'
+    + '解出的音频只存在于本次会话专属临时目录（退出即擦除）；'
+    + '不提供任何导出 / 另存为 / 分享接口；'
+    + '每次解密与提取都会记一条本机审计日志。\n'
+    + '审计文件：' + (p.auditFile || '—');
+}
+if (window.desktop && window.desktop.getDataPolicy) {
+  const probePolicy = () => window.desktop.getDataPolicy().then(refreshDataPolicy).catch(() => {});
+  $('#settingsBtn').addEventListener('click', probePolicy);
+  setInterval(probePolicy, 5000);
+  probePolicy();
+}
+if ($('#dcClearBtn')) {
+  $('#dcClearBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!window.desktop || !window.desktop.clearAuditLog) return;
+    window.desktop.clearAuditLog().then((r) => {
+      if (r && r.ok) {
+        toast('审计日志已清空');
+        window.desktop.getDataPolicy().then(refreshDataPolicy).catch(() => {});
+      }
+      else toast('清空失败');
+    }).catch(() => toast('清空失败'));
+  });
+}
+/* ===== 首次启动的使用边界告知 =====
+   只在第一次启动时弹一次（记住已确认），之后可在设置面板随时看到管控状态。 */
+try {
+  if (localStorage.getItem('mp_notice_v110') !== '1') {
+    const nm = $('#noticeMask');
+    if (nm) {
+      nm.classList.add('show');
+      $('#noticeOk').addEventListener('click', () => {
+        nm.classList.remove('show');
+        try { localStorage.setItem('mp_notice_v110', '1'); } catch (e) { /* ignore */ }
+      });
+    }
+  }
+} catch (e) { /* ignore */ }
 document.addEventListener('click', (e) => {
   if (!settingsPop.classList.contains('show')) return;
   if (settingsPop.contains(e.target) || e.target === $('#settingsBtn')) return;

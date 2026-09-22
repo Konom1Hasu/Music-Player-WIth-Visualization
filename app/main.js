@@ -14,6 +14,135 @@ const { spawn } = require('child_process');
 const coverLib = require('./cover.js');
 const sniffImageMime = coverLib.sniffImageMime;
 
+/* ================= 数据管控（Data Control） =================
+   背景：本程序能解出两类"派生数据" —— ① 从 .ncm 解出的 mp3/flac；② 从 B 站缓存里剥掉
+   私有头得到的可播放 m4a。这两类数据都属于原平台的受限内容，一旦被随手复制出去，
+   就成了非法传播源。因此这里做三层管控：
+
+     ① 最小落盘：派生数据只允许存在于"本次会话专属"的临时目录，进程退出即整体销毁；
+        解密结果本身只走内存（Buffer → 渲染进程），从不写到用户音乐目录。
+     ② 不可导出：程序不提供任何"另存为 / 导出 / 分享"能力，没有任何 IPC 能把派生数据
+        写到调用方指定的路径。渲染进程拿到的只有内存中的字节。
+     ③ 可追溯：每次解密 / 提取都写一条本地审计记录（时间 + 操作 + 来源文件），
+        用户可随时查看与清空。审计文件只在本机 userData 下，不上传、不外发。
+
+   注意：覆盖写入 + 删除只是"尽力而为"的威慑（SSD 的磨损均衡使彻底擦除无法保证），
+   真正的保底手段是"根本不长期落盘"——也就是第 ① 层。 */
+const APP_VERSION = (function () {
+  try { return require('./package.json').version || '0.0.0'; } catch (e) { return '0.0.0'; }
+})();
+
+const SESSION_ID = crypto.randomBytes(6).toString('hex');
+const SESSION_TMP = path.join(os.tmpdir(), 'mp-session-' + SESSION_ID);
+const SESSION_AUDIO_DIR = path.join(SESSION_TMP, 'audio');
+
+let sessionTmpReady = false;
+function ensureSessionTmp() {
+  if (!sessionTmpReady) {
+    try { fs.mkdirSync(SESSION_AUDIO_DIR, { recursive: true }); } catch (e) { /* ignore */ }
+    markHidden(SESSION_TMP);
+    sessionTmpReady = true;
+  }
+  return SESSION_TMP;
+}
+/* 给临时目录打上隐藏属性：阻止"顺手翻到并拷走"。attrib 不存在时静默跳过。 */
+function markHidden(p) {
+  try {
+    const c = spawn('attrib', ['+h', p], { stdio: 'ignore', windowsHide: true });
+    c.on('error', function () { /* ignore */ });
+  } catch (e) { /* ignore */ }
+}
+
+/* 覆盖写零后再删除。budget 是本次会话允许覆盖的总字节数，超出部分只删不擦，
+   避免退出时因为几十个大文件而卡住。 */
+const WIPE_BUDGET = 256 * 1024 * 1024;
+let wipedBytes = 0;
+function wipeFile(p) {
+  let st = null;
+  try { st = fs.statSync(p); } catch (e) { return; }
+  if (st.isFile() && st.size > 0 && wipedBytes < WIPE_BUDGET) {
+    try {
+      const fd = fs.openSync(p, 'r+');
+      const chunk = Buffer.alloc(Math.min(1 << 20, st.size));
+      let left = st.size;
+      while (left > 0) {
+        const n = Math.min(chunk.length, left);
+        fs.writeSync(fd, chunk, 0, n);
+        left -= n;
+      }
+      try { fs.fsyncSync(fd); } catch (e) { /* ignore */ }
+      fs.closeSync(fd);
+      wipedBytes += st.size;
+    } catch (e) { /* 打开失败就只删 */ }
+  }
+  try { fs.unlinkSync(p); } catch (e) { /* ignore */ }
+}
+function wipeDir(dir) {
+  let list = [];
+  try { list = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
+  for (const ent of list) {
+    const p = path.join(dir, ent.name);
+    if (ent.isDirectory()) wipeDir(p);
+    else wipeFile(p);
+  }
+  try { fs.rmdirSync(dir); } catch (e) { /* ignore */ }
+}
+/* 启动时清掉上一次异常退出（崩溃/强杀）留下的会话目录 */
+function sweepStaleSessions() {
+  try {
+    const base = os.tmpdir();
+    for (const name of fs.readdirSync(base)) {
+      if (name.indexOf('mp-session-') !== 0) continue;
+      const p = path.join(base, name);
+      if (p === SESSION_TMP) continue;
+      wipeDir(p);
+    }
+  } catch (e) { /* ignore */ }
+}
+/* 升级清理：1.0.x 把 B 站可播放副本长期写在 <userData>\bili_audio，
+   那些是派生数据、不该长期驻留。1.1.0 起副本改到会话临时目录，
+   这里把历史遗留目录一次性擦除（目录不存在时几乎零开销）。
+   注意：只删我们生成的副本，不碰用户的 B 站缓存原文件。 */
+function purgeLegacyAudioCache() {
+  try {
+    const legacy = path.join(app.getPath('userData'), 'bili_audio');
+    if (fs.existsSync(legacy)) wipeDir(legacy);
+  } catch (e) { /* ignore */ }
+}
+function shutdownSessionTmp() {
+  try { wipeDir(SESSION_TMP); } catch (e) { /* ignore */ }
+}
+
+/* ---------- 本地审计日志（只在本机 userData，可查看可清空） ---------- */
+const AUDIT_MAX = 500;
+function auditFile() { return path.join(app.getPath('userData'), 'audit.log'); }
+function audit(event, info) {
+  try {
+    const rec = {
+      t: new Date().toISOString(),
+      v: APP_VERSION,
+      sid: SESSION_ID,
+      event: event
+    };
+    if (info) {
+      if (info.src) rec.src = String(info.src);
+      if (info.bytes) rec.bytes = Number(info.bytes) || 0;
+      if (info.ext) rec.ext = String(info.ext);
+      if (info.result) rec.result = String(info.result);
+    }
+    const f = auditFile();
+    let lines = [];
+    try { lines = fs.readFileSync(f, 'utf8').split('\n').filter(Boolean); } catch (e) { lines = []; }
+    lines.push(JSON.stringify(rec));
+    if (lines.length > AUDIT_MAX) lines = lines.slice(lines.length - AUDIT_MAX);
+    fs.writeFileSync(f, lines.join('\n') + '\n', 'utf8');
+  } catch (e) { /* 审计失败不影响主流程 */ }
+}
+function auditCount() {
+  try { return fs.readFileSync(auditFile(), 'utf8').split('\n').filter(Boolean).length; }
+  catch (e) { return 0; }
+}
+
 /* ---------- NCM 专用：封面在该格式里是明文挂在头部的 ----------
    NCM 布局： CTENFDAM(8) 00 00 keyLen(4) key | metaLen(4) meta | CRC(4) 间隔(5) imgSize(4) img | 加密音频
    标准布局读不出来时，退回"按图片魔术字节扫描 + 按结束标记截断"。 */
@@ -256,6 +385,10 @@ if (!gotLock) {
   });
 
   app.whenReady().then(() => {
+    // 数据管控：清掉上次崩溃/强杀残留的会话临时目录（派生数据不留宿）
+    sweepStaleSessions();
+    // 数据管控：擦除 1.0.x 遗留在 userData 里的长期副本（升级清理）
+    purgeLegacyAudioCache();
     // 阻止显示睡眠 + 应用挂起：保持系统与显卡持续活跃
     powerSaveBlocker.start('prevent-display-sleep');
     powerSaveBlocker.start('prevent-app-suspension');
@@ -265,7 +398,26 @@ if (!gotLock) {
     app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createMainWindow(); });
   });
   app.on('window-all-closed', () => { app.quit(); });
-  app.on('will-quit', () => { try { globalShortcut.unregisterAll(); } catch (e) { /* ignore */ } });
+
+  /* 退出前销毁本次会话的派生数据。
+     覆盖擦除是同步 I/O，所以先拦住退出，擦完再真正退出；并加 4 秒兜底，
+     避免任何异常导致程序关不掉。quitCleanupDone 防止 app.quit() 递归回到这里。 */
+  let quitCleanupDone = false;
+  app.on('will-quit', (e) => {
+    try { globalShortcut.unregisterAll(); } catch (err) { /* ignore */ }
+    if (quitCleanupDone) return;
+    e.preventDefault();
+    const hardExit = setTimeout(() => {
+      quitCleanupDone = true;
+      try { app.quit(); } catch (err) { app.exit(0); }
+    }, 4000);
+    setTimeout(() => {
+      try { shutdownSessionTmp(); } catch (err) { /* ignore */ }
+      clearTimeout(hardExit);
+      quitCleanupDone = true;
+      try { app.quit(); } catch (err) { app.exit(0); }
+    }, 0);
+  });
 }
 
 /* 媒体键动作：统一转给渲染进程处理（渲染侧带防抖，避免两条通路各触发一次） */
@@ -649,59 +801,76 @@ function decryptNcmBuffer(buf) {
 }
 /* ---------- 随包携带的 ncmdump.exe（官方实现，兼容所有 NCM 变体） ----------
    ncmdump 会把解出的 mp3/flac 连同完整 ID3（标题/歌手/专辑/封面）一起写出，
-   所以这里只需返回音频字节，元数据交给渲染端的 ID3 解析即可。 */
-function cleanupDir(dir) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { /* ignore */ } }
+   所以这里只需返回音频字节，元数据交给渲染端的 ID3 解析即可。
+
+   数据管控：解出的文件只写在【本次会话专属】的临时目录里，读完立刻覆盖擦除并删除；
+   全程不碰用户的音乐目录，也不返回任何可写盘的句柄。 */
 function convertNcmWithExe(buf) {
   return new Promise(resolve => {
     const exe = path.join(__dirname, 'ncmdump.exe');
     if (!fs.existsSync(exe)) return resolve(null);
     let root;
-    try { root = fs.mkdtempSync(path.join(os.tmpdir(), 'ncmdump-')); } catch (e) { return resolve(null); }
+    try { root = fs.mkdtempSync(path.join(ensureSessionTmp(), 'ncm-')); } catch (e) { return resolve(null); }
     const ncmPath = path.join(root, 'in.ncm');
     const outDir = path.join(root, 'out');
     try {
       fs.writeFileSync(ncmPath, buf);
       fs.mkdirSync(outDir, { recursive: true });
-    } catch (e) { cleanupDir(root); return resolve(null); }
+    } catch (e) { wipeDir(root); return resolve(null); }
     let settled = false;
     const finish = v => { if (settled) return; settled = true; resolve(v); };
     let child;
     try {
       // stdio:'ignore' —— 不需要它的输出，也避免管道在某些环境下受限
       child = spawn(exe, ['-o', outDir, ncmPath], { stdio: 'ignore', windowsHide: true });
-    } catch (e) { cleanupDir(root); return finish(null); }
-    child.on('error', () => { cleanupDir(root); finish(null); });
+    } catch (e) { wipeDir(root); return finish(null); }
+    child.on('error', () => { wipeDir(root); finish(null); });
     child.on('exit', code => {
       try {
-        if (code !== 0) { cleanupDir(root); return finish(null); }
+        if (code !== 0) { wipeDir(root); return finish(null); }
         const files = fs.readdirSync(outDir).filter(f => /\.(mp3|flac)$/i.test(f));
-        if (!files.length) { cleanupDir(root); return finish(null); }
+        if (!files.length) { wipeDir(root); return finish(null); }
         const name = files[0];
         const bytes = fs.readFileSync(path.join(outDir, name));
         const ext = /\.flac$/i.test(name) ? 'flac' : 'mp3';
-        cleanupDir(root);
+        wipeDir(root);   // 覆盖擦除 + 删除，不等 GC
         finish(bytes.length ? { bytes, ext, title: '', artist: '', album: '' } : null);
-      } catch (e) { cleanupDir(root); finish(null); }
+      } catch (e) { wipeDir(root); finish(null); }
     });
     // 超时保护（大文件也给足时间）
     setTimeout(() => {
       if (settled) return;
       try { child.kill(); } catch (e) { /* ignore */ }
-      cleanupDir(root);
+      wipeDir(root);
       finish(null);
     }, 120000);
   });
 }
 ipcMain.handle('convert-ncm', async (_e, arr) => {
   const buf = Buffer.isBuffer(arr) ? arr : Buffer.from(arr);
+  // 先校验容器魔数：只处理真正的 NCM，不做"拿任意文件来试解"的通用解密器
+  if (!buf || buf.length < 32 || buf.toString('latin1', 0, 8) !== 'CTENFDAM') {
+    audit('ncm-decrypt', { result: 'rejected:not-ncm', bytes: buf ? buf.length : 0 });
+    return { error: '不是有效的 NCM 文件（缺少 CTENFDAM 头）' };
+  }
   // 首选：随包 ncmdump.exe（官方实现，兼容性最好）
   try {
     const viaExe = await convertNcmWithExe(buf);
-    if (viaExe && viaExe.bytes && viaExe.bytes.length) return viaExe;
+    if (viaExe && viaExe.bytes && viaExe.bytes.length) {
+      audit('ncm-decrypt', { result: 'ok:exe', bytes: viaExe.bytes.length, ext: viaExe.ext });
+      return viaExe;
+    }
   } catch (e) { /* 继续回退 */ }
-  // 回退：内置 JS 解密
-  try { return decryptNcmBuffer(buf); }
-  catch (e) { return { error: String((e && e.message) || e) }; }
+  // 回退：内置 JS 解密（结果同样只在内存里）
+  try {
+    const r = decryptNcmBuffer(buf);
+    audit('ncm-decrypt', { result: 'ok:builtin', bytes: r && r.bytes ? r.bytes.length : 0, ext: r && r.ext });
+    return r;
+  }
+  catch (e) {
+    audit('ncm-decrypt', { result: 'failed' });
+    return { error: String((e && e.message) || e) };
+  }
 });
 ipcMain.on('mini-control', (_e, action) => {
   if (!mainWin || mainWin.isDestroyed()) return;
@@ -726,8 +895,17 @@ ipcMain.on('mini-control', (_e, action) => {
 
 /* ================= B 站缓存解析（IPC 层） =================
    解析逻辑全在 ./bili.js（不依赖 Electron，可离线用 node 直接测试）。
-   这里只负责：弹文件夹选择框 → 调用 bili.scan → 把结果交给渲染进程。 */
+   这里只负责：弹文件夹选择框 → 调用 bili.scan → 把结果交给渲染进程。
+
+   数据管控：可播放副本（剥掉私有头的 m4a）不再落到 userData 长期驻留，
+   而是写进【本次会话专属】临时目录，退出即销毁；下次启动由渲染端的
+   ensureAllPlayable() 从原始缓存路径重新生成。封面缓存仍在 userData（只是图片）。 */
 const bili = require('./bili');
+
+function biliOpts() {
+  ensureSessionTmp();
+  return { userDataDir: app.getPath('userData'), audioDir: SESSION_AUDIO_DIR };
+}
 
 ipcMain.handle('bili-scan', async (_e, presetDir) => {
   let dir = presetDir;
@@ -741,17 +919,21 @@ ipcMain.handle('bili-scan', async (_e, presetDir) => {
     dir = r.filePaths[0];
   }
   try {
-    const items = await bili.scan(dir, { userDataDir: app.getPath('userData') });
+    const items = await bili.scan(dir, biliOpts());
+    audit('bili-scan', { src: dir, result: 'ok', bytes: items.length });
     return { ok: true, dir: dir, items: items };
   } catch (e) {
+    audit('bili-scan', { src: dir, result: 'failed' });
     return { error: String((e && e.message) || e) };
   }
 });
 ipcMain.handle('bili-scan-dir', async (_e, dir) => {
   try {
-    const items = await bili.scan(dir, { userDataDir: app.getPath('userData') });
+    const items = await bili.scan(dir, biliOpts());
+    audit('bili-scan', { src: dir, result: 'ok', bytes: items.length });
     return { ok: true, dir: dir, items: items };
   } catch (e) {
+    audit('bili-scan', { src: dir, result: 'failed' });
     return { error: String((e && e.message) || e) };
   }
 });
@@ -759,17 +941,48 @@ ipcMain.handle('bili-scan-dir', async (_e, dir) => {
 /* 把 B 站缓存的原始 .m4s 变成"可播放副本"，供渲染进程在播放前调用。
    force = true 时强制重建（播放报"格式不支持"时的自愈路径）。
    注意：旧版本留下的副本是硬链接，与源文件共享 inode —— 绝不能直接覆盖，
-   bili.ensureM4a 内部会先摘掉目录项再写新文件，源缓存不受影响。 */
+   bili.ensureM4a 内部会先摘掉目录项再写新文件，源缓存不受影响。
+   副本一律落在会话临时目录，不写进 userData，退出时整体擦除。 */
 ipcMain.handle('prepare-bili-audio', (_e, originalPath, force) => {
   try {
     if (!originalPath || typeof originalPath !== 'string') return { error: '缺少原始路径' };
     if (!fs.existsSync(originalPath)) return { error: '原始文件不存在：' + originalPath };
-    const out = bili.ensureM4a(originalPath, app.getPath('userData'), !!force);
+    ensureSessionTmp();
+    const out = bili.ensureM4a(originalPath, SESSION_AUDIO_DIR, !!force);
     if (!out) return { error: '生成可播放副本失败' };
-    return { ok: true, path: out, url: require('url').pathToFileURL(out).href, size: fs.statSync(out).size };
+    const size = fs.statSync(out).size;
+    audit('bili-extract', { src: originalPath, bytes: size, ext: 'm4a', result: 'ok' });
+    return { ok: true, path: out, url: require('url').pathToFileURL(out).href, size: size };
   } catch (e) {
     return { error: String((e && e.message) || e) };
   }
+});
+
+/* ---------- 数据管控：策略自检 / 审计日志 ---------- */
+ipcMain.handle('get-data-policy', () => {
+  return {
+    version: APP_VERSION,
+    sessionId: SESSION_ID,
+    auditCount: auditCount(),
+    policy: {
+      // 解密结果只在内存中传递，从不写入用户音乐目录
+      decryptInMemory: true,
+      // 派生数据（解出的音频 / 剥离头的副本）只存在于会话临时目录
+      derivedScope: 'session-temp',
+      tempCleanup: 'on-quit',
+      // 程序不提供任何导出 / 另存为 / 分享能力
+      exportApi: false,
+      // 只处理真正的 NCM 容器，不做通用解密
+      ncmMagicCheck: true,
+      // 本地审计可追溯，可一键清空
+      auditLog: true,
+      auditFile: auditFile()
+    }
+  };
+});
+ipcMain.handle('clear-audit-log', () => {
+  try { fs.rmSync(auditFile(), { force: true }); return { ok: true, count: 0 }; }
+  catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
 });
 /* 读音频字节，给渲染进程做 blob 兜底（万一 file:// 被限制的第二条路） */
 ipcMain.handle('read-audio', (_e, p) => {

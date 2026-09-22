@@ -1,4 +1,4 @@
-﻿/* ================= B 站缓存解析（纯逻辑，不依赖 Electron） =================
+/* ================= B 站缓存解析（纯逻辑，不依赖 Electron） =================
    B 站缓存的两种常见布局：
      ① 手机端  Android/data/tv.danmaku.bili/download/<av 或 ep 号>/<cid>/
           entry.json              元数据（标题 / UP 主 / 封面链接）
@@ -119,8 +119,10 @@ function copyWithoutPrefix(src, dest, offset) {
   } finally { fs.closeSync(fd); }
 }
 
-function ensureM4a(audioPath, userDataDir, force) {
-  const dir = path.join(userDataDir, 'bili_audio');
+function ensureM4a(audioPath, cacheDir, force) {
+  /* cacheDir 由主进程决定：现在传的是【本次会话专属的临时目录】，
+     所以可播放副本不会在 userData 里长期驻留，退出即被擦除（数据管控）。 */
+  const dir = cacheDir;
   try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* ignore */ }
   const dest = path.join(dir, md5hex(audioPath).slice(0, 16) + '.m4a');
   // 源文件是否有前置头
@@ -520,7 +522,8 @@ async function scan(rootDir, opts) {
     const pick = pickBestAudio(dir, audioFiles);
     if (!pick.best) continue;
     const audio = pick.best.path;
-    const link = ensureM4a(audio, opts.userDataDir);
+    // 数据管控：副本写进会话临时目录（opts.audioDir），不再落到 userData
+    const link = ensureM4a(audio, opts.audioDir || path.join(opts.userDataDir, 'bili_audio'));
     if (!link) continue;
     used.add(audio);
     const parsed = parseBiliTitle(raw, uname);
@@ -563,7 +566,7 @@ async function scan(rootDir, opts) {
     let name = path.basename(dir);
     if (/^\d+$/.test(name) || /^[0-9a-f]{16,}$/i.test(name)) name = '';
     const parsed = parseBiliTitle(name);
-    const link = ensureM4a(a, opts.userDataDir);
+    const link = ensureM4a(a, opts.audioDir || path.join(opts.userDataDir, 'bili_audio'));
     if (!link) continue;
     out.push({
       title: parsed.title,

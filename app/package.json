@@ -1,7 +1,13 @@
 {
   "name": "music-player",
-  "version": "1.0.0",
-  "description": "音乐播放器（便携桌面版）",
+  "version": "1.1.0",
+  "description": "音乐播放器（便携桌面版）· 本地曲库 / 自研频谱可视化 / 迷你悬浮窗",
   "main": "main.js",
-  "license": "MIT"
+  "license": "MIT",
+  "private": true,
+  "author": "Konom1Hasu",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Konom1Hasu/Music-Player-WIth-Visualization.git"
+  }
 }

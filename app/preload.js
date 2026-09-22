@@ -22,6 +22,10 @@ contextBridge.exposeInMainWorld('desktop', {
   readAudio: (p) => ipcRenderer.invoke('read-audio', p),
   // 全局快捷键注册状态（媒体键是否被游戏占用）→ { media, fallback, detail }
   getHotkeyStatus: () => ipcRenderer.invoke('get-hotkey-status'),
+  // 数据管控策略自检 + 本地审计日志条数 → { version, sessionId, auditCount, policy }
+  getDataPolicy: () => ipcRenderer.invoke('get-data-policy'),
+  // 清空本地审计日志（只删本机记录，不影响音频文件）
+  clearAuditLog: () => ipcRenderer.invoke('clear-audit-log'),
   // 取内嵌封面（NCM / MP3 / FLAC / M4A / WAV / OGG / APE…）：
   // 传 { path } 或 { bytes, name } → { ok, dataUrl, size, mime, source } | { error }
   readCover: (arg) => ipcRenderer.invoke('read-cover', arg),
