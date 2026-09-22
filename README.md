@@ -1,6 +1,6 @@
 # 音乐播放器 · Music Player
 
-**当前版本 v1.1.0** ｜ [更新日志](docs/更新日志.md) ｜ [数据管控说明](docs/数据管控与合规.md)
+**当前版本 v1.1.1** ｜ [更新日志](docs/更新日志.md) ｜ [数据管控说明](docs/数据管控与合规.md)
 
 一个基于 **Electron** 的便携式桌面音乐播放器：本地曲库管理、自定义频谱可视化、沉浸式全屏封面歌词页、
 可悬浮于游戏之上的迷你悬浮窗，以及耳机线控 / 媒体键支持。
@@ -241,7 +241,9 @@ cd Music-Player-WIth-Visualization
 │   ├── install.ps1             # 安装到本机 + 创建快捷方式 + 生成卸载脚本
 │   ├── use-version.ps1         # 回滚 app/index.html 到某个历史版本
 │   ├── push-to-github.ps1      # 设置 origin 并推送到 GitHub
-│   └── 数据管控验证.js          # 数据管控的离线回归验证（16 项断言，node 直接跑）
+│   ├── setup-push-tls.ps1      # 准备推送通道（schannel 不可用时改用 openssl + 本机 CA）
+│   ├── 数据管控验证.js          # 数据管控离线回归验证（16 项断言）
+│   └── 设置持久化验证.js        # 设置持久化离线回归验证（31 项断言）
 ├── docs/
 │   ├── 功能说明.md
 │   ├── 快捷键.md

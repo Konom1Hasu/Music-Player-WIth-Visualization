@@ -586,6 +586,9 @@ const MODES = [{ key: 'list', label: '列表循环', icon: IC.repeat }, { key: '
 let volume = 0.7;
 let speed = 1;
 let sortMode = 'default';
+/* 合法的排序值，与 #sortSel 的 <option> 一一对应。
+   恢复时用它做白名单校验 —— 直接信任 localStorage 里的字符串会让下拉框落到空白项。 */
+const SORT_MODES = ['default', 'title', 'artist', 'album', 'plays', 'recent'];
 let favOnly = false;
 let nextQueue = [];
 let orderSeq = 0;
@@ -1837,7 +1840,13 @@ $('#npEditBtn').addEventListener('click', () => {
   if (!currentId) { toast('还没有播放任何歌曲'); return; }
   openSongEditor(currentId);
 });
-$('#sortSel').addEventListener('change', e => { sortMode = e.target.value; renderList(); });
+$('#sortSel').addEventListener('change', e => {
+  sortMode = e.target.value;
+  renderList();
+  /* 排序方式是全局偏好，必须落盘 —— 之前只改了变量没写 localStorage，
+     而恢复代码却在读 mp_sort，于是每次重启都退回"添加顺序"。 */
+  try { localStorage.setItem('mp_sort', sortMode); } catch (e) {}
+});
 /* 播放列表伸缩栏：改用 .collapsed 做宽度过渡（原来是 display:none 的硬切换，没有"伸缩"感），
    状态写进 localStorage，重开还是上次的样子。 */
 function setDrawerOpen(open, save) {
@@ -2267,7 +2276,7 @@ function pushMiniBars() {
   try { savedTheme = localStorage.getItem('mp_theme') || 'auto'; } catch (e) {}
   applyTheme(savedTheme);
   try { const sp = parseFloat(localStorage.getItem('mp_speed')); if (SPEEDS.includes(sp)) speed = sp; } catch (e) {}
-  try { const sm = localStorage.getItem('mp_sort'); if (sm) sortMode = sm; } catch (e) {}
+  try { const sm = localStorage.getItem('mp_sort'); if (sm && SORT_MODES.indexOf(sm) >= 0) { sortMode = sm; $('#sortSel').value = sm; } } catch (e) {}
   try { const vz = localStorage.getItem('mp_viz'); if (VIZ_MODES.some(m => m.key === vz)) vizMode = vz; } catch (e) {}
   try { const tl = parseInt(localStorage.getItem('mp_tilt'), 10); if (tl >= 0 && tl <= 100) { tiltStrength = tl; $('#tiltSlider').value = tl; } } catch (e) {}
   // 左峰宽：恢复上次的 σ，并把 bandBoost 按它重建一次（bandBoost 初值用的是默认 σ）
@@ -2284,7 +2293,10 @@ function pushMiniBars() {
   } catch (e) { refreshJitterUI(); }
   // 鼓点强度：恢复上次的倍率
   try {
-    const kv = parseInt(localStorage.getItem('mp_kick2'), 10);
+    /* 键名必须是 mp_kick —— 滑块写入的就是 mp_kick。这里曾经写成 mp_kick2，
+       而 mp_kick2 从来没有被写入过 → 每次重启都读不到，鼓点强度静默回到默认 0.40。
+       （同一份代码里"写 A 读 B"是最容易漏的一类 bug，见 scripts\回归验证.js 的键名交叉校验。） */
+    const kv = parseInt(localStorage.getItem('mp_kick'), 10);
     if (kv >= 0 && kv <= 60) { $('#kickSlider').value = kv; applyKickGain(kv / 100); }
     else applyKickGain(kickPump);
   } catch (e) { applyKickGain(kickPump); }
