@@ -80,6 +80,20 @@ function Read-Utf8([string]$p) {
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
+# 统一的 git 调用封装。
+# ★ 为什么必须包一层：git 会把警告与进度写到 stderr（例如 .gitattributes 引起的
+#   "LF will be replaced by CRLF"、推送进度），而 EAP=Stop 下 PowerShell 会把原生命令的
+#   stderr 当成**终止性错误**直接中断脚本 —— 表现为"git add 把发布流程搞崩了"。
+#   这里临时放宽 EAP，退出码自己判。
+function Invoke-Git {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$GitArgs)
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $out = @(& git @GitArgs 2>&1); $code = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $old }
+    return [pscustomobject]@{ Code = $code; Text = ($out -join "`n"); Lines = @($out) }
+}
+
 if (-not $Bump -and -not $Version) {
     throw '请指定 -Bump patch|minor|major，或 -Version x.y.z。'
 }
@@ -87,7 +101,8 @@ if (-not $Bump -and -not $Version) {
 # ---------------------------------------------------------------- 1. 工作区
 Write-Step '检查工作区'
 
-$dirty = @(git status --porcelain)
+$st = Invoke-Git status --porcelain
+$dirty = @($st.Lines | Where-Object { "$_" -ne '' })
 if ($dirty.Count -gt 0) {
     Write-Warn2 "有 $($dirty.Count) 处未提交改动，发布前需要先提交它们："
     $dirty | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
@@ -96,10 +111,10 @@ if ($dirty.Count -gt 0) {
         if ($ans -ne '' -and $ans -notmatch '^[Yy]') { throw '已取消：请先自行提交或 stash，再运行发布。' }
     }
     else { Write-Dim '-Yes 已指定，自动提交' }
-    git add -A
     $pre = if ($Message) { $Message } else { 'chore: 发布前提交待发布改动' }
-    $env:GIT_CONFIG_COUNT = $null
-    git commit -m $pre | Out-Null
+    Invoke-Git add -A | Out-Null
+    $c = Invoke-Git commit -m $pre
+    if ($c.Code -ne 0) { throw "提交待发布改动失败：$($c.Text)" }
     Write-Ok '已提交待发布改动'
 }
 else { Write-Ok '工作区干净' }
@@ -153,7 +168,7 @@ if ($cmp -eq 0) {
     Write-Warn2 "版本号已经是 $newVersion（上次发布可能中途中断），继续完成这次发布"
 }
 Write-Ok "$oldVersion -> $newVersion"
-if (git tag --list | Where-Object { $_ -eq "v$newVersion" }) {
+if ((Invoke-Git tag --list).Lines | Where-Object { $_ -eq "v$newVersion" }) {
     throw "标签 v$newVersion 已存在，说明这个版本已经发布过。要再发一版请换更大的版本号。"
 }
 
@@ -223,7 +238,10 @@ if ($rmNew -ne $rmBackup) {
     [System.IO.File]::WriteAllText($readmePath, $rmNew, (New-Object System.Text.UTF8Encoding($false)))
     Write-Ok "README.md 当前版本 -> v$newVersion"
 }
-else { Write-Warn2 'README 里没找到「**当前版本 vX.Y.Z**」标记，跳过' }
+elseif ($rmBackup -match '\*\*当前版本\s*v[0-9]+\.[0-9]+\.[0-9]+\*\*') {
+    Write-Ok "README.md 当前版本已经是 v$newVersion"
+}
+else { Write-Warn2 'README 里没找到「**当前版本 vX.Y.Z**」标记，跳过（文档检查会报出来）' }
 
 # ---------------------------------------------------------------- 5. 验证
 Write-Step '运行验证'
@@ -272,14 +290,20 @@ if (-not $Message) {
     $Message = if ($theme) { "release(v$newVersion): $theme" } else { "release(v$newVersion)" }
 }
 
-git add -A
-$old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-git commit -q -m $Message 2>&1 | Out-Null
-$ErrorActionPreference = $old
-if ($LASTEXITCODE -ne 0) { throw "提交失败（可能没有实际变更）。" }
-Write-Ok "已提交：$Message"
+Invoke-Git add -A | Out-Null
+# 先看有没有暂存内容：上一次发布中途失败后重跑时，版本号可能已经在之前的提交里了，
+# 此时"没有东西可提交"是**正常状态**，不该当成错误。
+$staged = Invoke-Git diff --cached --quiet
+$hasStaged = ($staged.Code -ne 0)
+if ($hasStaged) {
+    $cRes = Invoke-Git commit -q -m $Message
+    if ($cRes.Code -ne 0) { throw "提交失败：$($cRes.Text)" }
+    Write-Ok "已提交：$Message"
+}
+else { Write-Dim '没有新的改动需要提交（版本号已在之前的提交里），直接打标签' }
 
-git tag -a "v$newVersion" -m "v$newVersion`n`n$Message`n`n详见 docs/更新日志.md 的 [$newVersion] 条目。"
+$tagRes = Invoke-Git tag -a "v$newVersion" -m "v$newVersion`n`n$Message`n`n详见 docs/更新日志.md 的 [$newVersion] 条目。"
+if ($tagRes.Code -ne 0) { throw "打标签失败（标签 v$newVersion 可能已存在）：$($tagRes.Text)" }
 Write-Ok "已打标签 v$newVersion"
 
 # ---------------------------------------------------------------- 8. 推送
