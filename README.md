@@ -246,6 +246,14 @@ cd Music-Player-WIth-Visualization
 │   ├── vendor/                 # three.js r147（UMD）+ GLTFLoader，仅「封面 3D」开启时注入
 │   ├── assets/                 # archive-cassette.glb（单体）+ archive-assembly.glb（拆解件）
 │   └── package.json            # Electron 入口声明
+├── app-rhine/                  # 新底座：RhineLabUI（vendored，MIT）—— 播放功能正在反向整合进来
+│   ├── src/                    # 它的 TypeScript 源码（Three.js 三维档案终端）
+│   ├── public/                 # 模型 / 配乐 / MiSans 字体（含 MiSans-license.pdf 与 NOTICE）
+│   ├── content/                # 它的档案内容源（将被音乐曲库取代）
+│   ├── scripts/                # 它自己的构建前脚本
+│   ├── verification/           # 它自己的验证文档
+│   ├── AGENTS.md               # 它自己的协作规范（保留，供上游对齐）
+│   └── DESIGN.md               # 它自己的视觉与动效基准（权威配色/时间轴依据）
 ├── versions/                   # 历史版本快照（可视化回滚用）
 │   ├── README.md               # 版本对照表 + 回滚说明
 │   └── *.html                  # 12 个关键节点的逐字节快照

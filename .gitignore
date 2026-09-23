@@ -46,6 +46,15 @@ $RECYCLE.BIN/
 # 例外：ncmdump.exe 是随包工具，需要入库
 !app/ncmdump.exe
 
+# 例外：app-rhine 是 vendored 的 RhineLabUI 底座（MIT）。它自带的配乐/音效正是
+# 上面这些格式 —— 那属于**程序资源**而不是用户素材，必须入库，
+# 否则构建出来的应用没有声音（这些文件曾被静默漏掉过 5 个）。
+!app-rhine/public/audio/*.mp3
+!app-rhine/public/audio/*.ogg
+!app-rhine/public/audio/*.wav
+# 底座的依赖锁文件同样要入库，保证构建可复现
+!app-rhine/package-lock.json
+
 # ===== 下载缓存 =====
 *.zip
 *.7z
