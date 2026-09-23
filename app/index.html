@@ -14,6 +14,23 @@
     --track:rgba(255,255,255,.12); --thumb:#fff;
   }
 
+  /* ===== 全局交互打磨（借鉴 RhineLabUI 的做法，配色走主题变量）=====
+     三件事都是本项目之前一直缺的，与主题无关、对四套主题都是纯改善：
+       · 细滚动条 —— Chromium 默认滚动条在深色底上非常突兀（尤其播放列表）
+       · 键盘焦点环 —— 之前完全没有 :focus-visible 样式，纯键盘操作时看不到焦点在哪
+       · ::selection —— 选中的文字沿用浏览器默认蓝，和主题不搭 */
+  ::-webkit-scrollbar{width:9px;height:9px;}
+  ::-webkit-scrollbar-track{background:transparent;}
+  ::-webkit-scrollbar-thumb{background:var(--card-border);border:2px solid transparent;
+    background-clip:content-box;border-radius:999px;}
+  ::-webkit-scrollbar-thumb:hover{background:var(--muted);background-clip:content-box;}
+  ::-webkit-scrollbar-corner{background:transparent;}
+  /* 焦点环：RhineLabUI 用的是"2px 实线 + 较大外偏移"，让焦点框不贴着控件边框，
+     小按钮上尤其清楚。这里取同一思路，颜色换成当前主题的强调色。 */
+  :focus-visible{outline:2px solid var(--accent);outline-offset:3px;}
+  .btn:focus-visible,.pill-btn:focus-visible{outline-offset:4px;}
+  ::selection{background:var(--accent);color:var(--bg);}
+
   /* ===== 莱茵生命主题（Rhine Lab 风格 · 仪器面板变体）=====
      取值来源：RhineLabUI（明日方舟 · 莱茵生命，MIT）的暗色面规范。它自己的
      DESIGN.md「明暗配色」一节写得很明确：
@@ -29,6 +46,14 @@
      ★ 刻意保留圆形的：播放键、收藏键、圆形滑钮。圆形是"可点"的强提示，
        而且你之前明确要求过暂停键不要方 —— 这里是有意混搭，不是漏改。 */
   :root[data-theme="rhine"]{--rl-line:#536166;--rl-brass:#c5a16b;--rl-brown:#9b7247;}
+  /* Rhine 主题下滚动条也收直角（默认那条是 999px 圆角） */
+  :root[data-theme="rhine"] ::-webkit-scrollbar-thumb{border-radius:0;}
+  /* 悬浮小标签加轻微字距：原规范里所有小号标签都带 0.7~1.3px 字距，
+     中文标题不加（中文加字距会散），只给数字/短标签用 */
+  :root[data-theme="rhine"] #hkLabel,
+  :root[data-theme="rhine"] #dcLabel,
+  :root[data-theme="rhine"] #verLabel,
+  :root[data-theme="rhine"] #listBtnCount{letter-spacing:.06em;}
   /* 大面板：只留 2px，保留一点边缘收敛 */
   :root[data-theme="rhine"] .stage,
   :root[data-theme="rhine"] .playlist-drawer,

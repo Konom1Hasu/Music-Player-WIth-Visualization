@@ -29,12 +29,60 @@ function warn(name, why)   { warns++; console.log('  ! ' + name + '  →  ' + wh
 function read(p) { return fs.readFileSync(p, 'utf8'); }
 function exists(p) { try { fs.accessSync(p); return true; } catch (e) { return false; } }
 
+/* ---------- 极简 .gitignore 匹配 ----------
+   为什么要自己实现而不是调 git：本检查器**故意不走 git 子进程**（受限环境下
+   spawnSync git 会 EPERM）。但光遍历文件系统会误报：仓库里放了被忽略的
+   47MB 素材压缩包（*.zip）时，检查器会要求把那个 zip 写进 README 结构图 ——
+   而它本来就不该进仓库。所以这里实现一份够用的 ignore 匹配。
+   覆盖 .gitignore 里实际用到的写法：目录名、*.ext 通配、相对路径、! 反选。 */
+function globMatch(pat, str) {
+    const re = new RegExp('^' + pat
+        .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\*\*/g, '\u0000')
+        .replace(/\*/g, '[^/]*')
+        .replace(/\u0000/g, '.*')
+        .replace(/\?/g, '[^/]') + '$');
+    return re.test(str);
+}
+const IGNORE = (function () {
+    const out = [];
+    for (const f of ['.gitignore', '.git/info/exclude']) {
+        const p = path.join(ROOT, f);
+        if (!exists(p)) continue;
+        for (let line of read(p).split('\n')) {
+            line = line.trim();
+            if (!line || line.startsWith('#')) continue;
+            out.push(line);
+        }
+    }
+    return out;
+})();
+let ignoredCount = 0;
+function isIgnored(rel, isDir) {
+    const norm = rel.replace(/\\/g, '/');
+    const segs = norm.split('/');
+    const base = segs[segs.length - 1];
+    let hitAny = false;
+    for (const raw of IGNORE) {
+        const neg = raw.startsWith('!');
+        let pat = neg ? raw.slice(1) : raw;
+        if (!pat) continue;
+        const dirOnly = pat.endsWith('/');
+        if (dirOnly) pat = pat.replace(/\/+$/, '');
+        let hit;
+        if (pat.indexOf('/') >= 0) hit = globMatch(pat, norm);          // 相对根路径
+        else hit = globMatch(pat, base) || segs.some(s => globMatch(pat, s));  // 任意层级
+        if (hit) hitAny = !neg;
+    }
+    return hitAny;
+}
+
 /* 受版本管理的文件。
    这里**故意不走 git 子进程**：有些受限环境禁止 Node 以管道方式 spawn 子进程
    （表现为 spawnSync git EPERM），那样检查会静默退化。改成直接遍历文件系统，
-   跳过 .git / dist / node_modules —— 结果一致，而且到哪都能跑。 */
+   并套用上面的 .gitignore 匹配 —— 结果与 git ls-files 一致，而且到哪都能跑。 */
 function trackedFiles() {
-    const SKIP = new Set(['.git', 'dist', 'node_modules', '.vscode', '.idea']);
+    const SKIP = new Set(['.git']);
     const acc = [];
     (function walk(d) {
         let list = [];
@@ -42,8 +90,10 @@ function trackedFiles() {
         for (const e of list) {
             if (SKIP.has(e.name)) continue;
             const p = path.join(d, e.name);
+            const rel = path.relative(ROOT, p).replace(/\\/g, '/');
+            if (isIgnored(rel, e.isDirectory())) { ignoredCount++; continue; }
             if (e.isDirectory()) walk(p);
-            else acc.push(path.relative(ROOT, p).replace(/\\/g, '/'));
+            else acc.push(rel);
         }
     })(ROOT);
     return acc;
@@ -89,6 +139,7 @@ const readme = read(readmePath);
 console.log('');
 console.log('仓库: ' + ROOT);
 console.log('版本: ' + pkg.version);
+console.log('按 .gitignore 忽略的条目: ' + ignoredCount + '（不计入受管文件）');
 
 /* ---------------------------------------------------------------- 1. 版本号 ↔ 更新日志 */
 console.log('\n[1] 版本号与更新日志对应');
