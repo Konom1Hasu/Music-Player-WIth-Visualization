@@ -211,12 +211,19 @@ if (!structM) {
     }
 
     /* 4c. 结构图里提到但仓库里不存在的文件（反向检查，防止改名后留下幽灵条目）
-       注意备选分支要把长扩展名排在前面，否则 package.json 会被 js 分支截成
-       "package.js" 从而误报幽灵条目。 */
+       两个坑：
+         · 备选分支要把长扩展名排在前面，否则 package.json 会被 js 分支截成
+           "package.js" 从而误报；
+         · 必须**先剥掉行尾的 # 注释**再匹配 —— 注释里是说明文字，
+           写着 "three.js r147（UMD）" 这种话，把它当成文件名声明就会误报幽灵条目。 */
     const ghost = [];
     const nameRe = /([A-Za-z0-9_.\-\u4e00-\u9fff]+\.(?:json|html|ps1|bat|exe|md|js))/g;
     const known = new Set(tracked.map(f => path.basename(f)));
-    for (const m of block.matchAll(nameRe)) {
+    // 结构图里每个条目形如 "├── name    # 注释"；只取 # 之前的部分
+    const blockNoComment = block.split('\n')
+        .map(line => line.split('#')[0])
+        .join('\n');
+    for (const m of blockNoComment.matchAll(nameRe)) {
         const n = m[1];
         if (!known.has(n) && n !== '音乐播放器.exe') ghost.push(n);
     }
