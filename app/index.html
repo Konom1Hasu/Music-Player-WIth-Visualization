@@ -13,6 +13,70 @@
     --pop:rgba(20,26,44,.96); --pop-shadow:0 24px 60px rgba(0,0,0,.5);
     --track:rgba(255,255,255,.12); --thumb:#fff;
   }
+
+  /* ===== 莱茵生命主题（Rhine Lab 风格 · 仪器面板变体）=====
+     取值来源：RhineLabUI（明日方舟 · 莱茵生命，MIT）的暗色面规范。它自己的
+     DESIGN.md「明暗配色」一节写得很明确：
+        暗色以 #11181b 为背景，#e0e3dc 为正文，#a6b0b1 为辅助文字，
+        #536166 为分隔线，#c5a16b 为琥珀强调。
+     借的是三件事：
+       ① 配色 —— 上面那五色 + panel #202a2f / field #2a363b / 暖棕悬停 #9b7247
+       ② 材质 —— 分隔一律 1px 实心细线（不是半透明描边）；按钮与构件**直角**
+                  （它的按钮就是 1px 描边 + 无圆角），只有大面板留 2px 免得割裂。
+       ③ 选择语义 —— 原规范用"长短竖线刻度 + 细线分隔"表达选中，而不是色块填充。
+                  所以列表选中项在这里是「左侧黄铜竖条 + 极淡底」，不是原来的整块高亮。
+     另外两个细节：数字用等宽字形（tabular-nums），封面四角加黄铜直角标记。
+     ★ 刻意保留圆形的：播放键、收藏键、圆形滑钮。圆形是"可点"的强提示，
+       而且你之前明确要求过暂停键不要方 —— 这里是有意混搭，不是漏改。 */
+  :root[data-theme="rhine"]{--rl-line:#536166;--rl-brass:#c5a16b;--rl-brown:#9b7247;}
+  /* 大面板：只留 2px，保留一点边缘收敛 */
+  :root[data-theme="rhine"] .stage,
+  :root[data-theme="rhine"] .playlist-drawer,
+  :root[data-theme="rhine"] .modal,
+  :root[data-theme="rhine"] #settingsPop{border-radius:2px;}
+  /* 构件一律直角：贴合"仪器面板"的观感 */
+  :root[data-theme="rhine"] .item,
+  :root[data-theme="rhine"] .thumb,
+  :root[data-theme="rhine"] .fld input[type=text],
+  :root[data-theme="rhine"] .cover-row .big,
+  :root[data-theme="rhine"] .pb-thumb,
+  :root[data-theme="rhine"] .big-cover,
+  :root[data-theme="rhine"] .big-cover::after,
+  :root[data-theme="rhine"] #viz,
+  :root[data-theme="rhine"] #sortSel,
+  :root[data-theme="rhine"] .btn,
+  :root[data-theme="rhine"] .pill-btn,
+  :root[data-theme="rhine"] #toast,
+  :root[data-theme="rhine"] .fps,
+  :root[data-theme="rhine"] .drag-overlay{border-radius:0;}
+  /* 选中语义：左侧黄铜竖条 + 极淡底，代替整块填充（用原规范的"竖线刻度"） */
+  :root[data-theme="rhine"] .item{position:relative;padding-left:13px;}
+  :root[data-theme="rhine"] .item.active{background:rgba(197,161,107,.10);box-shadow:none;}
+  :root[data-theme="rhine"] .item.active::before{content:'';position:absolute;left:4px;top:50%;
+    transform:translateY(-50%);width:2px;height:62%;background:var(--rl-brass);}
+  /* 悬停用暖棕（原规范里 hover 就是 #9b7247），与琥珀强调区分开 */
+  :root[data-theme="rhine"] .item:hover{background:rgba(155,114,71,.22);}
+  /* 等宽数字 + 轻微字距：仪表读数的观感 */
+  :root[data-theme="rhine"] #curTime,
+  :root[data-theme="rhine"] #durTime,
+  :root[data-theme="rhine"] .fps,
+  :root[data-theme="rhine"] #listBtnCount{font-variant-numeric:tabular-nums;letter-spacing:.04em;}
+  /* 封面四角直角标记：一个伪元素用 8 条 1px 渐变画出四个角。
+     ★ z-index 必须 > .big-cover 的 1：伪元素默认 z-index:auto，会和 z-index:0 的
+       .cover-bleed 同层，于是被 z-index:1 的封面整个盖住（标记根本看不见）。 */
+  :root[data-theme="rhine"] .stage-left::after{content:'';position:absolute;inset:7px;z-index:2;pointer-events:none;opacity:.65;
+    background:
+      linear-gradient(var(--rl-brass),var(--rl-brass)) left top/14px 1px no-repeat,
+      linear-gradient(var(--rl-brass),var(--rl-brass)) left top/1px 14px no-repeat,
+      linear-gradient(var(--rl-brass),var(--rl-brass)) right top/14px 1px no-repeat,
+      linear-gradient(var(--rl-brass),var(--rl-brass)) right top/1px 14px no-repeat,
+      linear-gradient(var(--rl-brass),var(--rl-brass)) left bottom/14px 1px no-repeat,
+      linear-gradient(var(--rl-brass),var(--rl-brass)) left bottom/1px 14px no-repeat,
+      linear-gradient(var(--rl-brass),var(--rl-brass)) right bottom/14px 1px no-repeat,
+      linear-gradient(var(--rl-brass),var(--rl-brass)) right bottom/1px 14px no-repeat;}
+  /* 封面渗出的柔光压暗收窄 + 投影收紧：细线风格不需要大片柔光 */
+  :root[data-theme="rhine"] .cover-bleed{filter:blur(46px) saturate(1.12) brightness(.7);opacity:.32;}
+  :root[data-theme="rhine"] .big-cover{box-shadow:0 6px 18px rgba(0,0,0,.55);}
   *{box-sizing:border-box;margin:0;padding:0;}
   html,body{height:100%;}
   body{
@@ -495,12 +559,19 @@ function defaultCover(title, artist) {
 const THEMES = [
   { key: 'auto', label: '深色', light: false },
   { key: 'light', label: '浅色', light: true },
-  { key: 'netease', label: '网易云红', light: false }
+  { key: 'netease', label: '网易云红', light: false },
+  /* 莱茵生命：配色取自 RhineLabUI（明日方舟 · 莱茵生命）的暗色面。
+     它不只是换色 —— 配套的"仪器面板"材质（1px 细线边框、直角、等宽数字、
+     封面四角黄铜标记）由 CSS 里 :root[data-theme="rhine"] 那段负责。 */
+  { key: 'rhine', label: '莱茵生命', light: false }
 ];
 let theme = 'auto';
 function applyTheme(key) {
   theme = key;
   const t = THEMES.find(x => x.key === key) || THEMES[0];
+  /* 把主题名写到 <html data-theme>：换色之外的"材质"差异（直角、细线、等宽数字、
+     封面四角标记）靠 :root[data-theme="rhine"] 那段 CSS 生效，否则只能干换颜色。 */
+  document.documentElement.dataset.theme = t.key;
   const set = (k, v) => document.documentElement.style.setProperty(k, v);
   if (t.light) {
     set('--hue', 250);
@@ -535,6 +606,26 @@ function applyTheme(key) {
     set('--track', 'rgba(255,255,255,.14)');
     set('--thumb', '#fff');
     set('--hover', 'rgba(255,255,255,.07)');
+  } else if (t.key === 'rhine') {
+    /* 莱茵生命：RhineLabUI 的暗色面配色。
+       paper→bg、panel→panel、field→card、line→card-border（实心细线，不是半透明描边）、
+       ink→text、muted→muted、accent（黄铜）→accent。 */
+    set('--hue', 38);
+    set('--accent', '#c5a16b');
+    set('--accent2', '#9b7247');
+    set('--bg', '#11181b');
+    set('--panel', '#202a2f');
+    set('--card', '#2a363b');
+    set('--card-border', '#536166');
+    set('--text', '#e0e3dc');
+    set('--muted', '#a6b0b1');
+    set('--input-bg', '#151d21');
+    set('--pop', 'rgba(32,42,47,.98)');
+    set('--pop-shadow', '0 18px 44px rgba(0,0,0,.62)');
+    set('--track', 'rgba(83,97,102,.7)');
+    set('--thumb', '#c5a16b');
+    /* 悬停用暖棕 #9b7247（原规范的 hover 色），与琥珀强调 #c5a16b 区分开 */
+    set('--hover', 'rgba(155,114,71,.22)');
   } else {
     set('--hue', 250);
     set('--accent', 'hsl(250 85% 68%)');
