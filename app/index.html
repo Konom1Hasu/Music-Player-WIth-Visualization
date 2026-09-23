@@ -1535,11 +1535,28 @@ function c3dFail(why) {
   c3dSetLabel();
   toast('封面 3D 不可用：' + why + '（已自动关闭，封面仍为 2D）');
 }
+/* 尺寸测量：返回是否量到了有效尺寸。
+   ★★ 这里踩过一个真坑，务必别再改回去 ★★
+   画布默认是 display:none，此时 getBoundingClientRect()/clientWidth **都是 0**。
+   原先的写法是 `cv.clientWidth || 1`，于是第一次测量发生在"还没显示"的时候 →
+   绘图缓冲被设成 1×1 像素、相机 aspect 变成 0/1 = 0 →
+   3D 一帧都画不出来（canvas 的 width/height 属性会停在 1×1），
+   表现就是"开了封面 3D 但什么都没有"，只有手动缩放窗口才会突然出现。
+   现在：① 调用方先显示再测量；② 量到 0 时用父容器兜底；③ 仍为 0 就返回 false 让调用方下一帧重试。 */
 function c3dResize() {
-  if (!C3D.renderer || !C3D.camera) return;
+  if (!C3D.renderer || !C3D.camera) return false;
   const cv = $('#cover3d');
-  if (!cv) return;
-  const w = cv.clientWidth || 1, h = cv.clientHeight || 1;
+  if (!cv) return false;
+  const box = cv.getBoundingClientRect();
+  let w = Math.round(box.width), h = Math.round(box.height);
+  if (!w || !h) {
+    const host = cv.parentElement;                 // .big-cover
+    if (host) {
+      const hb = host.getBoundingClientRect();
+      w = Math.round(hb.width); h = Math.round(hb.height);
+    }
+  }
+  if (!w || !h) return false;                      // 布局还没完成，让调用方重试
   /* 像素比封顶 1.5：和可视化那边一样，别在核显上按 2x 渲染 */
   const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
   C3D.renderer.setPixelRatio(dpr);
@@ -1547,6 +1564,7 @@ function c3dResize() {
   C3D.camera.aspect = w / h;
   c3dFitCamera();
   C3D.camera.updateProjectionMatrix();
+  return true;
 }
 /* 按包围盒把模型装进视口（模型原点和尺寸都未知，硬编码距离会跑偏）。
    取景基准用**单体**：那是默认视图；拆解会让部件沿 Z 散开，靠 1.55 的留白吃掉增量，
@@ -1718,17 +1736,26 @@ async function c3dEnable() {
       C3D.plate = plate;
     }
 
-    c3dResize();
-    C3D.model.rotation.set(0, 0, 0);
-    C3D.spin = 0;
-    C3D.spread = 0; C3D.spreadTarget = 0;
-    c3dSetExploded(false);
+    /* ★ 顺序很重要：**先把画布显示出来，再测量尺寸**。
+       反过来（先 c3dResize 后 classList.add('on')）会让测量发生在 display:none 状态下，
+       量到 0 → 绘图缓冲 1×1 → 3D 永远画不出来。详见 c3dResize 的注释。 */
     cv.classList.add('on');
     const bcOn = $('#bigCover');
     if (bcOn) bcOn.classList.add('c3d-on');   // 显示「拆解 / 复位」两颗键
     C3D.on = true;
     C3D.ready = true;
+    C3D.model.rotation.set(0, 0, 0);
+    C3D.spin = 0;
+    C3D.spread = 0; C3D.spreadTarget = 0;
+    c3dSetExploded(false);
     C3D.lastT = 0; C3D.acc = 0;
+    if (!c3dResize()) {
+      // 布局尚未完成：下一帧再量一次（以及再兜一次，避免极端情况下一直是 1×1）
+      requestAnimationFrame(() => {
+        if (!C3D.on) return;
+        if (!c3dResize()) requestAnimationFrame(() => { if (C3D.on) c3dResize(); });
+      });
+    }
     if (!C3D.raf) C3D.raf = requestAnimationFrame(c3dFrame);
     try { localStorage.setItem('mp_cover3d', '1'); } catch (e) { /* ignore */ }
     c3dSetLabel();
