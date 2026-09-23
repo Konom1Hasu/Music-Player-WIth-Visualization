@@ -296,13 +296,24 @@ Invoke-Git add -A | Out-Null
 $staged = Invoke-Git diff --cached --quiet
 $hasStaged = ($staged.Code -ne 0)
 if ($hasStaged) {
-    $cRes = Invoke-Git commit -q -m $Message
+    # ★ 提交信息必须走**消息文件**（-F），不能用 `-m $Message`：
+    #   Invoke-Git 用 ValueFromRemainingArguments 收集参数，PowerShell 会把含空格的
+    #   字符串再拆开，于是 "…修掉"开了封面 3D 但…" 里的 "3D" 被当成 pathspec，
+    #   报 `pathspec '3D' did not match any file(s) known to git`。
+    $msgFile = Join-Path $env:TEMP ('rel-msg-' + [Guid]::NewGuid().ToString('N') + '.txt')
+    [IO.File]::WriteAllText($msgFile, $Message, (New-Object System.Text.UTF8Encoding($false)))
+    try { $cRes = Invoke-Git commit -q -F $msgFile }
+    finally { Remove-Item $msgFile -Force -ErrorAction SilentlyContinue }
     if ($cRes.Code -ne 0) { throw "提交失败：$($cRes.Text)" }
     Write-Ok "已提交：$Message"
 }
 else { Write-Dim '没有新的改动需要提交（版本号已在之前的提交里），直接打标签' }
 
-$tagRes = Invoke-Git tag -a "v$newVersion" -m "v$newVersion`n`n$Message`n`n详见 docs/更新日志.md 的 [$newVersion] 条目。"
+$tagMsgFile = Join-Path $env:TEMP ('rel-tag-' + [Guid]::NewGuid().ToString('N') + '.txt')
+[IO.File]::WriteAllText($tagMsgFile, "v$newVersion`n`n$Message`n`n详见 docs/更新日志.md 的 [$newVersion] 条目。",
+    (New-Object System.Text.UTF8Encoding($false)))
+try { $tagRes = Invoke-Git tag -a "v$newVersion" -F $tagMsgFile }
+finally { Remove-Item $tagMsgFile -Force -ErrorAction SilentlyContinue }
 if ($tagRes.Code -ne 0) { throw "打标签失败（标签 v$newVersion 可能已存在）：$($tagRes.Text)" }
 Write-Ok "已打标签 v$newVersion"
 
