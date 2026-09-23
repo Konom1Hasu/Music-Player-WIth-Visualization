@@ -94,10 +94,12 @@
 - 所有弹层、滑槽、滑块、进度条把手均跟随主题
 - 统一极简线性图标（16 套手写 SVG，`stroke-width: 1.7`，圆角端点）
 - 圆角播放按钮与胶囊形暂停图标
-- **封面 3D 磁带**（默认关闭，⚙ 面板可开关）：封面区叠一层可旋转的
-  [Rhine Lab 档案磁带](https://github.com/LBEILC/RhineLabUI) 3D 模型（MIT），透明底叠加、
-  材质配色照抄原项目；限帧 30fps、窗口隐藏即停、失败自动关闭 —— 详见
-  [docs/功能说明.md §10](docs/功能说明.md#10-封面-3d-磁带)
+- **封面 3D 档案**（莱茵生命主题下默认开启，⚙ 面板可开关）：封面区叠一层可旋转的
+  [Rhine Lab 档案](https://github.com/LBEILC/RhineLabUI) 3D 模型（MIT），
+  并支持**拆解 / 重组** —— 照搬原项目 `model-viewer.ts` 的部件分层规范
+  （按 `assemblyPart` 分组、沿 Z 平移 `depth × spread`、阻尼速率 5.5）。
+  转速与播放状态联动；限帧 30fps、窗口隐藏即停、失败自动关闭 —— 详见
+  [docs/功能说明.md §10](docs/功能说明.md#10-封面-3d-档案)
 - **MiSans 字体**：用 `local()` 按需命中，系统装了就用、没装自动回落，不内置字体文件
 
 ---
@@ -242,7 +244,7 @@ cd Music-Player-WIth-Visualization
 │   ├── cover.js                # 封面读取与解析
 │   ├── ncmdump.exe             # 官方 ncmdump，用于兼容全部 NCM 变体
 │   ├── vendor/                 # three.js r147（UMD）+ GLTFLoader，仅「封面 3D」开启时注入
-│   ├── assets/                 # archive-cassette.glb —— 封面 3D 磁带模型（MIT）
+│   ├── assets/                 # archive-cassette.glb（单体）+ archive-assembly.glb（拆解件）
 │   └── package.json            # Electron 入口声明
 ├── versions/                   # 历史版本快照（可视化回滚用）
 │   ├── README.md               # 版本对照表 + 回滚说明
