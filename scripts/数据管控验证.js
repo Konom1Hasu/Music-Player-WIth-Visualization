@@ -92,6 +92,54 @@ fs.writeFileSync(path.join(stale, 'audio', 'x.m4a'), Buffer.alloc(1024, 9));
 W.sweepStaleSessions();
 ok('上次残留的 mp-session-* 被清掉', !fs.existsSync(stale));
 
+/* ---------- 3b. 硬链接保护（真实事故的回归测试） ----------
+   事故经过：bili.js 曾用 fs.linkSync 把用户的 B 站缓存"链"成可播放副本，
+   副本目录在退出时被 wipeDir 擦除；而擦除是"以 r+ 覆写 0 再 unlink"，
+   覆写会透过硬链接直接落到源文件上 —— unlink 只摘掉副本那个目录项，
+   用户的原始缓存却已被原地写成全 0，再播放就是 MediaError 4
+   （"格式不支持或文件头异常"）。实测已毁掉两个真实缓存文件。
+   这里锁死两条不变量：
+     ① wipeFile 不得覆写链接数 > 1 的文件，只允许摘目录项
+     ② ensureM4a 不得再产出与源共享 inode 的副本（硬链接）
+   以及最终结果：擦除副本后源文件内容必须一字不变。 */
+console.log('\n[3b] 硬链接保护（防止擦除副本时毁掉源文件）');
+const hlRoot = path.join(work, 'hardlink-case');
+const hlSession = path.join(hlRoot, 'session');
+fs.mkdirSync(hlSession, { recursive: true });
+const hlSrc = path.join(hlRoot, 'user-cache.m4s');
+const hlPayload = Buffer.alloc(64 * 1024);
+for (let i = 0; i < hlPayload.length; i++) hlPayload[i] = (i * 31 + 7) & 0xff;
+fs.writeFileSync(hlSrc, hlPayload);
+const md5 = (p) => crypto.createHash('md5').update(fs.readFileSync(p)).digest('hex');
+const srcSumBefore = md5(hlSrc);
+
+const hlLink = path.join(hlSession, 'copy.m4a');
+fs.linkSync(hlSrc, hlLink);
+ok('构造出硬链接副本（nlink = 2）', fs.statSync(hlSrc).nlink === 2, 'nlink=' + fs.statSync(hlSrc).nlink);
+
+W.wipeDir(hlSession);
+ok('擦除后副本目录已删除', !fs.existsSync(hlSession));
+ok('源文件仍然存在', fs.existsSync(hlSrc));
+ok('★ 源文件内容未被改动（MD5 一致）', srcSumBefore === md5(hlSrc),
+  srcSumBefore + ' -> ' + md5(hlSrc) + '   ← 源文件被覆写成 0 了！');
+ok('源文件链接数回到 1', fs.statSync(hlSrc).nlink === 1);
+
+/* 反向验证：ensureM4a 不能再产出硬链接 */
+const kmDir = path.join(work, 'link-free');
+fs.mkdirSync(kmDir, { recursive: true });
+const noHead = path.join(work, 'nohead.m4s');   // 无可识别 mp4 头 → 走 offset === 0 分支
+fs.writeFileSync(noHead, hlPayload);
+const kmOut = bili.ensureM4a(noHead, kmDir);
+ok('ensureM4a 对"无可识别头"的文件也返回了副本', !!kmOut);
+if (kmOut) {
+  const so = fs.statSync(kmOut), sn = fs.statSync(noHead);
+  ok('★ 副本不与源共享 inode（不再用 linkSync）', so.ino !== sn.ino,
+    '两者 ino 都是 ' + so.ino);
+  ok('副本链接数为 1（独立文件）', so.nlink === 1, 'nlink=' + so.nlink);
+  W.wipeDir(kmDir);
+  ok('★ 擦除该副本后源文件依然完好', md5(noHead) === srcSumBefore);
+}
+
 /* ---------- 4. 静态断言 ---------- */
 console.log('\n[4] 静态断言：不存在导出派生数据的接口');
 ok('convert-ncm 要求 CTENFDAM 魔数（不做通用解密）', /CTENFDAM/.test(mainSrc));
@@ -102,6 +150,18 @@ ok('prepare-bili-audio 用的是会话目录常量', /ensureM4a\(originalPath,\s
 ok('退出时会销毁会话目录', /shutdownSessionTmp\(\)/.test(mainSrc));
 ok('存在本地审计写入', /function audit\(/.test(mainSrc));
 ok('存在升级清理（擦除 1.0.x 遗留的 userData 副本）', /purgeLegacyAudioCache/.test(mainSrc));
+ok('wipeFile 里有硬链接保护（nlink > 1 只摘目录项）', /st\.nlink\s*>\s*1/.test(mainSrc));
+/* 去掉注释后再做静态断言 —— 否则"注释里提到 linkSync"这种说明性文字会造成误报 */
+function stripComments(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+}
+const biliSrc = fs.readFileSync(path.join(APP, 'bili.js'), 'utf8');
+const biliCode = stripComments(biliSrc);
+ok('bili.js 不再用 linkSync 造副本（注释里提及不算）',
+  !/(?<!un)linkSync\(/.test(biliCode),
+  '仍有调用：' + ((biliCode.match(/.*(?<!un)linkSync\(.*/) || [''])[0]).trim());
 const preload = fs.readFileSync(path.join(APP, 'preload.js'), 'utf8');
 const exposed = (preload.match(/^\s{2}[A-Za-z]+:/gm) || []).map(s => s.trim().replace(':', ''));
 console.log('    preload 暴露的方法: ' + exposed.join(', '));

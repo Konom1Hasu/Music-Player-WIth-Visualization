@@ -155,11 +155,19 @@ function ensureM4a(audioPath, cacheDir, force) {
     }
     return dest;
   }
+  /* ★★ 这里原来是 fs.linkSync（硬链接），已改为一律复制。★★
+     硬链接看起来很美 —— 同盘瞬时、不占额外空间 —— 但它与源文件**共享 inode**，
+     而副本目录会在会话结束时被 wipeDir 擦除。擦除是"以 r+ 覆写 0 再 unlink"，
+     覆写会直接落到共享的 inode 上：unlink 只摘掉副本这个目录项，
+     用户的原始缓存文件却已经被原地写成全 0。
+     实测后果：B 站缓存音频变成全零文件，再播放就是 MediaError 4
+     （"格式不支持或文件头异常"）。多占一份磁盘换绝对安全，值得。 */
   try { if (!force && fs.existsSync(dest) && fs.statSync(dest).size > 0) return dest; } catch (e) { /* ignore */ }
-  try { if (fs.existsSync(dest)) fs.unlinkSync(dest); fs.linkSync(audioPath, dest); return dest; }
-  catch (e) {
-    try { fs.copyFileSync(audioPath, dest); return dest; } catch (e2) { return null; }
-  }
+  try {
+    if (fs.existsSync(dest)) fs.unlinkSync(dest);
+    fs.copyFileSync(audioPath, dest);
+    return dest;
+  } catch (e) { return null; }
 }
 
 function fileToDataUrl(p) {

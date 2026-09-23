@@ -60,6 +60,19 @@ let wipedBytes = 0;
 function wipeFile(p) {
   let st = null;
   try { st = fs.statSync(p); } catch (e) { return; }
+
+  /* ★★ 硬链接保护（真实事故的修复）★★
+     链接数 > 1 表示这个目录项和别处共享同一个 inode —— 例如 bili.js 曾经用
+     fs.linkSync 把用户的缓存文件"链"进来当可播放副本。此时用 'r+' 整天覆写 0
+     会**透过硬链接把源文件也写坏**，而随后的 unlink 只摘掉自己这个目录项，
+     源文件还在、内容却已经全变成 0。实测后果：用户的 B 站缓存音频原地变成全零，
+     再播放就是 MediaError 4（"格式不支持或文件头异常"）。
+     所以这里只摘目录项，绝不覆写别人也指着的 inode。 */
+  if (st.isFile() && st.nlink > 1) {
+    try { fs.unlinkSync(p); } catch (e) { /* ignore */ }
+    return;
+  }
+
   if (st.isFile() && st.size > 0 && wipedBytes < WIPE_BUDGET) {
     try {
       const fd = fs.openSync(p, 'r+');
