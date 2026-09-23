@@ -307,9 +307,20 @@ else {
         Write-Host '通道仍然不通' -ForegroundColor Red
         Show-GitResult $probe
         Write-Host ''
-        Write-Host '下一步：' -ForegroundColor Yellow
-        Write-Host '  · 关掉 Steam++ / Watt Toolkit 对 GitHub 的加速，再重试（最省事）' -ForegroundColor DarkGray
-        Write-Host '  · 单独跑 .\scripts\setup-push-tls.ps1 -Test 看 TLS 是否通了' -ForegroundColor DarkGray
+        # 按错误类型给不同建议：连接层面失败和证书层面失败，处理方式完全不同
+        $kind = Get-FailureKind $probe.Text
+        if ($kind -eq 'network') {
+            Write-Host '这是连接层面的失败（不是证书问题），常见的几种情况：' -ForegroundColor Yellow
+            Write-Host '  · 本机装了 Steam++ / Watt Toolkit 这类加速器 —— 确认它在运行。' -ForegroundColor DarkGray
+            Write-Host '    它会接管 github.com 的解析并走加速通道；它一退出，github.com 往往就直连不上' -ForegroundColor DarkGray
+            Write-Host '    （实测：加 github.com:443 直接 Connection was reset，而其它 GitHub IP 可达）' -ForegroundColor DarkGray
+            Write-Host '  · 或在 Steam++ 里打开 GitHub 的加速项后再重试' -ForegroundColor DarkGray
+        }
+        else {
+            Write-Host '下一步：' -ForegroundColor Yellow
+            Write-Host '  · 关掉 Steam++ / Watt Toolkit 对 GitHub 的加速，再重试（最省事）' -ForegroundColor DarkGray
+            Write-Host '  · 单独跑 .\scripts\setup-push-tls.ps1 -Test 看 TLS 是否通了' -ForegroundColor DarkGray
+        }
         Write-Host '  · 单独跑 .\scripts\push-to-github.ps1 -Check 复现本次探测' -ForegroundColor DarkGray
         Write-Host '  · 远端有本仓库没有的提交时加 -Pull' -ForegroundColor DarkGray
         Write-Host ''
