@@ -26,6 +26,9 @@ contextBridge.exposeInMainWorld('desktop', {
   getDataPolicy: () => ipcRenderer.invoke('get-data-policy'),
   // 清空本地审计日志（只删本机记录，不影响音频文件）
   clearAuditLog: () => ipcRenderer.invoke('clear-audit-log'),
+  // 读随包资源（3D 磁带模型）。file:// 页面不能直接 XHR 本地文件，必须走主进程；
+  // 只放行白名单文件名 → { bytes, size } | { error }
+  readAsset: (name) => ipcRenderer.invoke('read-asset', name),
   // 取内嵌封面（NCM / MP3 / FLAC / M4A / WAV / OGG / APE…）：
   // 传 { path } 或 { bytes, name } → { ok, dataUrl, size, mime, source } | { error }
   readCover: (arg) => ipcRenderer.invoke('read-cover', arg),

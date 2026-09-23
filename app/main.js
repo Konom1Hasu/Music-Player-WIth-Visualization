@@ -997,6 +997,27 @@ ipcMain.handle('clear-audit-log', () => {
   try { fs.rmSync(auditFile(), { force: true }); return { ok: true, count: 0 }; }
   catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
 });
+
+/* 读随包资源（目前只有 3D 磁带模型）。
+   为什么需要这条通道：页面是 file:// 加载的，Chromium 禁止 file:// 页面对本地文件发
+   XHR/fetch，所以 GLTFLoader 没法直接 load('assets/xxx.glb') —— 会撞 CORS。
+   这里由主进程读字节交给渲染进程，再用 loader.parse() 解析。
+   只放行白名单里的文件名：不接受任意路径（否则就成了通用读文件接口）。 */
+const ASSET_ALLOW = new Set(['archive-cassette.glb', 'archive-assembly.glb']);
+ipcMain.handle('read-asset', (_e, name) => {
+  try {
+    if (!name || typeof name !== 'string' || !ASSET_ALLOW.has(name)) {
+      return { error: '不在白名单内的资源：' + String(name) };
+    }
+    const p = path.join(__dirname, 'assets', name);
+    if (!fs.existsSync(p)) return { error: '资源不存在：' + name };
+    const st = fs.statSync(p);
+    if (st.size > 64 * 1024 * 1024) return { error: '资源过大' };
+    return { bytes: fs.readFileSync(p), size: st.size };
+  } catch (e) {
+    return { error: String((e && e.message) || e) };
+  }
+});
 /* 读音频字节，给渲染进程做 blob 兜底（万一 file:// 被限制的第二条路） */
 ipcMain.handle('read-audio', (_e, p) => {
   try {

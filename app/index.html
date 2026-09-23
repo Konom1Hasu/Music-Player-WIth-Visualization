@@ -31,6 +31,18 @@
   .btn:focus-visible,.pill-btn:focus-visible{outline-offset:4px;}
   ::selection{background:var(--accent);color:var(--bg);}
 
+  /* ===== MiSans：只在系统已装时生效，不内置字体文件 =====
+     @font-face 的 src 只给 local()，装了就命中、没装就整条规则失效，
+     浏览器自然回落到下一族（微软雅黑）。
+     这样零体积、也完全绕开 MiSans 授权的模糊地带 —— MiSans 不是 MIT，
+     是小米自己的授权，其 PDF 是子集化的、条款读不出来，所以不做子集化（=不修改字体）。
+     想给四套主题都用上，把下面这条选择器里的 [data-theme="rhine"] 去掉即可。 */
+  @font-face{font-family:"MiSans Local";src:local("MiSans Light"),local("MiSans-Light");font-weight:300;font-display:swap;}
+  @font-face{font-family:"MiSans Local";src:local("MiSans"),local("MiSans Regular"),local("MiSans-Regular");font-weight:400;font-display:swap;}
+  @font-face{font-family:"MiSans Local";src:local("MiSans Demibold"),local("MiSans-Demibold"),local("MiSans SemiBold");font-weight:600;font-display:swap;}
+  @font-face{font-family:"MiSans Local";src:local("MiSans Bold"),local("MiSans-Bold");font-weight:700;font-display:swap;}
+  :root[data-theme="rhine"] body{font-family:"MiSans Local",system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;}
+
   /* ===== 莱茵生命主题（Rhine Lab 风格 · 仪器面板变体）=====
      取值来源：RhineLabUI（明日方舟 · 莱茵生命，MIT）的暗色面规范。它自己的
      DESIGN.md「明暗配色」一节写得很明确：
@@ -153,6 +165,12 @@
   .big-cover{position:relative;z-index:1;flex:1;min-width:0;border-radius:18px;overflow:hidden;
     background:#0b0f18;box-shadow:0 10px 28px rgba(0,0,0,.45);cursor:pointer;}
   .big-cover img{width:100%;height:100%;object-fit:cover;display:block;}
+  /* 3D 磁带画布：铺满封面、默认隐藏。z-index 3 让它盖住封面图（img 无 z-index），
+     但仍低于 #bigFavBtn 的 z-index 2？—— 不，收藏键在 .big-cover 内是 z-index:2，
+     所以画布必须 > 2 才能盖住图、又不遮住按钮：取 3 且给按钮 4。 */
+  #cover3d{position:absolute;inset:0;width:100%;height:100%;z-index:3;display:none;pointer-events:none;}
+  #cover3d.on{display:block;}
+  .big-cover #bigFavBtn{z-index:4;}
   .big-cover::after{content:'';position:absolute;inset:0;border-radius:16px;border:1px solid rgba(255,255,255,.09);pointer-events:none;}
   #bigFavBtn{position:absolute;right:10px;bottom:10px;width:34px;height:34px;border:none;border-radius:50%;z-index:2;
     background:rgba(0,0,0,.45);color:#fff;font-size:17px;line-height:1;cursor:pointer;opacity:.85;}
@@ -293,6 +311,9 @@
       <div class="stage-left">
         <div class="big-cover" id="bigCover" title="点击编辑这首歌的信息 / 封面">
           <img id="bigCoverImg" alt="">
+          <!-- 3D 磁带画布：叠在封面之上、alpha 透明（封面作为背景透出来）。
+               只有开启「封面 3D」才会创建 WebGL 上下文并加载模型；默认完全不存在。 -->
+          <canvas id="cover3d"></canvas>
           <button id="bigFavBtn" title="收藏"><svg viewBox="0 0 24 24"><path d="M12 20.2S3.8 15.2 3.8 10.2A4.2 4.2 0 0 1 12 7.9a4.2 4.2 0 0 1 8.2 2.3c0 5-8.2 10-8.2 10z"/></svg></button>
         </div>
       </div>
@@ -372,6 +393,7 @@
     <div class="row2" style="border-top:1px solid var(--card-border);padding-top:8px;"><span style="width:44px" title="耳机/键盘媒体键的注册状态：被游戏占用时会在这里显示">媒体键</span><span id="hkLabel" style="font-size:12px;color:var(--muted)">自检中…</span></div>
     <div class="row2"><span style="width:44px" title="派生数据的管控状态：解密结果只在内存、解出的音频只落在会话临时目录、退出即擦除">数据管控</span><span id="dcLabel" style="font-size:12px;color:var(--muted)">自检中…</span><button class="btn" id="dcClearBtn" style="padding:3px 8px;font-size:11px;" title="清空本机审计日志（只删记录，不动任何音频文件）">清日志</button></div>
     <div class="row2"><span style="width:44px" title="当前程序版本">版本</span><span id="verLabel" style="font-size:12px;color:var(--muted)">—</span></div>
+    <div class="row2"><span style="width:44px" title="在封面区叠一层可旋转的「档案磁带」3D 模型（RhineLabUI 的 archive-cassette）。默认关闭：3D 会占用 GPU，开着频谱可视化时可能影响帧率。">封面 3D</span><span id="c3dLabel" style="font-size:12px;color:var(--muted)">关闭</span><button class="btn" id="c3dBtn" style="padding:3px 8px;font-size:11px;" title="开启/关闭封面 3D 磁带">开启</button></div>
   </div>
 </div>
 <div class="drag-overlay">拖入音频文件即可播放</div>
@@ -1328,7 +1350,11 @@ $('#jitSlider').addEventListener('input', e => {
 let vizToken = 0;
 let winMinimized = false;
 if (window.desktop && window.desktop.on) {
-  window.desktop.on('win-state', (st) => { winMinimized = !!(st && st.minimized); });
+  window.desktop.on('win-state', (st) => {
+    winMinimized = !!(st && st.minimized);
+    /* 顺带告诉 3D 磁带：窗口最小化/隐藏时不要画（省 GPU，和可视化降频同一个理由） */
+    if (typeof C3D !== 'undefined') C3D.visible = !winMinimized;
+  });
 }
 /* 暂停时画面上还有没有"看得见"的柱子（>1.2% 高，或余辉峰值线 >2%）。
    这是"暂停后该用多快刷新"的判据：只要还有可见余量就必须 50fps，
@@ -1413,6 +1439,215 @@ function setBigCover(src) {
   if (img) img.src = src;
   if (bleed) bleed.style.backgroundImage = 'url("' + String(src).replace(/"/g, '%22') + '")';
 }
+
+/* ================= 封面 3D 磁带（默认关闭） =================
+   模型是 RhineLabUI 的 archive-cassette.glb（MIT），材质名与它 theme-material.ts 里
+   的 surfaces 表完全对应，所以这里能照抄那套配色，把磁带调成同一个"莱茵生命"材质。
+
+   为什么默认关闭、而且要做这么多保护：
+     · 它要在封面区再开一个 WebGL 上下文。本机是 Intel UHD，频谱可视化已经占着 GPU，
+       我们之前为帧率折腾过很久 —— 3D 不能默认吃掉这些预算。
+     · 页面是 file:// 加载的，Chromium 禁止对本地文件发 XHR，所以 GLTFLloader 没法直接
+       load()，必须走主进程 read-asset 读字节再 parse()。
+     · 二进制依赖（three.min.js / GLTFLoader.js / .glb）也是按需注入：不开启就一行都不加载。
+   任何一步失败都会自动关掉自己并提示一次，封面回到 2D，不影响原有体验。 */
+const C3D = {
+  on: false,
+  ready: false,
+  failed: false,
+  loading: false,
+  renderer: null, scene: null, camera: null, model: null,
+  raf: 0, lastT: 0, acc: 0, spin: 0,
+  visible: true,
+  /* 材质配色照抄 RhineLabUI 的 theme-material.ts（surfaces 表）。
+     表里没有的按名字兜底，保证任何材质都有合理颜色、不会渲染成纯白。 */
+  surfaces: {
+    Frosted_Polymer: '#626b70', Ivory_Edges: '#687277', Optical_Diffuser: '#192226',
+    Titanium_Fasteners: '#b1b9bb', Index_Inlay: '#c6a36b', Printed_Label: '#303a3e',
+    Subsurface_Optics: '#939e9f', Optical_Edges: '#bbc3bc', Carbon_Ink: '#b6bdb8'
+  },
+  bg: '#11181b', floor: '#192125', mist: '#263136'
+};
+function c3dSetLabel() {
+  const l = $('#c3dLabel'), b = $('#c3dBtn');
+  if (!l || !b) return;
+  if (C3D.failed) { l.textContent = '不可用'; b.textContent = '重试'; return; }
+  l.textContent = C3D.on ? (C3D.ready ? '开启' : '加载中…') : '关闭';
+  b.textContent = C3D.on ? '关闭' : '开启';
+}
+function c3dPickColor(name) {
+  const n = String(name || '');
+  if (C3D.surfaces[n]) return C3D.surfaces[n];
+  const key = Object.keys(C3D.surfaces).find(k => n.indexOf(k) === 0);
+  if (key) return C3D.surfaces[key];
+  if (/Amber|Index|Inlay/i.test(n)) return '#c6a36b';   // 琥珀内嵌
+  if (/Orange|Brass|Gold/i.test(n)) return '#bb8850';
+  return '#969f9f';
+}
+function c3dLoadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('脚本加载失败：' + src));
+    document.head.appendChild(s);
+  });
+}
+function c3dFail(why) {
+  C3D.failed = true;
+  C3D.on = false;
+  try { localStorage.setItem('mp_cover3d', '0'); } catch (e) { /* ignore */ }
+  const cv = $('#cover3d');
+  if (cv) cv.classList.remove('on');
+  c3dSetLabel();
+  toast('封面 3D 不可用：' + why + '（已自动关闭，封面仍为 2D）');
+}
+function c3dResize() {
+  if (!C3D.renderer || !C3D.camera) return;
+  const cv = $('#cover3d');
+  if (!cv) return;
+  const w = cv.clientWidth || 1, h = cv.clientHeight || 1;
+  /* 像素比封顶 1.5：和可视化那边一样，别在核显上按 2x 渲染 */
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  C3D.renderer.setPixelRatio(dpr);
+  C3D.renderer.setSize(w, h, false);
+  C3D.camera.aspect = w / h;
+  c3dFitCamera();
+  C3D.camera.updateProjectionMatrix();
+}
+/* 按包围盒把模型装进视口（模型原点和尺寸都未知，硬编码距离会跑偏） */
+function c3dFitCamera() {
+  if (!C3D.model || !C3D.camera) return;
+  const box = new THREE.Box3().setFromObject(C3D.model);
+  if (!isFinite(box.min.x) || !isFinite(box.max.x)) return;
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  C3D.model.position.sub(center);              // 把模型中心挪到原点，绕自身旋转
+  const radius = Math.max(size.x, size.y, size.z) * 0.5 || 1;
+  const fov = C3D.camera.fov * Math.PI / 180;
+  const dist = radius / Math.tan(fov / 2) * 1.55;
+  C3D.camera.position.set(0, radius * 0.18, dist);
+  C3D.camera.lookAt(0, 0, 0);
+}
+function c3dFrame(t) {
+  if (!C3D.on || !C3D.renderer) return;
+  C3D.raf = requestAnimationFrame(c3dFrame);
+  if (!C3D.lastT) C3D.lastT = t;
+  const dt = Math.min((t - C3D.lastT) / 1000, 0.1);
+  C3D.lastT = t;
+  /* 限帧到 ~30fps：省一半 GPU，视觉上转得慢、感受不到差别 */
+  C3D.acc += dt;
+  if (C3D.acc < 1 / 30) return;
+  const step = C3D.acc; C3D.acc = 0;
+  if (!C3D.visible) return;                     // 窗口被最小化/隐藏时不画
+  C3D.spin += step * 0.28;                      // 约 22 秒一圈：慢，像展台上的样品
+  if (C3D.model) {
+    C3D.model.rotation.y = C3D.spin;
+    C3D.model.rotation.x = Math.sin(C3D.spin * 0.45) * 0.10;   // 轻微点头，避免像静止贴图
+  }
+  C3D.renderer.render(C3D.scene, C3D.camera);
+}
+async function c3dEnable() {
+  if (C3D.loading) return;
+  const cv = $('#cover3d');
+  if (!cv) return;
+  if (!window.desktop || !window.desktop.readAsset) {
+    c3dFail('非桌面版'); return;
+  }
+  C3D.loading = true;
+  C3D.failed = false;
+  c3dSetLabel();
+  try {
+    if (!window.THREE) await c3dLoadScript('vendor/three.min.js');
+    if (!THREE.GLTFLoader) await c3dLoadScript('vendor/GLTFLoader.js');
+    if (!THREE || !THREE.GLTFLoader) throw new Error('three.js 未就绪');
+
+    if (!C3D.renderer) {
+      C3D.renderer = new THREE.WebGLRenderer({ canvas: cv, alpha: true, antialias: true, powerPreference: 'low-power' });
+      C3D.renderer.setClearAlpha(0);                 // 透明底：底下的专辑封面透出来
+      if ('outputEncoding' in C3D.renderer) C3D.renderer.outputEncoding = THREE.sRGBEncoding;
+      C3D.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      C3D.renderer.toneMappingExposure = 1.05;
+
+      C3D.scene = new THREE.Scene();
+      C3D.camera = new THREE.PerspectiveCamera(34, 1, 0.01, 100);
+
+      /* 灯光：一盏半球环境光打底 + 两盏方向光做轮廓，对应它场景里的冷灰/烟灰调 */
+      C3D.scene.add(new THREE.HemisphereLight(0xdfe6e6, 0x1b2429, 1.15));
+      const key = new THREE.DirectionalLight(0xffffff, 1.35); key.position.set(2.4, 3.2, 2.6);
+      const rim = new THREE.DirectionalLight(0xbcd2d6, 0.75); rim.position.set(-2.8, 1.2, -2.4);
+      C3D.scene.add(key, rim);
+    }
+
+    if (!C3D.model) {
+      const res = await window.desktop.readAsset('archive-cassette.glb');
+      if (!res || res.error || !res.bytes) throw new Error((res && res.error) || '读取模型失败');
+      const buf = res.bytes.buffer.slice(res.bytes.byteOffset, res.bytes.byteOffset + res.bytes.byteLength);
+      const gltf = await new Promise((resolve, reject) => {
+        new THREE.GLTFLoader().parse(buf, '', resolve, reject);
+      });
+      const root = gltf.scene || (gltf.scenes && gltf.scenes[0]);
+      if (!root) throw new Error('模型里没有场景');
+      /* 按材质名上色。材质是共享的，先 clone 再改，避免影响同一模型的其它实例 */
+      root.traverse(o => {
+        if (!o.isMesh) return;
+        o.frustumCulled = true;
+        const apply = (m) => {
+          const c = m.clone();
+          const col = c3dPickColor(c.name);
+          if (c.color) c.color.set(col);
+          if (c.roughness !== undefined) c.roughness = Math.min(1, (c.roughness ?? 0.5) * 0.9 + 0.1);
+          if (c.metalness !== undefined) c.metalness = Math.min(1, (c.metalness ?? 0.2) * 0.8 + 0.15);
+          return c;
+        };
+        o.material = Array.isArray(o.material) ? o.material.map(apply) : apply(o.material);
+      });
+      C3D.model = root;
+      C3D.scene.add(root);
+      /* 「底盘」：一块极暗的圆盘，给磁带一点落影感，和它的 archive-floor 呼应 */
+      const plate = new THREE.Mesh(
+        new THREE.CircleGeometry(1, 48),
+        new THREE.MeshBasicMaterial({ color: new THREE.Color(C3D.floor), transparent: true, opacity: 0.55 })
+      );
+      plate.rotation.x = -Math.PI / 2;
+      plate.position.y = -0.62;
+      plate.scale.setScalar(0.95);
+      C3D.scene.add(plate);
+      C3D.plate = plate;
+    }
+
+    c3dResize();
+    C3D.model.rotation.set(0, 0, 0);
+    C3D.spin = 0;
+    cv.classList.add('on');
+    C3D.on = true;
+    C3D.ready = true;
+    C3D.lastT = 0; C3D.acc = 0;
+    if (!C3D.raf) C3D.raf = requestAnimationFrame(c3dFrame);
+    try { localStorage.setItem('mp_cover3d', '1'); } catch (e) { /* ignore */ }
+    c3dSetLabel();
+  } catch (e) {
+    c3dFail(String((e && e.message) || e));
+  } finally {
+    C3D.loading = false;
+  }
+}
+function c3dDisable() {
+  C3D.on = false;
+  if (C3D.raf) { cancelAnimationFrame(C3D.raf); C3D.raf = 0; }
+  const cv = $('#cover3d');
+  if (cv) cv.classList.remove('on');
+  try { localStorage.setItem('mp_cover3d', '0'); } catch (e) { /* ignore */ }
+  c3dSetLabel();
+}
+if ($('#c3dBtn')) {
+  $('#c3dBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (C3D.on) c3dDisable(); else c3dEnable();
+  });
+}
+/* 窗口尺寸变化：封面尺寸变了，画布和相机要跟着重算 */
+window.addEventListener('resize', () => { if (C3D.on) c3dResize(); });
 function renderNowPlaying() {
   const s = songs.find(x => x.id === currentId);
   if (!s) {
@@ -2343,6 +2578,17 @@ function pushMiniBars() {
 }
 
 /* ================= 渲染模式 / GPU 状态 ================= */
+/* 封面 3D 磁带的开关也在这里恢复。
+   注意**延迟 1.5 秒**再真正加载：three.min.js(593KB) + GLTFLoader(101KB) +
+   模型(3.4MB) 加起来不小，跟首屏渲染抢带宽/CPU 会让启动那一瞬掉帧。
+   而且它是可选项，晚一点出现完全无所谓。 */
+(function initCover3D() {
+  let want = false;
+  try { want = localStorage.getItem('mp_cover3d') === '1'; } catch (e) { want = false; }
+  c3dSetLabel();
+  if (!want) return;
+  setTimeout(() => { c3dEnable(); }, 1500);
+})();
 (function initRenderMode() {
   let cur = 'gpu';
   try { cur = localStorage.getItem('mp_renderMode') || 'gpu'; } catch (e) {}
