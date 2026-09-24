@@ -4,6 +4,10 @@ dist/
 _out/
 build/
 
+# app/ui/ 是 app-rhine 构建产物的拷贝（约 30 MB，含字体/配乐/GLB），由构建脚本同步，
+# 不入库 —— 源在 app-rhine/dist（也由 npm run build 重新生成）。
+app/ui/
+
 # ===== 依赖 =====
 node_modules/
 package-lock.json

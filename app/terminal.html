@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RHINE LAB · 档案终端</title>
+<style>
+  /* ===== 材质令牌（取自 Blender 工程 art/*.py 的精确 RGB） ===== */
+  :root{
+    --frost:#fbf9f6;        /* Frosted_Polymer 磨砂外壳 */
+    --ivory:#f0eae3;        /* Ivory_Edges 象牙边缘 */
+    --diffuser:#ece6e1;     /* Optical_Diffuser */
+    --label:#e8e3d6;        /* Printed_Label */
+    --ink:#060706;          /* Carbon_Ink 碳黑墨 */
+    --ceramic:#bdb4ad;      /* Internal_Ceramic */
+    --optics:#b2aca8;       /* Subsurface_Optics */
+    --film-edge:#918b83;    /* Optical_Film_Edge */
+    --amber:#7a2e0d;        /* Amber_Optical_Inlay 琥珀 */
+    --film:#c9c1b6;         /* Optical_Film */
+    --index:#ab8766;        /* Index_Inlay */
+    --engrave:#918a80;      /* Case_Engraving */
+    --hi:#e5ded4;           /* Case_Engraving_Highlight */
+    --titanium:#94999c;     /* Titanium_Fasteners */
+    --letter:#cfc8bf;       /* Moulded_Lettering */
+    --champagne:#a3754a;    /* Champagne_Index 香槟索引（强调） */
+    --studio:#ccc4b8;       /* Warm_Studio_World 摄影棚暖灰 */
+    --studio-deep:#a99f92;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden}
+  body{
+    font-family:"MiSans","MiSans Local",system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;
+    background:radial-gradient(140% 120% at 50% 28%, #b3a99b 0%, #8b8175 100%);
+    color:var(--ink);
+    -webkit-user-select:none;user-select:none;
+  }
+  canvas#gl{position:fixed;inset:0;display:block;z-index:0;}
+
+  /* ===== 覆盖层（HUD 投影到终端部件上） ===== */
+  #ui{position:fixed;inset:0;z-index:1;pointer-events:none;}
+  #ui *{pointer-events:auto;}
+
+  /* 歌曲信息 —— 投影到左上序列标签块 */
+  #np{position:absolute;transform:translate(-50%,-100%);
+    text-align:left;max-width:280px;padding-bottom:6px;}
+  #npArtist{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--engrave);font-weight:600;}
+  #npTitle{font-size:22px;font-weight:700;color:var(--ink);line-height:1.2;margin:3px 0;
+    overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}
+  #npAlbum{font-size:12px;color:var(--engrave);letter-spacing:.04em;}
+  #npIndex{display:inline-block;margin-top:6px;padding:1px 6px;border:1px solid var(--index);
+    color:var(--champagne);font-size:10px;letter-spacing:.1em;font-variant-numeric:tabular-nums;}
+
+  /* 封面 —— 投影到大光学腔（圆形裁切，磨砂边缘） */
+  #lensCover{position:absolute;border-radius:50%;overflow:hidden;
+    box-shadow:0 0 0 1px var(--index), 0 8px 30px rgba(28,29,23,.25);
+    background:var(--ivory);display:none;}
+  #lensCover img{width:100%;height:100%;object-fit:cover;opacity:.92;filter:saturate(1.05);}
+
+  /* 进度环 —— 琥珀，绕大光学腔 */
+  #ringWrap{position:absolute;transform:translate(-50%,-50%);display:none;}
+  #ringBg{fill:none;stroke:var(--film);stroke-width:3;}
+  #ringFg{fill:none;stroke:var(--amber);stroke-width:3;stroke-linecap:round;
+    transition:stroke-dashoffset .15s linear;}
+
+  /* 时间读数 —— 投影到小光学腔 */
+  #timeReadout{position:absolute;transform:translate(-50%,-50%);text-align:center;
+    font-variant-numeric:tabular-nums;letter-spacing:.03em;}
+  #timeReadout .t{font-size:18px;font-weight:700;color:var(--ink);}
+  #timeReadout .d{font-size:11px;color:var(--engrave);margin-top:2px;}
+
+  /* 频谱 —— 投影到右下排气槽区 */
+  #viz{position:absolute;transform:translate(-50%,-50%);}
+
+  /* 顶部工具（右上） */
+  #topbar{position:absolute;top:14px;right:14px;display:flex;gap:8px;}
+  .tbtn{padding:6px 12px;font-size:12px;letter-spacing:.06em;cursor:pointer;
+    background:color-mix(in srgb, var(--frost) 82%, transparent);
+    border:1px solid var(--index);color:var(--champagne);border-radius:2px;
+    font-family:inherit;transition:background .15s,border-color .15s,color .15s;}
+  .tbtn:hover{background:var(--champagne);color:var(--frost);}
+
+  /* 底部传输条 */
+  #transport{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);
+    display:flex;align-items:center;gap:14px;padding:10px 18px;
+    background:color-mix(in srgb, var(--frost) 88%, transparent);
+    border:1px solid var(--film);border-radius:3px;
+    box-shadow:0 6px 24px rgba(28,29,23,.18);}
+  .icon-btn{width:40px;height:40px;border-radius:50%;border:1px solid var(--index);
+    background:var(--frost);color:var(--champagne);font-size:15px;line-height:1;cursor:pointer;
+    display:inline-flex;align-items:center;justify-content:center;transition:transform .12s,background .15s,color .15s;}
+  .icon-btn:hover{transform:translateY(-1px);background:var(--champagne);color:var(--frost);}
+  #playBtn{width:52px;height:52px;background:linear-gradient(135deg,var(--champagne),var(--amber));
+    border:none;color:var(--frost);font-size:18px;box-shadow:0 4px 16px -4px var(--champagne);}
+  #playBtn:hover{background:linear-gradient(135deg,var(--amber),var(--champagne));}
+  .icon-btn svg{width:18px;height:18px;}
+  .time{font-variant-numeric:tabular-nums;font-size:12px;color:var(--engrave);letter-spacing:.03em;}
+  #seek{width:200px;accent-color:var(--champagne);cursor:pointer;}
+
+  /* 播放列表抽屉（右侧） */
+  #playlist{position:absolute;top:0;right:0;bottom:0;width:320px;
+    background:color-mix(in srgb, var(--frost) 94%, transparent);
+    border-left:1px solid var(--film);padding:14px;display:flex;flex-direction:column;
+    transform:translateX(100%);transition:transform .25s ease;pointer-events:auto;}
+  #playlist.open{transform:translateX(0);}
+  #plHead{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
+  #plHead h2{font-size:14px;letter-spacing:.14em;font-weight:700;color:var(--ink);}
+  #plHead small{font-size:11px;color:var(--engrave);font-variant-numeric:tabular-nums;}
+  #plBody{flex:1;overflow-y:auto;min-height:0;}
+  .row{display:flex;align-items:center;gap:10px;padding:8px 6px;cursor:pointer;
+    border-bottom:1px solid color-mix(in srgb, var(--film) 50%, transparent);}
+  .row:hover{background:color-mix(in srgb, var(--index) 18%, transparent);}
+  .row.active{background:color-mix(in srgb, var(--champagne) 14%, transparent);
+    box-shadow:inset 2px 0 0 var(--champagne);}
+  .row .idx{width:24px;text-align:right;font-size:11px;color:var(--engrave);font-variant-numeric:tabular-nums;flex:none;}
+  .row .meta{flex:1;min-width:0;}
+  .row .tt{font-size:13px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .row .ar{font-size:11px;color:var(--engrave);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .row .fav{width:20px;text-align:center;font-size:12px;cursor:pointer;color:var(--film-edge);flex:none;}
+  .row .fav.on{color:var(--amber);}
+  .row .del{width:20px;text-align:center;font-size:12px;cursor:pointer;color:var(--film-edge);flex:none;}
+  .row .del:hover{color:var(--amber);}
+
+  /* 歌词 */
+  #lyrics{position:absolute;left:50%;top:64%;transform:translate(-50%,0);
+    text-align:center;max-width:520px;pointer-events:none;
+    font-size:15px;color:var(--engrave);line-height:1.9;
+    text-shadow:0 1px 0 var(--frost);}
+  #lyrics .cur{color:var(--champagne);font-size:18px;font-weight:700;}
+
+  /* 提示 */
+  #toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);
+    background:var(--ink);color:var(--frost);padding:8px 16px;font-size:12px;
+    border-radius:2px;opacity:0;pointer-events:none;transition:opacity .25s;z-index:3;}
+  #toast.show{opacity:.95;}
+
+  ::-webkit-scrollbar{width:8px}
+  ::-webkit-scrollbar-thumb{background:var(--film);border-radius:0}
+  ::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<div id="ui">
+  <div id="np"><div id="npArtist"></div><div id="npTitle">档案终端</div><div id="npAlbum"></div><span id="npIndex">NO.---</span></div>
+  <div id="lensCover"><img id="lensCoverImg" alt=""></div>
+  <div id="ringWrap">
+    <svg id="ringSvg" width="220" height="220" viewBox="0 0 220 220">
+      <circle id="ringBg" cx="110" cy="110" r="102"/>
+      <circle id="ringFg" cx="110" cy="110" r="102" transform="rotate(-90 110 110)"/>
+    </svg>
+  </div>
+  <div id="timeReadout"><div class="t" id="timeNow">0:00</div><div class="d" id="timeDur">/ 0:00</div></div>
+  <canvas id="viz" width="180" height="70"></canvas>
+
+  <div id="topbar">
+    <button class="tbtn" id="addBtn">导入</button>
+    <button class="tbtn" id="folderBtn">文件夹</button>
+    <button class="tbtn" id="biliBtn">B站缓存</button>
+    <button class="tbtn" id="listBtn">列表</button>
+  </div>
+
+  <div id="transport">
+    <button class="icon-btn" id="modeBtn" title="播放模式">
+      <svg viewBox="0 0 24 24"><path d="M17 2.6 20.4 6 17 9.4"/><path d="M20.4 6H7.2A4.2 4.2 0 0 0 3 10.2"/><path d="M7 21.4 3.6 18 7 14.6"/><path d="M3.6 18h13.2A4.2 4.2 0 0 0 21 13.8"/></svg>
+    </button>
+    <button class="icon-btn" id="prevBtn" title="上一首">
+      <svg viewBox="0 0 24 24"><path d="M6 5v14"/><path d="M19 5l-10 7 10 7z"/></svg>
+    </button>
+    <button class="icon-btn" id="playBtn" title="播放/暂停">
+      <svg id="playIcon" viewBox="0 0 24 24"><path d="M8 5.2v13.6L19 12z"/></svg>
+    </button>
+    <button class="icon-btn" id="nextBtn" title="下一首">
+      <svg viewBox="0 0 24 24"><path d="M18 5v14"/><path d="M5 5l10 7-10 7z"/></svg>
+    </button>
+    <span class="time" id="curTime">0:00</span>
+    <input type="range" id="seek" min="0" max="1000" value="0">
+    <span class="time" id="durTime">0:00</span>
+  </div>
+
+  <div id="lyrics"></div>
+
+  <div id="playlist">
+    <div id="plHead"><h2>档案阵列</h2><small id="plCount">0</small></div>
+    <div id="plBody"></div>
+  </div>
+</div>
+
+<audio id="audio" preload="metadata"></audio>
+<input type="file" id="fileInput" multiple accept="audio/*,.ncm" hidden>
+<input type="file" id="folderInput" webkitdirectory hidden>
+
+<script>
+'use strict';
+/* ============================================================
+   RHINE LAB · 档案终端播放器
+   界面 = Blender 档案终端（archive-assembly.glb）本身；
+   播放逻辑复用 Electron 后端 IPC（window.desktop）。
+   ============================================================ */
+
+/* ---------- 工具 ---------- */
+const $ = (s, r) => (r || document).querySelector(s);
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+const fmt = (s) => { if (!isFinite(s)) return '0:00'; s = Math.max(0, Math.floor(s)); const m = Math.floor(s / 60), ss = s % 60; return m + ':' + String(ss).padStart(2, '0'); };
+let toastTimer = null;
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2400);
+}
+
+/* ---------- 材质令牌 → 主题（用于画布频谱等） ---------- */
+const PAL = { champagne:'#a3754a', amber:'#7a2e0d', index:'#ab8766', ink:'#060706', frost:'#fbf9f6', film:'#c9c1b6' };
+
+/* ============================================================
+   一、Three.js 档案终端渲染
+   ============================================================ */
+const GL = { ready:false, failed:false, renderer:null, scene:null, camera:null, model:null, root:null, rotY:0, rotTarget:0, rotVel:0, swayT:0 };
+/* 相机方向沿用 setup_studio.py（前左上方 3/4），但拉近到终端足够大；透视营造纵深。 */
+const CAM = { pos:[-4.6, 4.4, 6.9], target:[0, 1.9, 0], fov:42 };
+
+/* 3D 锚点（Blender 坐标 → GLB 坐标）：用于把 HUD 投影到对应部件 */
+const ANCHORS = {
+  lens:      { p:[-0.425, 1.80, 0.10], r:0.92 },   // 大光学腔
+  smallLens: { p:[ 1.125, 2.455, 0.10], r:0.55 },   // 小光学腔
+  label:     { p:[-1.36, 3.00, 0.16] },              // 序列标签块
+  vents:     { p:[ 1.45, 0.57, 0.10], w:0.9, h:0.3 } // 排气槽区
+};
+const SURFACES = {  // Blender 材质精确值（覆盖用，保证忠实）
+  'Frosted_Polymer':'#fbf9f6','Ivory_Edges':'#f0eae3','Optical_Diffuser':'#ece6e1',
+  'Printed_Label':'#e8e3d6','Carbon_Ink':'#060706','Internal_Ceramic':'#bdb4ad',
+  'Optical_Edges':'#f0ebe5','Subsurface_Optics':'#b2aca8','Optical_Film_Edge':'#918b83',
+  'Amber_Optical_Inlay':'#7a2e0d','Optical_Film':'#c9c1b6','Index_Inlay':'#ab8766',
+  'Case_Engraving':'#918a80','Case_Engraving_Highlight':'#e5ded4','Titanium_Fasteners':'#94999c',
+  'Moulded_Lettering':'#cfc8bf','Champagne_Index':'#a3754a'
+};
+function pickColor(name) {
+  const n = String(name || '');
+  const key = Object.keys(SURFACES).find(k => n.indexOf(k) === 0);
+  return key ? SURFACES[key] : '#bdb4ad';
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = resolve; s.onerror = () => reject(new Error('load ' + src));
+    document.head.appendChild(s);
+  });
+}
+function toArrayBuffer(b) {
+  if (b instanceof ArrayBuffer) return b;
+  if (b && b.buffer) return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+  return b;
+}
+async function readGlbBytes(name) {
+  if (window.desktop && window.desktop.readAsset) {
+    const r = await window.desktop.readAsset(name);
+    if (r && !r.error && r.bytes) return toArrayBuffer(r.bytes);
+  }
+  const r = await fetch('assets/' + name);   // 兜底：http 环境
+  if (!r.ok) throw new Error('fetch ' + name + ' ' + r.status);
+  return await r.arrayBuffer();
+}
+
+async function initGL() {
+  try {
+    if (!window.THREE) await loadScript('vendor/three.min.js');
+    if (!THREE.GLTFLoader) await loadScript('vendor/GLTFLoader.js');
+    const canvas = $('#gl');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, alpha:false });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.02;
+    GL.renderer = renderer;
+
+    const scene = new THREE.Scene();
+    /* Warm_Studio_World 的背景色 (.8,.77,.72)=#CCC4B8，但 setup_studio.py 里强度只有 0.65
+       —— 实际出图的"棚"是更暗的暖灰。用素色会与象牙面板撞亮度，压暗后终端才是主角。 */
+    scene.background = new THREE.Color(0xa79d90);
+    GL.scene = scene;
+
+    // 摄影棚灯光（对应 setup_studio.py 的三盏柔光 + 暖色世界 .8/.77/.72）
+    scene.add(new THREE.HemisphereLight(0xf2e6d6, 0x9a8b7a, 0.85));
+    const key = new THREE.DirectionalLight(0xfff4e4, 1.45); key.position.set(-4, 6, 8); scene.add(key);
+    const rim = new THREE.DirectionalLight(0xe8dcc8, 0.85);  rim.position.set(5, 3, 6);  scene.add(rim);
+    const fill = new THREE.DirectionalLight(0xfff0dc, 0.55);  fill.position.set(1, 2, -7); scene.add(fill);
+
+    GL.camera = makeCamera();
+    GL.scene.add(GL.camera);
+
+    // 载入装配体（含磨砂盖板 + 内构 + 香槟/琥珀部件）
+    const bytes = await readGlbBytes('archive-assembly.glb');
+    const gltf = await new Promise((res, rej) => new THREE.GLTFLoader().parse(bytes, '', res, rej));
+    const root = gltf.scene || gltf.scenes[0];
+    styleModel(root);
+    // 居中：以包围盒中心对齐到 (0,1.9,0)
+    const box = new THREE.Box3().setFromObject(root);
+    const c = box.getCenter(new THREE.Vector3());
+    root.position.sub(c).add(new THREE.Vector3(0, 1.9, 0));
+    GL.model = root;
+    GL.root = root;
+    GL.scene.add(root);
+
+    GL.ready = true;
+    onGLReady();
+    requestAnimationFrame(frame);
+  } catch (e) {
+    GL.failed = true;
+    console.error('[终端] 3D 初始化失败', e);
+    toast('3D 终端加载失败：' + ((e && e.message) || e));
+  }
+}
+function makeCamera() {
+  const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+  const cam = new THREE.PerspectiveCamera(CAM.fov, aspect, 0.1, 300);
+  cam.position.set(...CAM.pos);
+  cam.lookAt(...CAM.target);
+  return cam;
+}
+function styleModel(root) {
+  root.traverse(o => {
+    if (!o.isMesh) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) {
+      if (!m) continue;
+      const col = pickColor(m.name);
+      if (m.color) m.color.set(col);
+      if (m.roughness !== undefined) m.roughness = Math.min(1, (m.roughness ?? .5) * .9 + .08);
+      if (m.metalness !== undefined) m.metalness = Math.min(1, (m.metalness ?? 0) * .9);
+      // 磨砂盖板：更透一点，让内构（琥珀环/光学腔/刻线）透出来
+      if (/Frosted_Polymer|Frosted/i.test(m.name)) {
+        m.transparent = true; m.opacity = 0.30; m.depthWrite = false;
+        m.transmission = 0; m.roughness = 0.42;
+      }
+      // 琥珀光学嵌件 = 点亮的光学核心：给它自发光，让环"亮起来"
+      if (/Amber/i.test(m.name)) {
+        m.emissive = new THREE.Color(0x7a2e0d);
+        m.emissiveIntensity = 0.85;
+        m.roughness = 0.3;
+      }
+      // 香槟索引（金属 0.48）：提一点自发光当高亮条
+      if (/Champagne_Index/i.test(m.name)) {
+        m.emissive = new THREE.Color(0x3a2110);
+        m.emissiveIntensity = 0.5;
+      }
+      // 内部陶瓷刻线/排气：压深一点，才有"刻在板上"的层次
+      if (/Internal_Ceramic|Case_Engraving$/i.test(m.name)) {
+        m.color.multiplyScalar(0.72);
+      }
+    }
+  });
+}
+function onGLReady() {
+  $('#lensCover').style.display = 'block';
+  $('#ringWrap').style.display = 'block';
+}
+function project(p, out) {
+  /* ★ Vector3.project() 不会刷新相机矩阵：lookAt() 只改四元数，matrixWorld 要等
+     renderer 渲染时才更新。所以这里手动刷新，否则首次投影用的是单位矩阵 → HUD 全错位。 */
+  GL.camera.updateMatrixWorld();
+  GL.camera.matrixWorldInverse.copy(GL.camera.matrixWorld).invert();
+  out.project(GL.camera);
+  return [ (out.x * 0.5 + 0.5) * window.innerWidth, (-out.y * 0.5 + 0.5) * window.innerHeight ];
+}
+/* ★ 不要在顶层 new THREE.* —— three.min.js 是 initGL() 里懒加载的，
+   顶层构造会在脚本求值时抛 "THREE is not defined"，整个脚本直接死掉。改成用前才建。 */
+let _v = null, _v2 = null, _w = null;
+/* 把锚点从模型局部坐标转到世界坐标（模型会绕 Y 轴旋转，锚点要跟着转） */
+function worldPoint(p, out) {
+  if (!_w) _w = new THREE.Vector3();
+  GL.root.updateMatrixWorld();
+  out.set(p[0], p[1], p[2]).applyMatrix4(GL.root.matrixWorld);
+  return out;
+}
+function placeOverlays() {
+  if (!GL.ready) return;
+  if (!_v) { _v = new THREE.Vector3(); _v2 = new THREE.Vector3(); _w = new THREE.Vector3(); }
+  // 大光学腔：封面 + 进度环
+  const c = worldPoint(ANCHORS.lens.p, _v);
+  const [lx, ly] = project(c, _v);
+  const [rx, ry] = project(worldPoint([ANCHORS.lens.p[0] + ANCHORS.lens.r, ANCHORS.lens.p[1], ANCHORS.lens.p[2]], _v2), _v2);
+  const rpx = Math.max(18, Math.abs(rx - lx));
+  const cover = $('#lensCover'); cover.style.width = cover.style.height = (rpx * 2) + 'px';
+  cover.style.left = lx + 'px'; cover.style.top = ly + 'px';
+  cover.style.transform = 'translate(-50%,-50%)';
+  const ring = $('#ringWrap'); ring.style.width = ring.style.height = (rpx * 2.35) + 'px';
+  ring.style.left = lx + 'px'; ring.style.top = ly + 'px';
+  const svg = $('#ringSvg'); svg.setAttribute('width', rpx * 2.35); svg.setAttribute('height', rpx * 2.35);
+  svg.setAttribute('viewBox', '0 0 ' + (rpx * 2.35) + ' ' + (rpx * 2.35));
+  const R = rpx * 2.35 / 2 - 6;
+  const CIRC = 2 * Math.PI * R;
+  $('#ringBg').setAttribute('cx', rpx*2.35/2); $('#ringBg').setAttribute('cy', rpx*2.35/2); $('#ringBg').setAttribute('r', R);
+  const fg = $('#ringFg');
+  fg.setAttribute('cx', rpx*2.35/2); fg.setAttribute('cy', rpx*2.35/2); fg.setAttribute('r', R);
+  fg.style.strokeDasharray = CIRC; fg.style.strokeDashoffset = CIRC;
+  GL._ringCIRC = CIRC;
+  // 序列标签块
+  const [tx, ty] = project(worldPoint(ANCHORS.label.p, _v), _v);
+  const np = $('#np'); np.style.left = tx + 'px'; np.style.top = ty + 'px';
+  // 小光学腔：时间读数
+  const [sx, sy] = project(worldPoint(ANCHORS.smallLens.p, _v), _v);
+  const tr = $('#timeReadout'); tr.style.left = sx + 'px'; tr.style.top = sy + 'px';
+  // 排气槽区：频谱
+  const [vx, vy] = project(worldPoint(ANCHORS.vents.p, _v), _v);
+  const viz = $('#viz'); viz.style.left = vx + 'px'; viz.style.top = vy + 'px';
+}
+function frame() {
+  if (!GL.ready) return;
+  // 缓慢"呼吸"摆动：让纵深感肉眼可见，又不会转到侧面把 HUD 甩飞；拖拽时暂停摆动
+  if (!GL.dragging) {
+    GL.swayT += 0.008;
+    GL.rotTarget += (Math.sin(GL.swayT) * 0.16 - GL.rotTarget) * 0.02;   // ±~9° 慢摆
+    GL.rotY += (GL.rotTarget - GL.rotY) * 0.12;
+  } else {
+    GL.swayT = 0;
+    GL.rotY += (GL.rotTarget - GL.rotY) * 0.35;   // 拖拽直接接管，阻尼跟随
+  }
+  GL.root.rotation.y = GL.rotY;
+  GL.renderer.render(GL.scene, GL.camera);
+  placeOverlays();
+  requestAnimationFrame(frame);
+}
+/* 拖拽旋转终端（按住空白处左右拖 = 绕 Y 轴转）。点在 HUD 控件上不触发。 */
+let dragX = 0;
+document.addEventListener('pointerdown', e => {
+  if (e.target.closest('#ui')) return;
+  GL.dragging = true; dragX = e.clientX;
+});
+document.addEventListener('pointermove', e => {
+  if (!GL.dragging || !GL.ready) return;
+  GL.rotTarget = Math.max(-1.2, Math.min(1.2, GL.rotTarget + (e.clientX - dragX) * 0.006));
+  dragX = e.clientX;
+});
+document.addEventListener('pointerup', () => { GL.dragging = false; });
+document.addEventListener('pointerleave', () => { GL.dragging = false; });
+window.addEventListener('resize', () => {
+  if (!GL.renderer) return;
+  const W = window.innerWidth, H = window.innerHeight;
+  GL.renderer.setSize(W, H);
+  GL.camera.aspect = W / Math.max(1, H);
+  GL.camera.updateProjectionMatrix();
+  placeOverlays();
+});
+
+/* ============================================================
+   二、播放引擎
+   ============================================================ */
+let songs = [];
+let currentId = null;
+let mode = 'list';           // list 列表循环 | order 顺序 | single 单曲 | shuffle 随机
+let nextQueue = [];          // 「下一首播放」队列
+let currentUrl = null;
+let pendingSeek = 0;         // 进度记忆：待续播位置
+let orderSeq = 0;
+const audio = $('#audio');
+const MODES = { list:'列表循环', order:'顺序播放', single:'单曲循环', shuffle:'随机播放' };
+
+/* ---- 持久化（IndexedDB，存 File blob + 封面；失败退 localStorage） ---- */
+const idb = (() => {
+  let db = null;
+  const open = () => new Promise((res, rej) => {
+    if (db) return res(db);
+    try {
+      const r = indexedDB.open('rhine-terminal', 1);
+      r.onupgradeneeded = () => { r.result.createObjectStore('songs', { keyPath: 'id' }); };
+      r.onsuccess = () => { db = r.result; res(db); };
+      r.onerror = () => rej(r.error);
+    } catch (e) { rej(e); }
+  });
+  return {
+    async put(s) { const d = await open(); return new Promise((res, rej) => { const t = d.transaction('songs','readwrite'); t.objectStore('songs').put(s); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+    async del(id) { const d = await open(); return new Promise((res, rej) => { const t = d.transaction('songs','readwrite'); t.objectStore('songs').delete(id); t.oncomplete = res; t.onerror = () => rej(t.error); }); },
+    async all() { const d = await open(); return new Promise((res, rej) => { const t = d.transaction('songs','readonly'); const r = t.objectStore('songs').getAll(); r.onsuccess = () => res(r.result || []); r.onerror = () => rej(r.error); }); }
+  };
+})();
+
+function persist(s) { try { idb.put(s); } catch (e) {} }
+function unpersist(id) { try { idb.del(id); } catch (e) {} }
+
+/* ---- 封面 / 名称辅助 ---- */
+function defaultCover(title, artist) {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const g = c.getContext('2d');
+  const grd = g.createLinearGradient(0, 0, 256, 256);
+  grd.addColorStop(0, '#f0eae3'); grd.addColorStop(1, '#a3754a');
+  g.fillStyle = grd; g.fillRect(0, 0, 256, 256);
+  g.fillStyle = '#060706'; g.textAlign = 'center';
+  g.font = 'bold 72px system-ui'; g.fillText((title || '·').slice(0, 1).toUpperCase(), 128, 150);
+  g.font = '14px system-ui'; g.fillText((artist || 'RHINE LAB').slice(0, 16), 128, 200);
+  return c.toDataURL('image/jpeg', 0.85);
+}
+function coverToDataUrl(src) {
+  return new Promise(res => {
+    if (src && src.indexOf('data:') === 0) return res(src);
+    const img = new Image();
+    img.onload = () => { const c = document.createElement('canvas'); const m = 512; c.width = c.height = m; const g = c.getContext('2d'); const s = Math.min(m/img.width, m/img.height); g.drawImage(img, 0, 0, img.width*s, img.height*s); res(c.toDataURL('image/jpeg', 0.85)); };
+    img.onerror = () => res(null); img.src = src;
+  });
+}
+function niceName(name) {
+  const base = name.replace(/\.[^.]+$/, '');
+  const m = base.split(/\s+-\s+/);
+  if (m.length >= 2) return { artist: m[0].trim(), title: m.slice(1).join(' - ').trim() };
+  return { artist: '', title: base };
+}
+/* 精简 ID3v2：标题/歌手/专辑 + 内嵌封面 */
+function parseID3(buf) {
+  const out = { title:'', artist:'', album:'', cover:null };
+  try {
+    if (buf.length < 10 || String.fromCharCode(buf[0], buf[1], buf[2]) !== 'ID3') return out;
+    const v4 = buf[3] === 4;
+    const size = ((buf[6] & 0x7f) << 21) | ((buf[7] & 0x7f) << 14) | ((buf[8] & 0x7f) << 7) | (buf[9] & 0x7f);
+    let i = 10;
+    const end = Math.min(buf.length, 10 + size);
+    while (i + 10 <= end) {
+      const id = String.fromCharCode(buf[i], buf[i+1], buf[i+2], buf[i+3]);
+      const sz = v4 ? ((buf[i+4]&0x7f)<<21)|((buf[i+5]&0x7f)<<14)|((buf[i+6]&0x7f)<<7)|(buf[i+7]&0x7f) : (buf[i+4]<<24)|(buf[i+5]<<16)|(buf[i+6]<<8)|buf[i+7];
+      const d = buf.subarray(i + 10, i + 10 + sz);
+      const txt = () => { let s = 0; if (d[0] === 1) s = 2; else if (d[0] === 0) s = 1; try { return new TextDecoder('utf-8').decode(d.subarray(s)).replace(/\0+$/,''); } catch(e) { return ''; } };
+      if (id === 'TIT2') out.title = txt();
+      else if (id === 'TPE1') out.artist = txt();
+      else if (id === 'TALB') out.album = txt();
+      else if (id === 'APIC') {
+        let p = 0; if (d[0] === 0 || d[0] === 3) p = 1;
+        while (p < d.length && d[p] !== 0) p++; p++;            // mime\0
+        p++;                                                      // type
+        while (p < d.length && d[p] !== 0) p++; p++;             // desc\0
+        const blob = new Blob([d.subarray(p)], { type: 'image/jpeg' });
+        out.cover = URL.createObjectURL(blob);
+      }
+      if (sz === 0 || id === '\0\0\0\0') break;
+      i += 10 + sz;
+    }
+  } catch (e) {}
+  return out;
+}
+
+/* ---- 导入 ---- */
+async function addFiles(fileList) {
+  const all = [...fileList];
+  const arr = all.filter(f => (f.type && f.type.startsWith('audio/')) || /\.(mp3|flac|wav|m4a|aac|ogg|opus|webm|aiff?|ncm)$/i.test(f.name));
+  if (!arr.length) { toast('没有找到音频文件'); return; }
+  toast(`正在解析 ${arr.length} 首歌曲…`);
+  let added = 0;
+  for (const f of arr) {
+    let title = '', artist = '', album = '', cover = null;
+    let audioFile = f, ncmPath = '';
+    if (/\.ncm$/i.test(f.name)) {
+      ncmPath = f.path || '';
+      if (window.desktop && window.desktop.convertNcm) {
+        try {
+          const res = await window.desktop.convertNcm(await f.arrayBuffer());
+          if (res && res.error) { toast(`《${f.name}》解密失败：${res.error}`); continue; }
+          const ext = (res && res.ext) || 'mp3';
+          audioFile = new File([res.bytes], f.name.replace(/\.ncm$/i, '.' + ext), { type: ext === 'flac' ? 'audio/flac' : 'audio/mpeg' });
+          title = (res && res.title) || ''; artist = (res && res.artist) || ''; album = (res && res.album) || '';
+        } catch (e) { toast(`《${f.name}》解密失败，已跳过`); continue; }
+      } else { toast('NCM 解密需在桌面版使用'); continue; }
+    }
+    try {
+      const meta = parseID3(new Uint8Array(await audioFile.slice(0, 1024*1024).arrayBuffer()));
+      if (!title) title = meta.title; if (!artist) artist = meta.artist; if (!album) album = meta.album; if (!cover) cover = meta.cover;
+    } catch (e) {}
+    if (!cover && window.desktop && window.desktop.readCover && f.path) {
+      try { const rc = await window.desktop.readCover({ path: f.path }); if (rc && rc.dataUrl) cover = rc.dataUrl; } catch (e) {}
+    }
+    const fb = niceName(f.name);
+    if (!title) title = fb.title || f.name.replace(/\.[^.]+$/, '');
+    if (!artist) artist = fb.artist || '未知艺术家';
+    if (!album) album = '未知专辑';
+    if (cover) cover = await coverToDataUrl(cover);
+    const song = { id: uid(), name: audioFile.name, file: audioFile, ncmPath, filePath: f.path || '', title, artist, album, cover: cover || defaultCover(title, artist), duration: 0, order: orderSeq++, fav: false, plays: 0, pos: 0, lrc: '' };
+    songs.push(song); persist(song); probeDuration(song); added++;
+    if (window.desktop && f.path && !song.lrc) {
+      window.desktop.findLyrics(f.path, title, artist).then(t => { if (t && t.trim()) { song.lrc = t; persist(song); if (song.id === currentId) renderLyrics(); toast(`已为《${song.title}》绑定歌词`); } }).catch(() => {});
+    }
+  }
+  renderList();
+  if (!currentId && songs.length) selectSong(songs[0].id);
+  toast(`导入完成：新增 ${added} 首`);
+}
+async function addBiliSongs(items) {
+  let added = 0;
+  for (const it of items) {
+    const song = { id: uid(), name: (it.title || 'audio') + '.m4a', srcUrl: it.path, path: it.audioPath || '', title: (it.title || '').trim() || '未知歌曲', artist: (it.artist || '').trim() || '未知艺术家', album: it.album || 'B站缓存', cover: it.cover || defaultCover(it.title || '未知歌曲', it.artist || ''), duration: it.durationHint || 0, order: orderSeq++, fav: false, plays: 0, pos: 0, lrc: '' };
+    songs.push(song); persist(song); probeDuration(song); added++;
+  }
+  renderList();
+  if (!currentId && songs.length) selectSong(songs[0].id);
+  toast(`B站缓存导入：新增 ${added} 首`);
+}
+function probeDuration(s) {
+  const tmp = new Audio();
+  const url = s.srcUrl || URL.createObjectURL(s.file);
+  tmp.preload = 'metadata';
+  tmp.onloadedmetadata = () => { s.duration = tmp.duration || 0; persist(s); if (s.id === currentId) renderTime(); };
+  tmp.onerror = () => {};
+  tmp.src = url;
+}
+
+/* ---- 播放控制 ---- */
+function selectSong(id) {
+  currentId = id;
+  const s = songs.find(x => x.id === id);
+  if (!s) return;
+  if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; }
+  if (s.srcUrl) audio.src = s.srcUrl;
+  else if (s.file) { currentUrl = URL.createObjectURL(s.file); audio.src = currentUrl; }
+  s._triedBlob = false;
+  pendingSeek = (s.pos > 3) ? s.pos : 0;   // 进度记忆：续播上次位置
+  renderNowPlaying(); renderList(); renderLyrics(); renderTime();
+  pushMiniMeta();
+}
+function playAt(i) {
+  if (!songs.length) return;
+  i = ((i % songs.length) + songs.length) % songs.length;
+  selectSong(songs[i].id);
+  audio.currentTime = 0;
+  const ps = songs[i];
+  ps.plays = (ps.plays || 0) + 1; persist(ps);
+  audio.play().catch(() => {});
+}
+function playNext() {
+  if (nextQueue.length) {
+    const id = nextQueue.shift();
+    const s = songs.find(x => x.id === id);
+    if (s) { playAt(songs.indexOf(s)); renderList(); return; }
+  }
+  const i = songs.findIndex(s => s.id === currentId);
+  if (mode === 'shuffle') { if (songs.length < 2) { playAt(0); return; } let j; do { j = Math.floor(Math.random() * songs.length); } while (songs[j].id === currentId); playAt(j); return; }
+  if (mode === 'order') { if (i < songs.length - 1) playAt(i + 1); return; }
+  playAt((i + 1) % songs.length);
+}
+function playPrev() {
+  if (!songs.length) return;
+  if (audio.currentTime > 3) { audio.currentTime = 0; return; }
+  const i = songs.findIndex(s => s.id === currentId);
+  playAt((i - 1 + songs.length) % songs.length);
+}
+function queueNext(id) {
+  if (id === currentId) { toast('当前正在播放这首歌'); return; }
+  const i = nextQueue.indexOf(id); if (i >= 0) nextQueue.splice(i, 1);
+  nextQueue.unshift(id); renderList(); toast('已设为下一首播放');
+}
+function removeSong(id) {
+  const idx = songs.findIndex(s => s.id === id);
+  if (idx < 0) return;
+  const wasCurrent = id === currentId;
+  songs.splice(idx, 1); unpersist(id); nextQueue = nextQueue.filter(x => x !== id);
+  if (wasCurrent) {
+    if (songs.length) { selectSong(songs[Math.min(idx, songs.length - 1)].id); audio.currentTime = 0; }
+    else { currentId = null; audio.pause(); audio.removeAttribute('src'); renderNowPlaying(); }
+  }
+  renderList();
+}
+
+/* ---- 事件 ---- */
+$('#playBtn').addEventListener('click', () => {
+  if (!currentId) { toast('请先添加音乐'); return; }
+  if (audio.paused) audio.play().catch(() => toast('无法播放该文件'));
+  else audio.pause();
+});
+$('#prevBtn').addEventListener('click', playPrev);
+$('#nextBtn').addEventListener('click', playNext);
+$('#modeBtn').addEventListener('click', () => {
+  const keys = Object.keys(MODES); mode = keys[(keys.indexOf(mode) + 1) % keys.length];
+  toast('播放模式：' + MODES[mode]); try { localStorage.setItem('rt_mode', mode); } catch (e) {}
+});
+$('#seek').addEventListener('input', e => { if (audio.duration) audio.currentTime = e.target.value / 1000 * audio.duration; });
+$('#listBtn').addEventListener('click', () => $('#playlist').classList.toggle('open'));
+$('#addBtn').addEventListener('click', () => $('#fileInput').click());
+$('#fileInput').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
+$('#folderBtn').addEventListener('click', () => $('#folderInput').click());
+$('#folderInput').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
+$('#biliBtn').addEventListener('click', async () => {
+  if (!window.desktop || !window.desktop.scanBiliCache) { toast('B站缓存导入需在桌面版使用'); return; }
+  toast('正在扫描 B 站缓存…');
+  let res; try { res = await window.desktop.scanBiliCache(); } catch (e) { toast('扫描失败：' + e.message); return; }
+  if (!res || res.canceled) return;
+  if (res.error) { toast('扫描出错：' + res.error); return; }
+  if (!(res.items || []).length) { toast('没有找到 B 站缓存'); return; }
+  await addBiliSongs(res.items);
+});
+/* 拖放导入 */
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => { e.preventDefault(); if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files); });
+/* 媒体键 */
+if (window.desktop && window.desktop.on) {
+  window.desktop.on('media-key', a => {
+    if (a === 'play') { if (audio.paused && currentId) audio.play().catch(() => {}); }
+    else if (a === 'pause') audio.pause();
+    else if (a === 'next') playNext();
+    else if (a === 'prev') playPrev();
+  });
+}
+
+/* ---- 音频事件 ---- */
+audio.addEventListener('timeupdate', () => {
+  const cur = audio.currentTime || 0, dur = audio.duration || 0;
+  $('#curTime').textContent = fmt(cur);
+  $('#durTime').textContent = fmt(dur);
+  $('#timeNow').textContent = fmt(cur);
+  $('#timeDur').textContent = '/ ' + fmt(dur);
+  if (dur) $('#seek').value = Math.round(cur / dur * 1000);
+  if (dur && GL._ringCIRC) {
+    const frac = Math.min(1, cur / dur);
+    $('#ringFg').style.strokeDashoffset = GL._ringCIRC * (1 - frac);
+  }
+  const s = songs.find(x => x.id === currentId);
+  if (s && dur) {
+    s.pos = cur;
+    // 每 5 秒落一次盘即可（timeupdate 约 4Hz，每次都写库太浪费）
+    if (!s._posSavedAt || Date.now() - s._posSavedAt > 5000) { s._posSavedAt = Date.now(); persist(s); }
+  }
+  renderLyricLine(cur);
+  pushMiniBars();
+});
+audio.addEventListener('loadedmetadata', () => {
+  const s = songs.find(x => x.id === currentId);
+  if (s && audio.duration) { s.duration = audio.duration; persist(s); }
+  // 进度记忆：续播上次位置（太靠近末尾就从头放，避免一进去就结束）
+  if (pendingSeek > 3 && audio.duration && pendingSeek < audio.duration - 5) {
+    try { audio.currentTime = pendingSeek; } catch (e) {}
+  }
+  pendingSeek = 0;
+  renderTime();
+});
+audio.addEventListener('play', () => { renderPlayIcon(true); pushMiniMeta(); });
+audio.addEventListener('pause', () => {
+  renderPlayIcon(false); pushMiniMeta();
+  const s = songs.find(x => x.id === currentId);
+  if (s) { s.pos = audio.currentTime || 0; s._posSavedAt = Date.now(); persist(s); }
+});
+audio.addEventListener('ended', () => { if (!songs.length) return; if (mode === 'single') { audio.currentTime = 0; audio.play().catch(() => {}); return; } playNext(); });
+audio.addEventListener('error', () => {
+  const s = songs.find(x => x.id === currentId);
+  if (s && s.path && window.desktop && window.desktop.prepareBiliAudio && !s._triedBlob) {
+    s._triedBlob = true;
+    window.desktop.prepareBiliAudio(s.path, true).then(r => { if (r && r.url) { audio.src = r.url; audio.play().catch(() => {}); } });
+  } else if (s && s.file && window.desktop && window.desktop.readAudio && s.filePath && !s._triedBlob) {
+    s._triedBlob = true;
+    window.desktop.readAudio(s.filePath).then(r => { if (r && r.bytes) { currentUrl = URL.createObjectURL(new Blob([r.bytes], { type: r.mime || 'audio/mpeg' })); audio.src = currentUrl; audio.play().catch(() => {}); } });
+  } else { toast('播放出错，已尝试兜底'); }
+});
+
+/* ---- 渲染 ---- */
+function renderNowPlaying() {
+  const s = songs.find(x => x.id === currentId);
+  $('#npArtist').textContent = s ? s.artist : '';
+  $('#npTitle').textContent = s ? s.title : '档案终端';
+  $('#npAlbum').textContent = s ? s.album : 'RHINE LAB · 音频档案';
+  $('#npIndex').textContent = s ? ('NO.' + String(songs.indexOf(s) + 1).padStart(3, '0')) : 'NO.---';
+  const img = $('#lensCoverImg');
+  img.src = s ? s.cover : '';
+}
+function renderPlayIcon(playing) {
+  $('#playIcon').innerHTML = playing
+    ? '<path d="M7 5.2h3.2v13.6H7zM13.8 5.2H17v13.6h-3.2z"/>'
+    : '<path d="M8 5.2v13.6L19 12z"/>';
+}
+function renderTime() {
+  const s = songs.find(x => x.id === currentId);
+  const dur = (s && s.duration) || audio.duration || 0;
+  $('#durTime').textContent = fmt(dur);
+  $('#timeDur').textContent = '/ ' + fmt(dur);
+}
+function renderList() {
+  const body = $('#plBody');
+  $('#plCount').textContent = songs.length + ' 档案';
+  body.innerHTML = '';
+  songs.forEach((s, i) => {
+    const row = document.createElement('div');
+    row.className = 'row' + (s.id === currentId ? ' active' : '');
+    const nq = nextQueue.indexOf(s.id);
+    row.innerHTML =
+      '<span class="idx">' + (nq >= 0 ? '▶' : String(i + 1).padStart(2, '0')) + '</span>' +
+      '<div class="meta"><div class="tt">' + esc(s.title) + '</div><div class="ar">' + esc(s.artist) + '</div></div>' +
+      '<span class="fav ' + (s.fav ? 'on' : '') + '" title="收藏">♥</span>' +
+      '<span class="del" title="删除">✕</span>';
+    row.addEventListener('click', e => {
+      if (e.target.classList.contains('fav')) { s.fav = !s.fav; persist(s); renderList(); return; }
+      if (e.target.classList.contains('del')) { removeSong(s.id); return; }
+      playAt(i);
+    });
+    row.addEventListener('contextmenu', e => { e.preventDefault(); queueNext(s.id); });
+    body.appendChild(row);
+  });
+}
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+/* ---- 歌词 ---- */
+let lrcLines = [];
+function renderLyrics() {
+  const s = songs.find(x => x.id === currentId);
+  lrcLines = [];
+  const el = $('#lyrics');
+  if (!s || !s.lrc) { el.innerHTML = ''; return; }
+  const mm = /\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]/;
+  s.lrc.split(/\r?\n/).forEach(line => {
+    const m = line.match(mm);
+    if (m) { const t = (+m[1]) * 60 + (+m[2]) + (+(m[3] || 0)) / 1000; const txt = line.replace(/\[[^\]]*\]/g, '').trim(); if (txt) lrcLines.push({ t, txt }); }
+  });
+  lrcLines.sort((a, b) => a.t - b.t);
+  renderLyricLine(audio.currentTime || 0);
+}
+function renderLyricLine(cur) {
+  const el = $('#lyrics');
+  if (!lrcLines.length) return;
+  let idx = 0;
+  for (let i = 0; i < lrcLines.length; i++) if (lrcLines[i].t <= cur) idx = i;
+  const a = Math.max(0, idx - 1), b = Math.min(lrcLines.length - 1, idx + 1);
+  el.innerHTML = lrcLines.slice(a, b + 1).map((l, i2) => {
+    const isCur = (a + i2) === idx;
+    return '<div class="' + (isCur ? 'cur' : '') + '">' + esc(l.txt) + '</div>';
+  }).join('');
+}
+
+/* ---- 频谱（Web Audio Analyser，画到右下排气槽区） ---- */
+let analyser = null, vizData = null, audioCtx = null;
+function ensureCtx() {
+  if (audioCtx) return;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = audioCtx.createMediaElementSource(audio);
+    analyser = audioCtx.createAnalyser(); analyser.fftSize = 256;
+    src.connect(analyser); analyser.connect(audioCtx.destination);
+    vizData = new Uint8Array(analyser.frequencyBinCount);
+  } catch (e) { analyser = null; }
+}
+audio.addEventListener('play', () => { ensureCtx(); if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); });
+function drawViz() {
+  requestAnimationFrame(drawViz);
+  const cv = $('#viz'); const g = cv.getContext('2d');
+  const W = cv.width, H = cv.height;
+  g.clearRect(0, 0, W, H);
+  if (!analyser) { return; }
+  analyser.getByteFrequencyData(vizData);
+  const N = 22, step = Math.floor(vizData.length / N);
+  const bw = W / N;
+  for (let i = 0; i < N; i++) {
+    let v = 0; for (let k = 0; k < step; k++) v = Math.max(v, vizData[i * step + k]);
+    const h = (v / 255) * H;
+    const grd = g.createLinearGradient(0, H - h, 0, H);
+    grd.addColorStop(0, PAL.amber); grd.addColorStop(1, PAL.champagne);
+    g.fillStyle = grd;
+    g.fillRect(i * bw + 1, H - h, bw - 2, h);
+  }
+}
+
+/* ---- 小窗转发（沿用 mini-meta / mini-bars 通道） ---- */
+const miniCache = { title:'', artist:'', album:'', cover:'' };
+function pushMiniMeta() {
+  const s = songs.find(x => x.id === currentId);
+  const data = { title: s ? s.title : '档案终端', artist: s ? s.artist : '', album: s ? s.album : '', cover: s ? s.cover : '', light: true, c1: PAL.champagne, c2: PAL.amber, barsN: 96 };
+  if (data.title === miniCache.title && data.cover === miniCache.cover) return;
+  miniCache.title = data.title; miniCache.artist = data.artist; miniCache.album = data.album; miniCache.cover = data.cover;
+  if (window.desktop && window.desktop.send) { try { window.desktop.send('mini-meta', data); } catch (e) {} }
+}
+function pushMiniBars() {
+  if (!window.desktop || !window.desktop.send) return;
+  let bars = null;
+  if (analyser) { const n = 96; const tmp = new Uint8Array(analyser.frequencyBinCount); analyser.getByteFrequencyData(tmp); bars = new Float32Array(n); for (let i = 0; i < n; i++) bars[i] = tmp[Math.floor(i / n * tmp.length)] / 255; }
+  try { window.desktop.send('mini-bars', { bars, time: audio.currentTime || 0, playing: !audio.paused, lrc: (lrcLines[0] ? lrcLines[lrcLines.length - 1].txt : '') }); } catch (e) {}
+}
+
+/* ---- 初始化 ---- */
+(async function init() {
+  try { mode = localStorage.getItem('rt_mode') || 'list'; } catch (e) {}
+  renderPlayIcon(false);
+  renderList(); renderNowPlaying();
+  initGL().then(() => { placeOverlays(); window.addEventListener('resize', placeOverlays); });
+  drawViz();
+  // 恢复已持久化的歌曲（File blob 存于 IndexedDB）
+  try {
+    const saved = await idb.all();
+    if (saved.length) {
+      songs = saved.sort((a, b) => (a.order || 0) - (b.order || 0));
+      orderSeq = songs.reduce((m, s) => Math.max(m, s.order || 0), 0) + 1;
+      renderList();
+      const last = null; // 不自动续播，等用户选择
+    }
+  } catch (e) {}
+})();
+</script>
+</body>
+</html>

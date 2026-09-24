@@ -41,15 +41,15 @@
   @font-face{font-family:"MiSans Local";src:local("MiSans"),local("MiSans Regular"),local("MiSans-Regular");font-weight:400;font-display:swap;}
   @font-face{font-family:"MiSans Local";src:local("MiSans Demibold"),local("MiSans-Demibold"),local("MiSans SemiBold");font-weight:600;font-display:swap;}
   @font-face{font-family:"MiSans Local";src:local("MiSans Bold"),local("MiSans-Bold");font-weight:700;font-display:swap;}
-  :root[data-theme="rhine"] body{font-family:"MiSans Local",system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;}
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) body{font-family:"MiSans Local",system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;}
 
   /* ===== 莱茵生命主题（Rhine Lab 风格 · 仪器面板变体）=====
      取值来源：RhineLabUI（明日方舟 · 莱茵生命，MIT）的暗色面规范。它自己的
      DESIGN.md「明暗配色」一节写得很明确：
         暗色以 #11181b 为背景，#e0e3dc 为正文，#a6b0b1 为辅助文字，
-        #536166 为分隔线，#c5a16b 为琥珀强调。
+        #536166 为分隔线（旧值）。权威配色已改为 Blender 材质表（见 docs\设计参考-RhineLab视觉规范.md §0）：香槟 #a3754a / 索引 #ab8766 / 琥珀 #7a2e0d / 钛 #94999c。
      借的是三件事：
-       ① 配色 —— 上面那五色 + panel #202a2f / field #2a363b / 暖棕悬停 #9b7247
+       ① 配色 —— Blender 材质：香槟 #a3754a / 索引 #ab8766 / 琥珀 #7a2e0d / 钛 #94999c
        ② 材质 —— 分隔一律 1px 实心细线（不是半透明描边）；按钮与构件**直角**
                   （它的按钮就是 1px 描边 + 无圆角），只有大面板留 2px 免得割裂。
        ③ 选择语义 —— 原规范用"长短竖线刻度 + 细线分隔"表达选中，而不是色块填充。
@@ -57,51 +57,52 @@
      另外两个细节：数字用等宽字形（tabular-nums），封面四角加黄铜直角标记。
      ★ 刻意保留圆形的：播放键、收藏键、圆形滑钮。圆形是"可点"的强提示，
        而且你之前明确要求过暂停键不要方 —— 这里是有意混搭，不是漏改。 */
-  :root[data-theme="rhine"]{--rl-line:#536166;--rl-brass:#c5a16b;--rl-brown:#9b7247;}
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]){--rl-line:#4d525b;--rl-brass:#a3754a;--rl-brown:#ab8766;--rl-amber:#7a2e0d;--rl-titanium:#94999c;}
+  :root[data-theme="rhine-light"]{--rl-line:#918a80;--rl-brass:#a3754a;--rl-brown:#ab8766;--rl-amber:#7a2e0d;--rl-titanium:#94999c;}
   /* Rhine 主题下滚动条也收直角（默认那条是 999px 圆角） */
-  :root[data-theme="rhine"] ::-webkit-scrollbar-thumb{border-radius:0;}
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) ::-webkit-scrollbar-thumb{border-radius:0;}
   /* 悬浮小标签加轻微字距：原规范里所有小号标签都带 0.7~1.3px 字距，
      中文标题不加（中文加字距会散），只给数字/短标签用 */
-  :root[data-theme="rhine"] #hkLabel,
-  :root[data-theme="rhine"] #dcLabel,
-  :root[data-theme="rhine"] #verLabel,
-  :root[data-theme="rhine"] #listBtnCount{letter-spacing:.06em;}
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) #hkLabel,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) #dcLabel,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) #verLabel,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) #listBtnCount{letter-spacing:.06em;}
   /* 大面板：只留 2px，保留一点边缘收敛 */
-  :root[data-theme="rhine"] .stage,
-  :root[data-theme="rhine"] .playlist-drawer,
-  :root[data-theme="rhine"] .modal,
-  :root[data-theme="rhine"] #settingsPop{border-radius:2px;}
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .stage,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .playlist-drawer,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .modal,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) #settingsPop{border-radius:2px;}
   /* 构件一律直角：贴合"仪器面板"的观感 */
-  :root[data-theme="rhine"] .item,
-  :root[data-theme="rhine"] .thumb,
-  :root[data-theme="rhine"] .fld input[type=text],
-  :root[data-theme="rhine"] .cover-row .big,
-  :root[data-theme="rhine"] .pb-thumb,
-  :root[data-theme="rhine"] .big-cover,
-  :root[data-theme="rhine"] .big-cover::after,
-  :root[data-theme="rhine"] #viz,
-  :root[data-theme="rhine"] #sortSel,
-  :root[data-theme="rhine"] .btn,
-  :root[data-theme="rhine"] .pill-btn,
-  :root[data-theme="rhine"] #toast,
-  :root[data-theme="rhine"] .fps,
-  :root[data-theme="rhine"] .drag-overlay{border-radius:0;}
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .item,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .thumb,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .fld input[type=text],
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .cover-row .big,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .pb-thumb,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .big-cover,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .big-cover::after,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) #viz,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) #sortSel,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .btn,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .pill-btn,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) #toast,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .fps,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .drag-overlay{border-radius:0;}
   /* 选中语义：左侧黄铜竖条 + 极淡底，代替整块填充（用原规范的"竖线刻度"） */
-  :root[data-theme="rhine"] .item{position:relative;padding-left:13px;}
-  :root[data-theme="rhine"] .item.active{background:rgba(197,161,107,.10);box-shadow:none;}
-  :root[data-theme="rhine"] .item.active::before{content:'';position:absolute;left:4px;top:50%;
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .item{position:relative;padding-left:13px;}
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .item.active{background:color-mix(in srgb,var(--rl-brass) 12%,transparent);box-shadow:none;}
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .item.active::before{content:'';position:absolute;left:4px;top:50%;
     transform:translateY(-50%);width:2px;height:62%;background:var(--rl-brass);}
-  /* 悬停用暖棕（原规范里 hover 就是 #9b7247），与琥珀强调区分开 */
-  :root[data-theme="rhine"] .item:hover{background:rgba(155,114,71,.22);}
+  /* 悬停用索引嵌件 Index_Inlay #ab8766 的暖棕，与香槟强调区分开 */
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .item:hover{background:color-mix(in srgb,var(--rl-brown) 22%,transparent);}
   /* 等宽数字 + 轻微字距：仪表读数的观感 */
-  :root[data-theme="rhine"] #curTime,
-  :root[data-theme="rhine"] #durTime,
-  :root[data-theme="rhine"] .fps,
-  :root[data-theme="rhine"] #listBtnCount{font-variant-numeric:tabular-nums;letter-spacing:.04em;}
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) #curTime,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) #durTime,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .fps,
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) #listBtnCount{font-variant-numeric:tabular-nums;letter-spacing:.04em;}
   /* 封面四角直角标记：一个伪元素用 8 条 1px 渐变画出四个角。
      ★ z-index 必须 > .big-cover 的 1：伪元素默认 z-index:auto，会和 z-index:0 的
        .cover-bleed 同层，于是被 z-index:1 的封面整个盖住（标记根本看不见）。 */
-  :root[data-theme="rhine"] .stage-left::after{content:'';position:absolute;inset:7px;z-index:2;pointer-events:none;opacity:.65;
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .stage-left::after{content:'';position:absolute;inset:7px;z-index:2;pointer-events:none;opacity:.65;
     background:
       linear-gradient(var(--rl-brass),var(--rl-brass)) left top/14px 1px no-repeat,
       linear-gradient(var(--rl-brass),var(--rl-brass)) left top/1px 14px no-repeat,
@@ -112,8 +113,25 @@
       linear-gradient(var(--rl-brass),var(--rl-brass)) right bottom/14px 1px no-repeat,
       linear-gradient(var(--rl-brass),var(--rl-brass)) right bottom/1px 14px no-repeat;}
   /* 封面渗出的柔光压暗收窄 + 投影收紧：细线风格不需要大片柔光 */
-  :root[data-theme="rhine"] .cover-bleed{filter:blur(46px) saturate(1.12) brightness(.7);opacity:.32;}
-  :root[data-theme="rhine"] .big-cover{box-shadow:0 6px 18px rgba(0,0,0,.55);}
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .cover-bleed{filter:blur(46px) saturate(1.12) brightness(.7);opacity:.32;}
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .big-cover{box-shadow:0 6px 18px rgba(0,0,0,.55);}
+  /* 浅色纸张版：柔光不再压暗（纸上不需要黑夜光晕），改用更轻的暖投影 */
+  :root[data-theme="rhine-light"] .cover-bleed{filter:blur(46px) saturate(1.05) brightness(1.02);opacity:.24;}
+  :root[data-theme="rhine-light"] .big-cover{box-shadow:0 8px 22px rgba(28,29,23,.22);}
+  /* 品牌锁定区（参考图左上角的字标 + 细线 + 小字标签）：去掉渐变，改成实色墨字 +
+     竖线分隔的英文小标签，还原「纸张 / 仪器面板」的版式气质。 */
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .brand{
+    background:none;color:var(--text);font-weight:700;font-size:17px;
+    display:flex;align-items:center;gap:10px;
+  }
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .brand::after{
+    content:'RHINE LAB · 档案终端';font-size:11px;font-weight:400;letter-spacing:.08em;
+    color:var(--muted);border-left:1px solid var(--rl-line);padding-left:10px;line-height:1;white-space:nowrap;
+  }
+  /* 琥珀光学嵌件 #7a2e0d = 点亮/播放态：进度条用「香槟→琥珀」渐变，呼应档案终端里
+     被点亮的琥珀环；钛紧固件 #94999c 用于读数小件的金属描边。 */
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) #barFill{background:linear-gradient(90deg,var(--rl-brass),var(--rl-amber));}
+  :root:is([data-theme="rhine"],[data-theme="rhine-light"]) .fps{border-color:var(--rl-titanium);color:var(--rl-titanium);}
   *{box-sizing:border-box;margin:0;padding:0;}
   html,body{height:100%;}
   body{
@@ -176,9 +194,9 @@
   #c3dBtns{position:absolute;left:10px;bottom:10px;z-index:4;display:none;gap:6px;}
   .big-cover.c3d-on #c3dBtns{display:flex;}
   #c3dBtns button{padding:4px 10px;font-size:11px;line-height:1.4;cursor:pointer;
-    color:#dfe6e6;background:rgba(8,12,14,.55);border:1px solid rgba(197,161,107,.55);
+    color:#dfe6e6;background:rgba(8,12,14,.55);border:1px solid rgba(163,117,74,.55);
     border-radius:3px;backdrop-filter:blur(3px);transition:background .15s,border-color .15s;}
-  #c3dBtns button:hover{background:rgba(197,161,107,.28);border-color:#c5a16b;}
+  #c3dBtns button:hover{background:rgba(163,117,74,.28);border-color:#a3754a;}
   .big-cover::after{content:'';position:absolute;inset:0;border-radius:16px;border:1px solid rgba(255,255,255,.09);pointer-events:none;}
   #bigFavBtn{position:absolute;right:10px;bottom:10px;width:34px;height:34px;border:none;border-radius:50%;z-index:2;
     background:rgba(0,0,0,.45);color:#fff;font-size:17px;line-height:1;cursor:pointer;opacity:.85;}
@@ -614,26 +632,49 @@ function defaultCover(title, artist) {
 }
 
 /* ================= 主题 ================= */
-/* 三档循环：深色（蓝紫）→ 浅色 → 网易云红。
+/* 五档循环：深色（蓝紫）→ 浅色 → 网易云红 → 莱茵·仪器 → 莱茵·档案。
    红色的取值参考网易云桌面端：主色 #EC4141、面板 #1f1f22、次级文字 #a0a0a8。 */
 const THEMES = [
   { key: 'auto', label: '深色', light: false },
   { key: 'light', label: '浅色', light: true },
   { key: 'netease', label: '网易云红', light: false },
-  /* 莱茵生命：配色取自 RhineLabUI（明日方舟 · 莱茵生命）的暗色面。
-     它不只是换色 —— 配套的"仪器面板"材质（1px 细线边框、直角、等宽数字、
-     封面四角黄铜标记）由 CSS 里 :root[data-theme="rhine"] 那段负责。 */
-  { key: 'rhine', label: '莱茵生命', light: false }
+  /* 莱茵生命：配色与材质**紧贴 Blender 工程**（RhineLabUI/art/*.blend 导出的 archive-*.glb）。
+     材质名 → 界面角色见 docs\设计参考-RhineLab视觉规范.md §Blender 材质表：
+     Frosted_Polymer(磨砂外壳)/Ivory_Edges(象牙边缘)/Carbon_Ink(碳黑墨)/
+     Champagne_Index(香槟索引 #A3754A)/Amber_Optical_Inlay(琥珀光学嵌件 #7A2E0D)/
+     Titanium_Fasteners(钛紧固件 #94999C)。 */
+  { key: 'rhine', label: '莱茵·仪器', light: false },
+  { key: 'rhine-light', label: '莱茵·档案', light: true }
 ];
 let theme = 'auto';
 function applyTheme(key) {
   theme = key;
   const t = THEMES.find(x => x.key === key) || THEMES[0];
   /* 把主题名写到 <html data-theme>：换色之外的"材质"差异（直角、细线、等宽数字、
-     封面四角标记）靠 :root[data-theme="rhine"] 那段 CSS 生效，否则只能干换颜色。 */
+     封面四角标记）靠 :root:is([data-theme="rhine"],[data-theme="rhine-light"]) 那段 CSS 生效，否则只能干换颜色。 */
   document.documentElement.dataset.theme = t.key;
   const set = (k, v) => document.documentElement.style.setProperty(k, v);
-  if (t.light) {
+  if (t.key === 'rhine-light') {
+    /* 莱茵·档案（纸张）：直接照搬 Blender 材质 ——
+       磨砂外壳 Frosted_Polymer #FBF9F6、象牙边缘 Ivory_Edges #F0EAE3、
+       光学扩散板 Optical_Diffuser #ECE6E1、碳黑墨 Carbon_Ink #060706、
+       香槟索引 Champagne_Index #A3754A。 */
+    set('--hue', 30);
+    set('--accent', '#a3754a');
+    set('--accent2', '#ab8766');
+    set('--bg', '#fbf9f6');
+    set('--panel', '#f0eae3');
+    set('--card', '#ece6e1');
+    set('--card-border', '#c9c1b6');
+    set('--text', '#060706');
+    set('--muted', '#918a80');
+    set('--input-bg', '#e8e3d6');
+    set('--pop', 'rgba(240,234,227,.98)');
+    set('--pop-shadow', '0 24px 60px rgba(28,29,23,.16)');
+    set('--track', 'rgba(145,138,128,.4)');
+    set('--thumb', '#a3754a');
+    set('--hover', 'rgba(163,117,74,.12)');
+  } else if (t.light) {
     set('--hue', 250);
     set('--accent', 'hsl(250 85% 60%)');
     set('--accent2', 'hsl(220 85% 55%)');
@@ -667,25 +708,23 @@ function applyTheme(key) {
     set('--thumb', '#fff');
     set('--hover', 'rgba(255,255,255,.07)');
   } else if (t.key === 'rhine') {
-    /* 莱茵生命：RhineLabUI 的暗色面配色。
-       paper→bg、panel→panel、field→card、line→card-border（实心细线，不是半透明描边）、
-       ink→text、muted→muted、accent（黄铜）→accent。 */
-    set('--hue', 38);
-    set('--accent', '#c5a16b');
-    set('--accent2', '#9b7247');
-    set('--bg', '#11181b');
-    set('--panel', '#202a2f');
-    set('--card', '#2a363b');
-    set('--card-border', '#536166');
-    set('--text', '#e0e3dc');
-    set('--muted', '#a6b0b1');
-    set('--input-bg', '#151d21');
-    set('--pop', 'rgba(32,42,47,.98)');
-    set('--pop-shadow', '0 18px 44px rgba(0,0,0,.62)');
-    set('--track', 'rgba(83,97,102,.7)');
-    set('--thumb', '#c5a16b');
-    /* 悬停用暖棕 #9b7247（原规范的 hover 色），与琥珀强调 #c5a16b 区分开 */
-    set('--hover', 'rgba(155,114,71,.22)');
+    /* 莱茵·仪器（夜间）：背景取设计图 B 的青石板 #1D222D/#2D323C，
+       强调色仍取 Blender 的香槟索引 Champagne_Index #A3754A（不因夜间而换掉品牌色）。 */
+    set('--hue', 30);
+    set('--accent', '#a3754a');
+    set('--accent2', '#ab8766');
+    set('--bg', '#1d222d');
+    set('--panel', '#2d323c');
+    set('--card', '#353a44');
+    set('--card-border', '#4d525b');
+    set('--text', '#eff1f2');
+    set('--muted', '#b2b5ba');
+    set('--input-bg', '#252a35');
+    set('--pop', 'rgba(45,50,60,.98)');
+    set('--pop-shadow', '0 18px 44px rgba(3,6,16,.6)');
+    set('--track', 'rgba(77,82,91,.8)');
+    set('--thumb', '#a3754a');
+    set('--hover', 'rgba(163,117,74,.16)');
   } else {
     set('--hue', 250);
     set('--accent', 'hsl(250 85% 68%)');
@@ -712,6 +751,9 @@ function applyTheme(key) {
   } catch (e) { /* ignore */ }
   try { localStorage.setItem('mp_theme', key); } catch (e) {}
   pushMiniMeta(true);   // 主题变了：小窗的 light / 配色要更新（只发这一次，不再每帧发）
+  /* 3D 封面材质跟着主题走：浅色用 Blender 原色（磨砂白/香槟/琥珀），暗色用夜间反相。
+     C3D 声明在文件更下方，首帧可能还没初始化，用 try 兜住（此时也没模型可重涂）。 */
+  try { C3D.light = !!t.light; c3dRecolor(); } catch (e) { /* ignore */ }
 }
 $('#themeBtn').addEventListener('click', () => {
   const i = Math.max(0, THEMES.findIndex(x => x.key === theme));
@@ -1490,12 +1532,23 @@ const C3D = {
   spread: 0,             // 当前拆解程度 0=装好 1=拆开（阻尼跟随 spreadTarget）
   spreadTarget: 0,
   rotSpeed: 0.30,
-  /* 材质配色照抄 RhineLabUI 的 theme-material.ts（surfaces 表）。
-     表里没有的按名字兜底，保证任何材质都有合理颜色、不会渲染成纯白。 */
+  /* 材质配色：浅色用 Blender 原色（surfacesLight，取值即 GLB 材质表，见
+     docs\设计参考-RhineLab视觉规范.md §0.2），暗色用「夜间仪器」反相配色（surfaces）。
+     light 标志由 applyTheme 维护，切主题时 c3dRecolor() 重涂一遍。 */
+  light: false,
   surfaces: {
     Frosted_Polymer: '#626b70', Ivory_Edges: '#687277', Optical_Diffuser: '#192226',
     Titanium_Fasteners: '#b1b9bb', Index_Inlay: '#c6a36b', Printed_Label: '#303a3e',
     Subsurface_Optics: '#939e9f', Optical_Edges: '#bbc3bc', Carbon_Ink: '#b6bdb8'
+  },
+  /* Blender 原色（权威）：磨砂外壳/象牙边缘/香槟索引/琥珀嵌件/钛紧固件/碳黑墨 */
+  surfacesLight: {
+    Frosted_Polymer: '#fbf9f6', Ivory_Edges: '#f0eae3', Optical_Diffuser: '#ece6e1',
+    Printed_Label: '#e8e3d6', Carbon_Ink: '#060706', Internal_Ceramic: '#bdb4ad',
+    Optical_Edges: '#f0ebe5', Subsurface_Optics: '#b2aca8', Optical_Film_Edge: '#918b83',
+    Amber_Optical_Inlay: '#7a2e0d', Optical_Film: '#c9c1b6', Index_Inlay: '#ab8766',
+    Case_Engraving: '#918a80', Case_Engraving_Highlight: '#e5ded4',
+    Titanium_Fasteners: '#94999c', Moulded_Lettering: '#cfc8bf', Champagne_Index: '#a3754a'
   },
   bg: '#11181b', floor: '#192125', mist: '#263136'
 };
@@ -1508,12 +1561,24 @@ function c3dSetLabel() {
 }
 function c3dPickColor(name) {
   const n = String(name || '');
-  if (C3D.surfaces[n]) return C3D.surfaces[n];
-  const key = Object.keys(C3D.surfaces).find(k => n.indexOf(k) === 0);
-  if (key) return C3D.surfaces[key];
-  if (/Amber|Index|Inlay/i.test(n)) return '#c6a36b';   // 琥珀内嵌
-  if (/Orange|Brass|Gold/i.test(n)) return '#bb8850';
-  return '#969f9f';
+  const table = C3D.light ? C3D.surfacesLight : C3D.surfaces;
+  if (table[n]) return table[n];
+  const key = Object.keys(table).find(k => n.indexOf(k) === 0);
+  if (key) return table[key];
+  if (/Amber|Index|Inlay/i.test(n)) return C3D.light ? '#7a2e0d' : '#c6a36b';   // 琥珀内嵌
+  if (/Orange|Brass|Gold|Champagne/i.test(n)) return C3D.light ? '#a3754a' : '#bb8850';
+  return C3D.light ? '#bdb4ad' : '#969f9f';
+}
+/* 切主题后给已加载的 3D 模型重涂材质：浅色用 Blender 原色，暗色用夜间反相。 */
+function c3dRecolor() {
+  if (!C3D.cassette || !C3D.assembly) return;
+  const recolor = (root) => root.traverse(o => {
+    if (!o.isMesh) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) if (m && m.color) m.color.set(c3dPickColor(m.name));
+  });
+  recolor(C3D.cassette);
+  recolor(C3D.assembly);
 }
 function c3dLoadScript(src) {
   return new Promise((resolve, reject) => {

@@ -277,14 +277,61 @@ let miniResizeStart = null; // 缩放时 {sx, sy, w, h, scale}
 let miniOpacity = 1;       // 小窗透明度（会话内记忆）
 let miniKeepTopTimer = null; // 周期重申置顶的定时器
 
-function createMainWindow() {
+/* ================= 内嵌 UI 静态服务 =================
+   app-rhine（Vite 构建的 RhineLabUI 三维终端）用了 ES module + 绝对路径 /assets/...，
+   file:// 下两者都失效，所以必须在 localhost 起一个静态服务再 loadURL。
+   只监听 127.0.0.1 的随机端口，不对外。 */
+const UI_DIR = path.join(__dirname, 'ui');
+let uiServer = null;
+let uiServerUrl = null;
+function startUiServer() {
+  return new Promise((resolve, reject) => {
+    if (uiServerUrl) return resolve(uiServerUrl);
+    if (!fs.existsSync(path.join(UI_DIR, 'index.html'))) {
+      return reject(new Error('内嵌 UI 不存在：' + UI_DIR));
+    }
+    const MIME = {
+      '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
+      '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
+      '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
+      '.glb': 'model/gltf-binary', '.woff2': 'font/woff2', '.ogg': 'audio/ogg',
+      '.wav': 'audio/wav', '.mp3': 'audio/mpeg', '.txt': 'text/plain; charset=utf-8',
+      '.pdf': 'application/pdf'
+    };
+    uiServer = http.createServer((req, res) => {
+      try {
+        let p = decodeURIComponent(String(req.url || '/').split('?')[0].split('#')[0]);
+        if (p === '/') p = '/index.html';
+        const file = path.normalize(path.join(UI_DIR, p));
+        if (file !== UI_DIR && !file.startsWith(UI_DIR + path.sep)) {
+          res.writeHead(403); res.end('forbidden'); return;
+        }
+        fs.readFile(file, (err, data) => {
+          if (err) { res.writeHead(404); res.end('not found'); return; }
+          res.writeHead(200, {
+            'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
+            'Cache-Control': 'no-cache'
+          });
+          res.end(data);
+        });
+      } catch (e) { res.writeHead(500); res.end(); }
+    });
+    uiServer.on('error', reject);
+    uiServer.listen(0, '127.0.0.1', () => {
+      uiServerUrl = 'http://127.0.0.1:' + uiServer.address().port + '/';
+      resolve(uiServerUrl);
+    });
+  });
+}
+
+async function createMainWindow() {
   mainWin = new BrowserWindow({
     width: 1380,
     height: 920,
     minWidth: 900,
     minHeight: 640,
-    title: '音乐播放器',
-    backgroundColor: '#111629',
+    title: 'RHINE LAB · ANALYSIS OS',
+    backgroundColor: '#e8e5e1',
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
@@ -294,7 +341,19 @@ function createMainWindow() {
       backgroundThrottling: false // 最小化/隐藏时 rAF 仍满帧 → 小窗可视化不暂停
     }
   });
-  mainWin.loadFile(path.join(__dirname, 'index.html'));
+  /* 主界面 = RhineLabUI 三维档案终端（Vite 构建，走 localhost 静态服务）。
+     若内嵌 UI 缺失，退回 terminal.html（单面板 3D），再退 index.html。 */
+  try {
+    const url = await startUiServer();
+    mainWin.loadURL(url);
+  } catch (e) {
+    logMainError('UI 服务', e);
+    if (fs.existsSync(path.join(__dirname, 'terminal.html'))) {
+      mainWin.loadFile(path.join(__dirname, 'terminal.html'));
+    } else {
+      mainWin.loadFile(path.join(__dirname, 'index.html'));
+    }
+  }
   // 不设 setFrameRate：可视化循环已由页面内定时器自驱动（不依赖 rAF），
   // 显式 setFrameRate 会在双窗口时干扰合成器的 BeginFrame 调度
   // 主窗口最小化/隐藏时把状态告诉页面：可视化循环降频，把 CPU/GPU 让给别的应用。

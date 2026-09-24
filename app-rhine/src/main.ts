@@ -20,13 +20,28 @@ import {
   archiveColumns,
   columnFiles,
   fileLocation,
+  onRecordsChange,
 } from "./data";
+import {
+  initPlayer,
+  onLibraryChange,
+  playAt,
+  getSongs,
+  togglePlay,
+  hasSongs,
+  songAt,
+  songDetailMarkup,
+  songTabMarkup,
+  mountSongDetail,
+  toggleFavAt,
+} from "./player";
 import { TerminalAudio } from "./audio";
 import { audioSettingsMarkup } from "./audio-settings";
 
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) =>
   document.querySelector<T>(selector)!;
 import { logo, brandHeading } from "./brand";
+import { getOperator, setOperator } from "./operator";
 
 $("#stage").innerHTML = `
   <div id="three-scene" class="three-scene"></div>
@@ -63,7 +78,7 @@ $("#stage").innerHTML = `
     <article id="detail-content" class="detail-content"></article>
   </section>
   <div class="powered">POWERED BY <b>RHINE LAB</b><i></i></div>
-  <footer class="system-footer"><span><i class="status-light"></i> SESSION AUTHORIZED</span><span>JOYCE MOORE <i>／</i> <span id="clock">00:00:00</span></span><button data-action="replay" title="重播启动流程">REINITIALIZE ↗</button></footer>
+  <footer class="system-footer"><span><i class="status-light"></i> SESSION AUTHORIZED</span><span><span class="operator-name">${getOperator()}</span> <i>／</i> <span id="clock">00:00:00</span></span><button data-action="replay" title="重播启动流程">REINITIALIZE ↗</button></footer>
   <div id="modal-root"></div><div id="toast" class="toast" role="status"></div>
   <div id="loading" class="loading"><div class="loading-mark">${logo}</div><span>CONNECTING TO INTERNAL DATABASE</span><i></i></div>
 `;
@@ -186,7 +201,7 @@ let audioPreview = false, audioPreviewRequest = 0;
 let scene: ArchiveScene;
 let viewer: ModelViewer | undefined;
 const accessLog: { id: string; time: string }[] = [];
-const columnMemory = archiveColumns.map((_, lane) => columnFiles(lane)[0]);
+let columnMemory: (number | undefined)[] = archiveColumns.map((_, lane) => columnFiles(lane)[0]);
 function recordAccess() {
   accessLog.unshift({
     id: records[selected].id,
@@ -230,12 +245,42 @@ function fit() {
 }
 window.addEventListener("resize", fit);
 fit();
-$("#file-ticks").innerHTML = columnFiles(fileLocation(selected).lane)
-  .map(
-    (index) => `<button data-select="${index}"></button>`,
-  )
-  .join("");
-const fileTicks = [...$("#file-ticks").querySelectorAll<HTMLButtonElement>("button")];
+let fileTicks: HTMLButtonElement[] = [];
+function rebuildTicks() {
+  $("#file-ticks").innerHTML = columnFiles(fileLocation(selected).lane)
+    .map(
+      (index) => `<button data-select="${index}"></button>`,
+    )
+    .join("");
+  fileTicks = [...$("#file-ticks").querySelectorAll<HTMLButtonElement>("button")];
+}
+/* 音乐库变化（导入/删除）后：重排档案阵列数据、刷新刻度与选中态、重绘详情。 */
+function refreshArchive() {
+  if (!records.length) selected = 0;
+  else selected = Math.min(selected, records.length - 1);
+  columnMemory = archiveColumns.map((_, lane) => columnFiles(lane)[0]);
+  rebuildTicks();
+  updateSelection();
+  if (mode === "detail") renderDetail();
+}
+onLibraryChange(refreshArchive);
+rebuildTicks();
+
+/* 正在播放的曲目变化：三维档案阵列与右侧详情一起跟过去，保持一致 */
+window.addEventListener("rhine-track", (event) => {
+  const index = Number((event as CustomEvent).detail);
+  if (!Number.isFinite(index) || !getSongs().length) return;
+  if (index === selected) return;
+  selected = index;
+  columnMemory[fileLocation(selected).lane] = selected;
+  rebuildTicks();
+  updateSelection();
+  if (mode === "detail") renderDetail();
+});
+/* 歌词是导入后异步补全的：只把歌词页签重绘一次 */
+window.addEventListener("rhine-lyrics", () => {
+  if (mode === "detail" && activeTab === "notes") setTab("notes", false);
+});
 
 function setMode(next: Mode) {
   const previousMode = mode;
@@ -302,7 +347,7 @@ function stepFile(direction: number) {
 function stepColumn(direction: number) {
   const lane = fileLocation(selected).lane;
   const next = wrap(lane + direction, archiveColumns.length);
-  select(columnMemory[next], { axis: "lane", direction });
+  select(columnMemory[next] ?? 0, { axis: "lane", direction });
 }
 function updateSelection(navigation?: ArchiveNavigation) {
   const r = records[selected];
@@ -369,6 +414,8 @@ function replayBootAfterModal(forcePreview: boolean) {
 }
 function openFile() {
   if (!ready) return;
+  // 选中档案即播放对应歌曲（空库占位档案不会触发）
+  if (getSongs().length) playAt(selected);
   closeModal(() => {
     setMode("detail");
     audio.play("open");
@@ -399,6 +446,19 @@ function renderDetail() {
   tabTransition.cancel();
   const r = records[selected];
   $("#object-id").textContent = "NO." + String(selected + 1).padStart(3, "0");
+  // 音乐库非空时，右侧这一栏不再是"档案内容"，而是曲目面板：
+  // 封面 / 曲目信息 / 实时频谱 / 歌词 / 播放记录。
+  if (hasSongs()) {
+    const content = $("#detail-content");
+    content.classList.add("song-mode");
+    content.innerHTML = songDetailMarkup(selected);
+    content.setAttribute("tabindex", "-1");
+    documentDecryption.reset(content, prefs.reduced || scene.decryptionFrame.phase === "clear");
+    setTab(activeTab, false);
+    mountSongDetail(content);
+    return;
+  }
+  $("#detail-content").classList.remove("song-mode");
   $("#detail-content").innerHTML = `
   <div class="detail-kicker"><span>FILE ${r.id}</span><span>${escapeHtml(r.clearance)}</span></div>
   <h2>${escapeHtml(r.en)}</h2><div class="detail-title-cn">${escapeHtml(r.title)}<span>${escapeHtml(r.category)}</span></div>
@@ -406,8 +466,8 @@ function renderDetail() {
   <dl class="metadata"><div><dt>DEPARTMENT / 科室</dt><dd>${escapeHtml(r.department)}</dd></div><div><dt>COLLECTION / 编目范围</dt><dd>${escapeHtml(r.date)}</dd></div><div><dt>RELATED / 相关人物</dt><dd>${escapeHtml(r.lead)}</dd></div><div><dt>STATUS / 状态</dt><dd><i></i>${r.clearance === "RESTRICTED" ? "目录访问" : "已归档 · 可读取"}</dd></div></dl>
   <div class="detail-tabs" role="tablist"><button id="tab-overview" class="active" role="tab" aria-controls="tab-panel" aria-selected="true" data-tab="overview">01 <span>概述</span></button><button id="tab-notes" role="tab" aria-controls="tab-panel" aria-selected="false" data-tab="notes">02 <span>研究记录</span></button><button id="tab-history" role="tab" aria-controls="tab-panel" aria-selected="false" data-tab="history">03 <span>访问日志</span></button><i class="tab-indicator" aria-hidden="true"></i></div>
   <div id="tab-panel" class="tab-panel" role="tabpanel">${overview()}</div>
-  <div class="detail-actions"><button class="solid-button" data-action="bookmark">${saved.has(r.id) ? "− REMOVE FROM SAVED" : "＋ SAVE ARCHIVE"}<span>${saved.has(r.id) ? "已收藏" : "收藏档案"}</span></button><a class="export-button" href="/archives/RHINE-LAB-${r.id}.txt" download="RHINE-LAB-${r.id}.txt" aria-label="导出 ${r.id} 档案">EXPORT <span>↓</span></a></div>
-  <div class="detail-footnote"><a href="${escapeHtml(r.source)}" target="_blank" rel="noopener">设定参考 ↗</a><span>${String(selected + 1).padStart(3, "0")} / ${String(records.length).padStart(3, "0")}</span></div>`;
+  <div class="detail-actions"><button class="solid-button" data-action="bookmark">${saved.has(r.id) ? "− REMOVE FROM SAVED" : "＋ SAVE ARCHIVE"}<span>${saved.has(r.id) ? "已收藏" : "收藏档案"}</span></button><button class="export-button" data-action="play-now">PLAY <span>▶</span></button></div>
+  <div class="detail-footnote"><span>${escapeHtml(r.lead)}</span><span>${String(selected + 1).padStart(3, "0")} / ${String(records.length).padStart(3, "0")}</span></div>`;
   $("#detail-content").setAttribute("tabindex", "-1");
   $('[data-action="bookmark"]').setAttribute("aria-pressed", String(saved.has(r.id)));
   documentDecryption.reset($("#detail-content"), prefs.reduced || scene.decryptionFrame.phase === "clear");
@@ -431,8 +491,9 @@ function setTab(tab: string, sound = true) {
   indicator.style.transition = sound ? "" : "none";
   indicator.style.transform = `translateX(${tabButton.offsetLeft}px) scaleX(${tabButton.offsetWidth})`;
   $("#tab-panel").setAttribute("aria-labelledby", tabButton.id);
-  $("#tab-panel").innerHTML =
-    tab === "overview"
+  $("#tab-panel").innerHTML = hasSongs()
+    ? songTabMarkup(tab, selected)
+    : tab === "overview"
       ? overview()
       : tab === "notes"
         ? `<div class="panel-label">RESEARCH NOTES / 研究记录</div><ol class="research-notes">${r.findings.map((f, i) => `<li><span>${String(i + 1).padStart(2, "0")}</span>${escapeHtml(f)}</li>`).join("")}</ol>`
@@ -441,7 +502,7 @@ function setTab(tab: string, sound = true) {
             .slice(0, 4)
             .map(
               (entry) =>
-                `<div class="log-row"><span>${entry.time}</span><span>JOYCE MOORE</span><b>READ AUTHORIZED</b></div>`,
+                `<div class="log-row"><span>${entry.time}</span><span>${getOperator()}</span><b>READ AUTHORIZED</b></div>`,
             )
             .join(
               "",
@@ -552,7 +613,7 @@ function updateQualitySummary() {
   summary.textContent = `实际渲染 ${canvas.width} × ${canvas.height} · ${prefs.rendering.antialias === "smaa" ? "SMAA" : "原始抗锯齿"} · 纹理 ${metrics.anisotropy ?? 1}×${metrics.limited ? " · 已达到缓冲上限" : ""}`;
 }
 function settingsMarkup() {
-  return `<h2>SYSTEM SETTINGS<small>终端偏好设置</small></h2><p class="settings-intro">JOYCE MOORE <span>·</span> SESSION AUTHORIZED</p><div class="settings-list">${audioSettingsMarkup(prefs)}<label><div><strong>REDUCED MOTION</strong><span>减少镜头移动和过渡动效</span></div><input type="checkbox" data-pref="reduced" ${prefs.reduced ? "checked" : ""}/><i class="toggle"></i></label></div>${qualityMarkup(prefs.rendering)}<div class="settings-shortcuts"><span>KEYBOARD CONTROLS</span><p><kbd>←</kbd><kbd>→</kbd> 切列 <kbd>↑</kbd><kbd>↓</kbd> 选档 <kbd>ENTER</kbd> 读取 <kbd>/</kbd> 检索 <kbd>ESC</kbd> 返回</p></div><div class="settings-bottom"><button data-action="fullscreen">FULLSCREEN <span>↗</span></button><button data-action="restart">REINITIALIZE SYSTEM <span>↻</span></button></div><div class="modal-bottom"><span>ANALYSIS OS / 1.0 · 使用 MiSans 字体（小米） <a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">字体许可</a></span><span>POWERED BY RHINE LAB</span></div>`;
+  return `<h2>SYSTEM SETTINGS<small>终端偏好设置</small></h2><p class="settings-intro"><span class="operator-name">${getOperator()}</span> <span>·</span> SESSION AUTHORIZED</p><div class="settings-list"><label class="operator-field" for="operator-input"><div><strong>OPERATOR ID</strong><span>开屏「ID CONFIRMED」与页脚显示的身份标识</span></div><input type="text" id="operator-input" maxlength="40" value="${escapeHtml(getOperator())}" autocomplete="off" spellcheck="false"/></label>${audioSettingsMarkup(prefs)}<label><div><strong>REDUCED MOTION</strong><span>减少镜头移动和过渡动效</span></div><input type="checkbox" data-pref="reduced" ${prefs.reduced ? "checked" : ""}/><i class="toggle"></i></label></div>${qualityMarkup(prefs.rendering)}<div class="settings-shortcuts"><span>KEYBOARD CONTROLS</span><p><kbd>←</kbd><kbd>→</kbd> 切列 <kbd>↑</kbd><kbd>↓</kbd> 选档 <kbd>ENTER</kbd> 读取 <kbd>/</kbd> 检索 <kbd>ESC</kbd> 返回</p></div><div class="settings-bottom"><button data-action="fullscreen">FULLSCREEN <span>↗</span></button><button data-action="restart">REINITIALIZE SYSTEM <span>↻</span></button></div><div class="modal-bottom"><span>ANALYSIS OS / 1.0 · 使用 MiSans 字体（小米） <a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">字体许可</a></span><span>POWERED BY RHINE LAB</span></div>`;
 }
 
 document.addEventListener("input", (e) => {
@@ -570,6 +631,12 @@ document.addEventListener("input", (e) => {
   if ((e.target as HTMLElement).id === "archive-search") {
     searchQuery = (e.target as HTMLInputElement).value;
     renderResults();
+  }
+  if ((e.target as HTMLElement).id === "operator-input") {
+    const name = setOperator((e.target as HTMLInputElement).value);
+    document
+      .querySelectorAll<HTMLElement>(".operator-name")
+      .forEach((el) => (el.textContent = name));
   }
 });
 document.addEventListener("change", (e) => {
@@ -654,6 +721,23 @@ document.addEventListener("click", (e) => {
     openModal(action);
   if (action === "close-modal") closeModal();
   if (action === "bookmark") toggleSaved();
+  if (action === "fav-track") {
+    toggleFavAt(selected);
+    const song = songAt(selected);
+    const button = document.querySelector<HTMLButtonElement>('[data-action="fav-track"]');
+    if (song && button) {
+      button.firstChild!.textContent = song.fav ? "− REMOVE FROM SAVED" : "＋ SAVE TRACK";
+      button.querySelector("span")!.textContent = song.fav ? "♥ 已收藏" : "♡ 收藏曲目";
+      button.setAttribute("aria-pressed", String(song.fav));
+      if (!prefs.reduced)
+        bookmarkFeedback = button.animate(
+          [{ backgroundColor: "#67634c" }, { backgroundColor: "#252820" }],
+          { duration: 220, easing: "ease-out" },
+        );
+      audio.play("confirm");
+    }
+  }
+  if (action === "play-now") togglePlay();
   if (action === "reset-search") {
     modal = "search";
     searchQuery = "";
@@ -757,7 +841,7 @@ function bootFrame(t: number) {
   let caption =
     motion.step === "auth"
       ? t < 9.52
-        ? "身份信息确认：JOYCE MOORE"
+        ? `身份信息确认：${getOperator()}`
         : t < 11.84
           ? "请求已接收"
           : "开始处理"
@@ -847,6 +931,8 @@ function frame(ms: number) {
 }
 async function start() {
   try {
+    // 先加载音乐库（IndexedDB），让三维档案阵列一进来就显示歌曲
+    await initPlayer();
     scene = new ArchiveScene($("#three-scene"));
     await Promise.all([
       scene.load(),
