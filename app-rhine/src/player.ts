@@ -1034,11 +1034,11 @@ export function songDetailMarkup(index: number): string {
   <dl class="metadata">${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${k.startsWith("PLAYED") ? "<i></i>" : ""}${esc(v)}</dd></div>`).join("")}</dl>
   <div class="song-viz">
     <div class="song-viz-head"><span class="panel-label">SPECTRUM / 实时频谱</span><span class="song-viz-note">40Hz – 16kHz · 对数分频 · 96 段</span></div>
-    <canvas id="p-detail-spectrum" width="${636 * 2}" height="${174 * 2}" aria-hidden="true"></canvas>
+    <canvas id="p-detail-spectrum" width="${636 * 2}" height="${477 * 2}" aria-hidden="true"></canvas>
     <div class="song-viz-axis"><span>LOW 40Hz</span><span>MID 1kHz</span><span>HIGH 16kHz</span></div>
     <div class="song-lyric-line" id="p-lyric-line"></div>
   </div>
-  <div class="detail-actions">${actions}<button class="export-button" data-action="play-now">${audio.paused ? "PLAY" : "PAUSE"} <span>${audio.paused ? "▶" : "■"}</span></button></div>
+  <div class="detail-actions">${empty ? actions : ""}<button class="export-button" data-action="play-now">${audio.paused ? "PLAY" : "PAUSE"} <span>${audio.paused ? "▶" : "■"}</span></button></div>
   <div class="detail-footnote"><span>${esc(artist)} · ${esc(album)}</span><span>${empty ? "000" : String(index + 1).padStart(3, "0")} / ${total}</span></div>`;
 }
 /** 详情区渲染完成后调用：接管频谱画布并点亮当前歌词行。 */

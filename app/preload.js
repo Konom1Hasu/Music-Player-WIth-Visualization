@@ -33,5 +33,11 @@ contextBridge.exposeInMainWorld('desktop', {
   // 传 { path } 或 { bytes, name } → { ok, dataUrl, size, mime, source } | { error }
   readCover: (arg) => ipcRenderer.invoke('read-cover', arg),
   // 旧通道：只认 NCM（保留兼容）
-  ncmCover: (arg) => ipcRenderer.invoke('ncm-cover', arg)
+  ncmCover: (arg) => ipcRenderer.invoke('ncm-cover', arg),
+  /* ===== 曲库恢复（--recover-library 专用）=====
+     read 页把旧源的记录交出来；write 页接收主进程转发来的记录写进新版曲库。
+     数据只在进程间搬运，不落盘到音乐目录 —— 遵守数据管控里"派生数据不导出"的约束。 */
+  recoverChunk: (payload) => ipcRenderer.invoke('recover-from-reader', payload),
+  recoverListen: (cb) => ipcRenderer.on('recover-to-writer', (_e, payload) => cb(payload)),
+  recoverAck: (payload) => ipcRenderer.send('recover-ack', payload)
 });

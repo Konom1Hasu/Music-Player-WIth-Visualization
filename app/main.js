@@ -485,6 +485,37 @@ if (!gotLock) {
     sweepStaleSessions();
     // 数据管控：擦除 1.0.x 遗留在 userData 里的长期副本（升级清理）
     purgeLegacyAudioCache();
+    /* --recover-library：只跑曲库恢复，不开主界面 */
+    if (RECOVER_MODE || INGEST_MODE) {
+      const job = RECOVER_MODE ? runRecovery() : runIngest();
+      job
+        .then((stats) => {
+          const mb = (stats.bytes / 1048576).toFixed(1);
+          const detail = INGEST_MODE
+            ? [
+              '从交接区读了 ' + stats.total + ' 条记录，其中音频 ' + stats.files + ' 个（' + mb + ' MB）',
+              '写入新版曲库：新增 ' + stats.added + ' 首，跳过重复 ' + stats.skipped + ' 首',
+              '交接区已清理。',
+              '',
+              '重新打开音乐播放器即可看到这些曲目。',
+            ].join('\n')
+            : [
+              '旧源：' + (stats.origins.length ? stats.origins.join('、') : '（没有找到可恢复的旧源）'),
+              '读到记录 ' + stats.total + ' 条，其中音频 ' + stats.files + ' 个（' + mb + ' MB）',
+              '写入当前 profile 曲库：新增 ' + stats.added + ' 首，跳过与现有曲目重复的 ' + stats.skipped + ' 首',
+              '',
+              '跨 profile 的交接区：' + RECOVER_BUNDLE,
+              '在"当前 profile"里再跑一次 --recover-ingest 即可把它吃进当前曲库。',
+              '旧数据没有被修改，也没有往音乐目录写文件。',
+            ].join('\n');
+          dialog.showMessageBoxSync({ type: 'info', title: '曲库恢复完成', message: '曲库恢复完成', detail, buttons: ['好'] });
+        })
+        .catch((e) => {
+          dialog.showMessageBoxSync({ type: 'error', title: '曲库恢复失败', message: '曲库恢复失败', detail: String((e && e.message) || e), buttons: ['好'] });
+        })
+        .finally(() => app.quit());
+      return;
+    }
     // 阻止显示睡眠 + 应用挂起：保持系统与显卡持续活跃
     powerSaveBlocker.start('prevent-display-sleep');
     powerSaveBlocker.start('prevent-app-suspension');
@@ -1101,7 +1132,221 @@ ipcMain.handle('read-asset', (_e, name) => {
     return { error: String((e && e.message) || e) };
   }
 });
-/* 读音频字节，给渲染进程做 blob 兜底（万一 file:// 被限制的第二条路） */
+/* ================= 曲库恢复（--recover-library） =================
+   背景：新版把界面从"随机端口"改成了固定端口 41739（IndexedDB 按"源"隔离，
+   随机端口等于每次启动都换存储域）。而旧版留下来的曲库分散在三处：
+     · 当前 profile 的 file:// 源（早期独立播放器，音频以 Blob 存在 IndexedDB 里）
+     · 当前 profile 的若干 http://127.0.0.1:<随机端口> 源（1.4.0 之前的终端界面）
+     · 另一个 profile（%APPDATA%\music-player-desktop）的 file:// 源
+   本模式把这几处的东西读出来、写进新版自己的曲库 —— 全程只读旧数据，
+   也不往音乐目录写文件（派生数据不导出的约束，见文件头的数据管控说明）。
+
+   用法：
+     音乐播放器.exe --recover-library                       # 恢复当前 profile 的全部旧源
+     音乐播放器.exe --user-data-dir="<旧 profile>" --recover-library   # 恢复另一个 profile
+*/
+const RECOVER_MODE = process.argv.includes('--recover-library');
+const INGEST_MODE = process.argv.includes('--recover-ingest');
+/* 跨 profile 的交接区：旧 profile 恢复出来的东西先放这里（系统临时目录），
+   由当前 profile 再吃进去 —— 与已有的"会话临时目录"同一套做法，绝不写进音乐目录，
+   吃完即删。 */
+const RECOVER_BUNDLE = path.join(os.tmpdir(), 'rhine-recover');
+let recoverWriter = null;
+let recoverStats = { origins: [], total: 0, files: 0, bytes: 0, added: 0, skipped: 0, finished: 0, bundle: RECOVER_BUNDLE };
+
+ipcMain.handle('recover-from-reader', (_e, payload) => {
+  try {
+    if (!payload) return { ok: false };
+    if (payload.done) {
+      const s = payload.summary || {};
+      recoverStats.origins.push(s.origin || '?');
+      recoverStats.total += s.total || 0;
+      recoverStats.files += s.files || 0;
+      recoverStats.bytes += s.bytes || 0;
+      return { ok: true };
+    }
+    /* 顺手留一份跨 profile 交接件（只在临时目录，且由 ingest 或下次启动清理） */
+    try {
+      fs.mkdirSync(RECOVER_BUNDLE, { recursive: true });
+      if (payload.bytes && payload.bytes.byteLength) {
+        const name = String(payload.fileName || ('track-' + (payload.index + 1) + '.' + (payload.ext || 'mp3')))
+          .replace(/[\\/:*?"<>|]/g, '_').slice(-120);
+        const file = path.join(RECOVER_BUNDLE, String(recoverStats.files).padStart(5, '0') + '-' + name);
+        fs.writeFileSync(file, Buffer.from(payload.bytes));
+        payload.bundleFile = path.basename(file);
+      }
+      if (payload.cover && payload.cover.byteLength) {
+        const cfile = path.join(RECOVER_BUNDLE, 'cover-' + String(payload.index) + '-' + Math.random().toString(36).slice(2, 8) + '.bin');
+        fs.writeFileSync(cfile, Buffer.from(payload.cover));
+        payload.bundleCover = path.basename(cfile);
+      }
+      if (payload.bundleFile || payload.bundleCover) {
+        fs.appendFileSync(path.join(RECOVER_BUNDLE, '清单.jsonl'), JSON.stringify({
+          file: payload.bundleFile || null, cover: payload.bundleCover || null,
+          origin: payload.origin, db: payload.db, store: payload.store, index: payload.index,
+          fields: payload.fields || {}, fileName: payload.fileName || null, ext: payload.ext || null
+        }) + '\n');
+      }
+    } catch (e) { logMainError('曲库恢复', e); }
+    if (recoverWriter && !recoverWriter.isDestroyed()) recoverWriter.webContents.send('recover-to-writer', payload);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+});
+ipcMain.on('recover-ack', (_e, payload) => {
+  if (!payload) return;
+  if (typeof payload.added === 'number') recoverStats.added = payload.added;
+  if (typeof payload.skipped === 'number') recoverStats.skipped = payload.skipped;
+  if (payload.finished) recoverStats.finished++;
+});
+
+const RECOVER_PRELOAD = path.join(__dirname, 'preload.js');
+function makeRecoverWindow() {
+  return new BrowserWindow({
+    width: 900, height: 700, show: true, title: '曲库恢复 · RHINE LAB',
+    backgroundColor: '#14150f',
+    webPreferences: { contextIsolation: true, nodeIntegration: false, preload: RECOVER_PRELOAD, spellcheck: false }
+  });
+}
+/* 在某个 http 源上临时起一个只读静态服务（旧端口上的数据只有在该源里才读得到） */
+function serveForOrigin(port, dir) {
+  return new Promise((resolve) => {
+    const srv = http.createServer((q, s) => {
+      let p = decodeURIComponent(String(q.url || '/').split('?')[0].split('#')[0]);
+      if (p === '/') p = '/index.html';
+      const file = path.normalize(path.join(dir, p));
+      if (file !== dir && !file.startsWith(dir + path.sep)) { s.writeHead(403); s.end('forbidden'); return; }
+      fs.readFile(file, (err, data) => {
+        if (err) { s.writeHead(404); s.end('not found'); return; }
+        s.writeHead(200, { 'Content-Type': /\.html$/.test(file) ? 'text/html; charset=utf-8' : 'application/octet-stream' });
+        s.end(data);
+      });
+    });
+    srv.on('error', () => resolve(null));
+    srv.listen(port, '127.0.0.1', () => resolve(srv));
+  });
+}
+async function runRecovery() {
+  /* ① 先开"写入端"：新版自己的源（固定端口） */
+  const baseUrl = await startUiServer().catch(() => null);
+  if (!baseUrl) throw new Error('无法启动内嵌 UI 服务，写不进新版曲库');
+  recoverWriter = makeRecoverWindow();
+  await recoverWriter.loadURL(baseUrl + 'recover.html?mode=write');
+  /* ② 找出所有旧源 */
+  const idbDir = path.join(app.getPath('userData'), 'IndexedDB');
+  const oldPorts = [];
+  try {
+    for (const name of fs.readdirSync(idbDir)) {
+      const m = /^http_127\.0\.0\.1_(\d+)\.indexeddb\.leveldb$/.exec(name);
+      if (!m) continue;
+      const port = Number(m[1]);
+      if (port === UI_PORT) continue; // 新版自己的源，跳过
+      oldPorts.push(port);
+    }
+  } catch (e) { logMainError('曲库恢复', e); }
+  const servers = [];
+  const targets = [];
+  if (fs.existsSync(path.join(idbDir, 'file__0.indexeddb.leveldb'))) {
+    targets.push({
+      label: 'file://（独立播放器）',
+      origin: 'file://',
+      url: 'file://' + path.join(__dirname, 'recover.html').replace(/\\/g, '/') + '?mode=read',
+    });
+  }
+  for (const port of oldPorts) {
+    const srv = await serveForOrigin(port, __dirname);
+    if (!srv) continue;
+    servers.push(srv);
+    const origin = 'http://127.0.0.1:' + port;
+    targets.push({ label: origin, origin, url: origin + '/recover.html?mode=read' });
+  }
+  logMainError('曲库恢复', new Error('待恢复的旧源：' + (targets.map((t) => t.label).join('、') || '无')));
+  /* ③ 逐个源读出来（顺序执行，避免同时搬几 GB） */
+  for (const t of targets) {
+    const win = makeRecoverWindow();
+    try {
+      await win.loadURL(t.url);
+      // 该源读完时 reader 会送来 { done: true, summary:{ origin } }，主进程据此收尾
+      const deadline = Date.now() + 1000 * 60 * 30;
+      while (!recoverStats.origins.includes(t.origin) && !win.isDestroyed() && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    } catch (e) {
+      logMainError('曲库恢复', e);
+    } finally {
+      if (!win.isDestroyed()) win.close();
+    }
+  }
+  /* ④ 等写入端把队列写完 */
+  const deadline = Date.now() + 1000 * 60 * 5;
+  let last = -1;
+  let stable = 0;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1000));
+    if (recoverStats.added === last) {
+      if (++stable >= 4) break;
+    } else {
+      stable = 0;
+      last = recoverStats.added;
+    }
+  }
+  servers.forEach((s) => { try { s.close(); } catch (e) { /* ignore */ } });
+  if (recoverWriter && !recoverWriter.isDestroyed()) recoverWriter.close();
+  return recoverStats;
+}
+
+/* --recover-ingest：把交接区里的东西吃进"当前 profile"的曲库（跨 profile 恢复的第二步） */
+async function runIngest() {
+  const baseUrl = await startUiServer().catch(() => null);
+  if (!baseUrl) throw new Error('无法启动内嵌 UI 服务');
+  if (!fs.existsSync(RECOVER_BUNDLE)) {
+    throw new Error('交接区不存在：' + RECOVER_BUNDLE + '\n（先跑一次 --recover-library）');
+  }
+  recoverWriter = makeRecoverWindow();
+  await recoverWriter.loadURL(baseUrl + 'recover.html?mode=write');
+  const manifestPath = path.join(RECOVER_BUNDLE, '清单.jsonl');
+  const lines = fs.existsSync(manifestPath) ? fs.readFileSync(manifestPath, 'utf8').split('\n').filter(Boolean) : [];
+  recoverStats.total = lines.length;
+  for (const line of lines) {
+    let meta;
+    try { meta = JSON.parse(line); } catch (e) { continue; }
+    const payload = { fields: meta.fields || {}, origin: 'bundle', db: 'bundle', store: 'bundle', index: meta.index || 0, fileName: meta.fileName || undefined, ext: meta.ext || undefined };
+    try {
+      if (meta.file) {
+        const p = path.join(RECOVER_BUNDLE, meta.file);
+        const buf = fs.readFileSync(p);
+        payload.bytes = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+        recoverStats.files++;
+        recoverStats.bytes += buf.length;
+      }
+      if (meta.cover) {
+        const p = path.join(RECOVER_BUNDLE, meta.cover);
+        if (fs.existsSync(p)) {
+          const buf = fs.readFileSync(p);
+          payload.cover = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+        }
+      }
+    } catch (e) { logMainError('曲库恢复', e); continue; }
+    if (recoverWriter.isDestroyed()) break;
+    recoverWriter.webContents.send('recover-to-writer', payload);
+    if (recoverStats.files % 25 === 0) await new Promise((r) => setTimeout(r, 300)); // 别把写入端淹了
+  }
+  recoverWriter.webContents.send('recover-to-writer', { done: true });
+  /* 等写入端把队列写完（added 连续 5 秒不再增长就认为收尾） */
+  const deadline = Date.now() + 1000 * 60 * 10;
+  let last = -1;
+  let stable = 0;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1000));
+    if (recoverStats.added === last) { if (++stable >= 5) break; } else { stable = 0; last = recoverStats.added; }
+  }
+  if (recoverWriter && !recoverWriter.isDestroyed()) recoverWriter.close();
+  /* 吃干净了再删交接区 */
+  try { fs.rmSync(RECOVER_BUNDLE, { recursive: true, force: true }); } catch (e) { logMainError('曲库恢复', e); }
+  return recoverStats;
+}
+
 ipcMain.handle('read-audio', (_e, p) => {
   try {
     if (!p || typeof p !== 'string' || !fs.existsSync(p)) return { error: '文件不存在' };

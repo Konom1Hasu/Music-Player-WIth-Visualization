@@ -2478,14 +2478,20 @@ body.rhine-night #player-bar #p-play:hover {
 }
 
 /* 详情区：曲目信息 + 大尺寸实时频谱（页签已去掉，整块竖向空间都留给可视化） */
+/* 详情区：可视化优先 —— 画布做成 636×477（正好 4:3），
+   面板整体上移到 top 190、其余信息压到最小，让出来的高度全给频谱。
+   底部必须留出右下角 POWERED BY（y 901–925、x 1571–1846）的位置。 */
+.detail-content {
+  top: 190px;
+}
 #detail-content.song-mode .song-head {
   display: flex;
-  gap: 26px;
-  margin-top: 18px;
+  gap: 22px;
+  margin-top: 10px;
 }
 #detail-content.song-mode .song-cover {
-  width: 118px;
-  height: 118px;
+  width: 64px;
+  height: 64px;
   flex: none;
   background: #ddd9d1;
   border: 1px solid #c1b8a7;
@@ -2500,18 +2506,19 @@ body.rhine-night #player-bar #p-play:hover {
 #detail-content.song-mode .song-head-text {
   min-width: 0;
   flex: 1;
+  align-self: center;
 }
 #detail-content.song-mode h2 {
   font-size: 34px;
   line-height: 1.14;
   letter-spacing: -1px;
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   max-width: 100%;
   overflow-wrap: anywhere;
 }
 #detail-content.song-mode .detail-title-cn {
-  font-size: 18px;
-  gap: 18px;
+  font-size: 17px;
+  gap: 16px;
 }
 #detail-content.song-mode .detail-title-cn span {
   font-size: 10px;
@@ -2519,21 +2526,45 @@ body.rhine-night #player-bar #p-play:hover {
   color: #807b70;
 }
 #detail-content.song-mode .detail-rule {
-  margin-top: 20px;
+  margin-top: 16px;
 }
+/* 元数据改成一行内联（原来 2×2 网格占 104px，现在 24px） */
 #detail-content.song-mode .metadata {
-  margin: 16px 0 0;
-  gap: 14px 42px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 30px;
+  margin: 0;
+}
+#detail-content.song-mode .metadata > div {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+#detail-content.song-mode .metadata dt {
+  font-size: 9px;
+  letter-spacing: 0.7px;
+}
+#detail-content.song-mode .metadata dd {
+  margin: 0;
+  font-size: 12px;
 }
 #detail-content.song-mode .song-viz {
-  margin-top: 16px;
+  margin-top: 12px;
 }
 #detail-content.song-mode .song-viz canvas {
   display: block;
   width: 636px;
-  height: 174px;
+  height: 477px;
   margin-top: 10px;
   border-bottom: 1px solid #bdb8ad;
+}
+/* 空库：没有数据可画，把高度收回来，并保留「导入音乐」入口 */
+#detail-content.empty-library .song-viz canvas {
+  height: 380px;
+}
+#detail-content.empty-library .metadata,
+#detail-content.empty-library .song-lyric-line {
+  display: none;
 }
 .song-viz-head {
   display: flex;

@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>曲库恢复</title>
+<style>
+  html,body{margin:0;background:#14150f;color:#e8e5e1;font:14px/1.7 MiSans,system-ui,"Microsoft YaHei",sans-serif}
+  main{max-width:940px;margin:0 auto;padding:32px}
+  h1{font-size:22px;letter-spacing:1px;margin:0 0 6px}
+  p.hint{color:#9a9487;font-size:12px;margin:0 0 18px}
+  pre{white-space:pre-wrap;word-break:break-all;background:#0b0c08;border:1px solid #3a3d33;padding:16px;min-height:300px;font:12px/1.7 ui-monospace,Consolas,monospace}
+  .bar{height:6px;background:#2a2c24;margin:12px 0}
+  .bar i{display:block;height:100%;width:0;background:#c5a974;transition:width .2s}
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">曲库恢复 · RHINE LAB</h1>
+  <p class="hint" id="hint">只读取旧版留在 IndexedDB 里的数据，写进新版自己的曲库；<b>不修改、不删除任何旧数据，也不会往音乐目录写文件</b>。</p>
+  <div class="bar"><i id="bar"></i></div>
+  <pre id="log">准备中…</pre>
+</main>
+<script>
+/*
+ * 两种模式（同一个页面，靠 ?mode= 区分）：
+ *   read  —— 在"旧数据的源"上打开，把每条记录（含音频 Blob 字节）交给主进程；
+ *   write —— 在"新版的源"（http://127.0.0.1:41739）上打开，把主进程转发来的记录写进 rhine-music。
+ * 走 IPC 而不是落盘，是因为本项目对派生数据（ncm 解出/B 站副本）有"不导出到音乐目录"的硬约束。
+ */
+const MODE = new URLSearchParams(location.search).get("mode") === "write" ? "write" : "read";
+const DB_NAME = "rhine-music";
+const STORE = "songs";
+const logEl = document.getElementById("log");
+const barEl = document.getElementById("bar");
+let lines = [];
+const log = (s) => { lines.push(s); logEl.textContent = lines.slice(-60).join("\n"); logEl.scrollTop = logEl.scrollHeight; };
+const progress = (p) => { barEl.style.width = Math.max(0, Math.min(100, p * 100)) + "%"; };
+const api = window.desktop || {};
+
+const EXT_BY_MAGIC = (b, name) => {
+  const a = (i) => b[i];
+  if (a(0) === 0x49 && a(1) === 0x44 && a(2) === 0x33) return "mp3";
+  if (a(0) === 0x66 && a(1) === 0x4c && a(2) === 0x61 && a(3) === 0x43) return "flac";
+  if (a(0) === 0x4f && a(1) === 0x67 && a(2) === 0x67 && a(3) === 0x53) return "ogg";
+  if (a(0) === 0x52 && a(1) === 0x49 && a(2) === 0x46 && a(3) === 0x46) return "wav";
+  if (a(0) === 0xff && (a(1) === 0xfb || a(1) === 0xf3 || a(1) === 0xf2)) return "mp3";
+  if (a(4) === 0x66 && a(5) === 0x74 && a(6) === 0x79 && a(7) === 0x70) return "m4a";
+  const m = String(name || "").match(/\.([a-z0-9]+)$/i);
+  return m ? m[1].toLowerCase() : "mp3";
+};
+const isImage = (b) => {
+  const a = (i) => b[i];
+  return (a(0) === 0xff && a(1) === 0xd8) || (a(0) === 0x89 && a(1) === 0x50) || (a(0) === 0x47 && a(1) === 0x49) || (a(0) === 0x52 && a(1) === 0x49);
+};
+const openDB = (name) => new Promise((res, rej) => {
+  const r = indexedDB.open(name);
+  r.onsuccess = () => res(r.result);
+  r.onerror = () => rej(r.error);
+  r.onblocked = () => rej(new Error("被其它窗口占用"));
+});
+
+/* ---------------- read：把旧源里的东西全部拿出来 ---------------- */
+async function runRead() {
+  if (!indexedDB.databases) { log("环境不支持 indexedDB.databases()"); return; }
+  const dbs = await indexedDB.databases();
+  log("源 " + location.origin + "：发现 " + dbs.length + " 个数据库");
+  let total = 0, files = 0, bytes = 0;
+  for (const info of dbs) {
+    if (!info.name) continue;
+    let db;
+    try { db = await openDB(info.name); } catch (e) { log("  跳过 " + info.name + "：" + e.message); continue; }
+    for (const store of [...db.objectStoreNames]) {
+      let records = [];
+      try {
+        records = await new Promise((res, rej) => {
+          const t = db.transaction(store, "readonly");
+          const r = t.objectStore(store).getAll();
+          r.onsuccess = () => res(r.result || []);
+          r.onerror = () => rej(r.error);
+        });
+      } catch (e) { log("  读取失败 " + info.name + "/" + store + "：" + e.message); continue; }
+      log("  " + info.name + " / " + store + "：" + records.length + " 条");
+      for (let i = 0; i < records.length; i++) {
+        const rec = records[i];
+        total++;
+        const fields = {};
+        let audio = null, audioKey = null, cover = null, coverKey = null, name = "";
+        const values = rec && typeof rec === "object" ? Object.entries(rec) : [["value", rec]];
+        for (const [k, v] of values) {
+          if (v instanceof Blob) {
+            if (v.size > 262144) { if (!audio || v.size > audio.size) { audio = v; audioKey = k; } }
+            else if (v.size > 1024 && (!cover || v.size > cover.size)) { cover = v; coverKey = k; }
+            if (k === "name" || k === "fileName") name = v.name || name;
+          } else if (v instanceof ArrayBuffer || ArrayBuffer.isView(v)) {
+            const size = v.byteLength !== undefined ? v.byteLength : v.length;
+            if (size > 262144 && !audio) { audio = new Blob([v]); audioKey = k; }
+            else if (size > 1024 && size <= 262144 && !cover) { cover = new Blob([v]); coverKey = k; }
+          } else if (v === null || ["string", "number", "boolean"].includes(typeof v)) {
+            fields[k] = v;
+          } else if (Array.isArray(v)) {
+            const plain = v.filter((x) => ["string", "number"].includes(typeof x));
+            if (plain.length) fields[k] = plain.slice(0, 100);
+          }
+        }
+        const payload = { fields, origin: location.origin, db: info.name, store, index: i };
+        if (name) payload.fileName = name;
+        const named = fields.fileName || fields.filePath || fields.path || fields.name;
+        if (typeof named === "string" && named) payload.fileName = payload.fileName || named.replace(/^.*[\\/]/, "");
+        if (audio) {
+          payload.ext = EXT_BY_MAGIC(new Uint8Array(await audio.slice(0, 12).arrayBuffer()), payload.fileName);
+          payload.bytes = await audio.arrayBuffer();
+          files++;
+          bytes += audio.size;
+        }
+        if (cover) {
+          const cb = new Uint8Array(await cover.slice(0, 12).arrayBuffer());
+          if (isImage(cb)) payload.cover = await cover.arrayBuffer();
+        }
+        await api.recoverChunk?.(payload);
+        progress((i + 1) / Math.max(1, records.length));
+      }
+    }
+    db.close();
+  }
+  log("完成：" + total + " 条记录，其中音频 " + files + " 个（" + (bytes / 1048576).toFixed(1) + " MB）");
+  progress(1);
+  await api.recoverChunk?.({ done: true, summary: { origin: location.origin, total, files, bytes } });
+}
+
+/* ---------------- write：写进新版自己的曲库 ---------------- */
+let orderSeq = Date.now();
+function toSong(p) {
+  const f = p.fields || {};
+  const str = (...keys) => { for (const k of keys) { const v = f[k]; if (typeof v === "string" && v.trim()) return v.trim(); } return ""; };
+  const num = (...keys) => { for (const k of keys) { const v = f[k]; if (typeof v === "number" && isFinite(v)) return v; } return 0; };
+  const bool = (...keys) => { for (const k of keys) { if (typeof f[k] === "boolean") return f[k]; if (typeof f[k] === "number") return f[k] !== 0; } return false; };
+  let title = str("title", "name", "songName", "trackName");
+  let artist = str("artist", "singer", "artists", "author");
+  let album = str("album", "albumName");
+  const fileName = p.fileName || str("fileName", "filePath", "path") || "track";
+  if (!title) {
+    const base = fileName.replace(/\.[^.]+$/, "");
+    const m = base.split(/\s+-\s+/);
+    if (m.length >= 2) { artist = artist || m[0].trim(); title = m.slice(1).join(" - ").trim(); }
+    else title = base;
+  }
+  return {
+    id: "rc-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+    title: title || "未命名曲目",
+    artist: artist || "未知艺术家",
+    album: album || "旧版曲库",
+    duration: num("duration", "dur", "length"),
+    fav: bool("fav", "favorite", "starred"),
+    plays: num("plays", "playCount", "count", "playTimes"),
+    pos: num("pos", "progress", "currentTime", "position"),
+    lrc: str("lrc", "lyrics", "lyric"),
+    order: orderSeq++,
+  };
+}
+function coverToDataUrl(buf, kind) {
+  const bytes = new Uint8Array(buf);
+  const type = bytes[0] === 0x89 ? "image/png" : bytes[0] === 0x52 ? "image/webp" : "image/jpeg";
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return "data:" + type + ";base64," + btoa(bin);
+}
+async function runWrite() {
+  const db = await new Promise((res, rej) => {
+    const r = indexedDB.open(DB_NAME, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore(STORE, { keyPath: "id" });
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+  const existing = await new Promise((res, rej) => {
+    const t = db.transaction(STORE, "readonly");
+    const r = t.objectStore(STORE).getAll();
+    r.onsuccess = () => res(r.result || []);
+    r.onerror = () => rej(r.error);
+  });
+  const seen = new Set(existing.map((s) => (s.title || "") + "\u0001" + (s.artist || "")));
+  log("新版曲库现有 " + existing.length + " 首，开始接收…");
+  let added = 0, skipped = 0;
+  const queue = [];
+  let flushing = false;
+  const flush = async () => {
+    if (flushing) return;
+    flushing = true;
+    while (queue.length) {
+      const payload = queue.shift();
+      const song = toSong(payload);
+      if (seen.has(song.title + "\u0001" + song.artist)) { skipped++; continue; }
+      seen.add(song.title + "\u0001" + song.artist);
+      try {
+        if (payload.bytes) {
+          const blob = new Blob([new Uint8Array(payload.bytes)], { type: "audio/" + (payload.ext || "mpeg") });
+          song.file = new File([blob], (payload.fileName || song.title + "." + (payload.ext || "mp3")).replace(/[\\/:*?"<>|]/g, "_"));
+        }
+        if (payload.cover) song.cover = coverToDataUrl(payload.cover);
+        await new Promise((res, rej) => {
+          const t = db.transaction(STORE, "readwrite");
+          t.objectStore(STORE).put(song);
+          t.oncomplete = () => res();
+          t.onerror = () => rej(t.error);
+        });
+        added++;
+        if (added % 20 === 0) log("  已写入 " + added + " 首…");
+      } catch (e) {
+        log("  写入失败：" + (e && e.message ? e.message : e));
+      }
+    }
+    flushing = false;
+    await api.recoverAck?.({ added, skipped });
+  };
+  api.recoverListen?.((payload) => {
+    if (payload && payload.done) {
+      queue.push(null);
+      setTimeout(async () => { await flush(); log("完成：新增 " + added + " 首，跳过重复 " + skipped + " 首。"); await api.recoverAck?.({ finished: true, added, skipped }); }, 50);
+      return;
+    }
+    queue.push(payload);
+    flush();
+  });
+  /* 兜底：主进程若已结束而 writer 还空转，60 秒后自行收尾 */
+  setTimeout(async () => { await flush(); await api.recoverAck?.({ finished: true, added, skipped }); }, 60000);
+}
+
+document.getElementById("title").textContent = MODE === "write" ? "曲库恢复 · 写入新版" : "曲库恢复 · 读取旧版";
+document.getElementById("hint").innerHTML = MODE === "write"
+  ? "把旧版曲库写进新版自己的存储（rhine-music）；<b>不会往音乐目录写任何文件</b>。"
+  : "只读取旧版留在 IndexedDB 里的数据；<b>不修改、不删除任何旧数据</b>。";
+(MODE === "write" ? runWrite() : runRead()).catch((e) => log("出错：" + (e && e.message ? e.message : e)));
+</script>
+</body>
+</html>
