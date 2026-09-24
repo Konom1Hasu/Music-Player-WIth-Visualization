@@ -236,8 +236,10 @@ cd Music-Player-WIth-Visualization
 ```
 音乐播放器/
 ├── app/                        # 应用源码（会被打包进 resources/app）
-│   ├── index.html              # 主界面：UI + 样式 + 全部渲染逻辑 + 频谱分析
-│   ├── main.js                 # Electron 主进程：窗口、IPC、热键、NCM 解密、歌词匹配
+│   ├── ui/                     # 主界面的构建产物（莱茵生命终端，由 app-rhine 构建同步而来）
+│   ├── index.html              # 独立播放器界面（兜底）
+│   ├── terminal.html           # 早期单面板 3D 终端播放器（兜底）
+│   ├── main.js                 # Electron 主进程：窗口、IPC、热键、NCM 解密、歌词匹配、本地 UI 服务
 │   ├── preload.js              # contextBridge，向渲染进程暴露 window.desktop
 │   ├── mini.html               # 迷你悬浮窗界面
 │   ├── bili.js                 # B 站缓存扫描与音频预处理
@@ -246,10 +248,10 @@ cd Music-Player-WIth-Visualization
 │   ├── vendor/                 # three.js r147（UMD）+ GLTFLoader，仅「封面 3D」开启时注入
 │   ├── assets/                 # archive-cassette.glb（单体）+ archive-assembly.glb（拆解件）
 │   └── package.json            # Electron 入口声明
-├── app-rhine/                  # 新底座：RhineLabUI（vendored，MIT）—— 播放功能正在反向整合进来
-│   ├── src/                    # 它的 TypeScript 源码（Three.js 三维档案终端）
+├── app-rhine/                  # 主界面底座：RhineLabUI（vendored，MIT）+ 反向整合进来的播放器
+│   ├── src/                    # TypeScript 源码：终端（main.ts / scene.ts）+ 播放器（player.ts / data.ts）
 │   ├── public/                 # 模型 / 配乐 / MiSans 字体（含 MiSans-license.pdf 与 NOTICE）
-│   ├── content/                # 它的档案内容源（将被音乐曲库取代）
+│   ├── content/                # 它的档案内容源（音乐库为空时作为占位）
 │   ├── scripts/                # 它自己的构建前脚本
 │   ├── verification/           # 它自己的验证文档
 │   ├── AGENTS.md               # 它自己的协作规范（保留，供上游对齐）
@@ -264,6 +266,7 @@ cd Music-Player-WIth-Visualization
 │   ├── push-to-github.ps1      # 一条命令完成提交推送 + 推标签（自动适配受限网络）
 │   ├── setup-push-tls.ps1      # 准备推送通道（schannel 不可用时改用 openssl + 本机 CA）
 │   ├── release.ps1             # 发布：升版本号 → 查文档 → 验证 → 构建 → 打标签 → 推送
+│   ├── glb-inspect.js          # 读 GLB：场景树 / 材质 / 包围盒（核对 Blender 导出件）
 │   ├── 渲染快照.ps1             # 给界面拍快照并转成 ASCII（无图形环境也能"看"界面）
 │   ├── 截图转文本.js            # PNG → ASCII 灰度图（纯 Node，无第三方依赖）
 │   ├── 文档一致性验证.js        # 文档与代码是否同步的检查（16 项）
@@ -274,11 +277,16 @@ cd Music-Player-WIth-Visualization
 │   ├── 快捷键.md
 │   ├── 构建与安装.md
 │   ├── 架构说明.md
+│   ├── Blender工程-完整规格.md  # Blender 源工程的材质 / 几何 / 相机规格（配色权威取值来源）
+│   ├── 设计参考-RhineLab视觉规范.md # 两张设计参考图的版式与色板，以及终端里的落地映射
 │   ├── 数据管控与合规.md        # 派生数据的管控措施与验证明细
 │   ├── 维护指南.md              # 改了代码要同步改哪些文档
 │   └── 更新日志.md
 ├── dist/                       # 构建输出（已被 .gitignore 排除）
 │   └── 音乐播放器-win32-x64/
+├── 设计参考-图A-档案纸面.png     # 设计参考：浅色「纸张 / 档案」
+├── 设计参考-图B-仪器夜间.png     # 设计参考：深色「仪器 / 夜间」
+├── 屏幕截图 2026-09-24 101909.png # 1.4.0 的问题现场：详情区把歌曲塞进档案字段
 ├── 构建.bat                    # 双击构建
 ├── 安装.bat                    # 双击安装
 ├── 推送.bat                    # 双击推送到 GitHub
