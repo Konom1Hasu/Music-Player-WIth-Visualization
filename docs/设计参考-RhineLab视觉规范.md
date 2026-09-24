@@ -1,5 +1,9 @@
 # Rhine Lab 视觉参考（Blender 工程为权威源）
 
+> **来源署名：本文件涉及的 UI 源码与 Blender 工程文件均由 B 站 UP 主 [@路北路陈](https://space.bilibili.com/3546646728820438) 制作**
+> （仓库 [LBEILC/RhineLabUI](https://github.com/LBEILC/RhineLabUI)，MIT）。
+> 本仓库只做反向整合与核对，美术资产的著作权归原作者。
+>
 > **权威设计源 = Blender 工程**（`RhineLabUI/art/*.blend`，导出为 `app/assets/archive-*.glb`）。
 > UI 的配色、部件命名、比例都以它为准；根目录两张设计图只是同一套设计的"印刷/海报"表达，
 > 用于补齐版式网格与夜间氛围。

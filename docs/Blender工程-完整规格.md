@@ -1,5 +1,10 @@
 # Blender 工程完整规格（档案终端 = 播放器界面基础）
 
+> **来源署名：这套 Blender 工程（`.blend` / `art/*.py`）与配套 UI 源码均由 B 站 UP 主
+> [@路北路陈](https://space.bilibili.com/3546646728820438) 制作**
+> （仓库 [LBEILC/RhineLabUI](https://github.com/LBEILC/RhineLabUI)，MIT）。
+> 本仓库只做反向整合与核对，美术资产的著作权归原作者。
+>
 > 来源：`RhineLabUI_源码与Blender工程_MIT_2026-09-09.zip` → `RhineLabUI/art/*.py`
 > （这些脚本**程序化构造**了 .blend，并导出 `app/assets/archive-*.glb`）。
 > 本文件是把 6 个构造脚本逐行读出的完整规格，作为「以 Blender 文件为基础搭建播放器界面」的唯一依据。

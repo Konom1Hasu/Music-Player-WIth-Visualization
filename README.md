@@ -26,6 +26,7 @@
 - [版本回滚](#版本回滚)
 - [常见问题](#常见问题)
 - [文档](#文档)
+- [致谢](#致谢)
 - [许可](#许可)
 
 ---
@@ -88,14 +89,14 @@
 
 - 深色（蓝紫）、浅色、网易云红（`#EC4141`）、**莱茵生命**（琥珀 `#c5a16b`）
 - 莱茵生命是「仪器面板」变体：配色取自
-  [RhineLabUI](https://github.com/LBEILC/RhineLabUI)（MIT）的暗色面规范，
+  [RhineLabUI](https://github.com/LBEILC/RhineLabUI)（MIT，作者 B 站 **@路北路陈**）的暗色面规范，
   材质上配套 1px 实心细线、构件直角、**选中项用左侧黄铜竖条而非色块**、
   等宽数字与封面四角黄铜标记 —— 不只是换色，详见 [docs/功能说明.md](docs/功能说明.md#莱茵生命仪器面板变体)
 - 所有弹层、滑槽、滑块、进度条把手均跟随主题
 - 统一极简线性图标（16 套手写 SVG，`stroke-width: 1.7`，圆角端点）
 - 圆角播放按钮与胶囊形暂停图标
 - **封面 3D 档案**（莱茵生命主题下默认开启，⚙ 面板可开关）：封面区叠一层可旋转的
-  [Rhine Lab 档案](https://github.com/LBEILC/RhineLabUI) 3D 模型（MIT），
+  [Rhine Lab 档案](https://github.com/LBEILC/RhineLabUI) 3D 模型（MIT，Blender 工程来自 B 站 **@路北路陈**），
   并支持**拆解 / 重组** —— 照搬原项目 `model-viewer.ts` 的部件分层规范
   （按 `assemblyPart` 分组、沿 Z 平移 `depth × spread`、阻尼速率 5.5）。
   转速与播放状态联动；限帧 30fps、窗口隐藏即停、失败自动关闭 —— 详见
@@ -248,7 +249,7 @@ cd Music-Player-WIth-Visualization
 │   ├── vendor/                 # three.js r147（UMD）+ GLTFLoader，仅「封面 3D」开启时注入
 │   ├── assets/                 # archive-cassette.glb（单体）+ archive-assembly.glb（拆解件）
 │   └── package.json            # Electron 入口声明
-├── app-rhine/                  # 主界面底座：RhineLabUI（vendored，MIT）+ 反向整合进来的播放器
+├── app-rhine/                  # 主界面底座：RhineLabUI（B 站 @路北路陈，vendored，MIT）+ 反向整合进来的播放器
 │   ├── src/                    # TypeScript 源码：终端（main.ts / scene.ts）+ 播放器（player.ts / data.ts）
 │   ├── public/                 # 模型 / 配乐 / MiSans 字体（含 MiSans-license.pdf 与 NOTICE）
 │   ├── content/                # 它的档案内容源（音乐库为空时作为占位）
@@ -448,6 +449,27 @@ Windows 的媒体键是**独占**资源，同一时刻只能由一个程序注�
 
 ---
 
+## 致谢
+
+**本项目的界面（UI）源码与 Blender 工程文件来自 B 站 UP 主 [@路北路陈](https://space.bilibili.com/3546646728820438)。**
+
+- **Rhine Lab 界面源码**：仓库里的 `app-rhine/`（莱茵生命终端底座，TypeScript + Three.js + Vite）
+  是**反向整合**进来的 vendored 工程 —— 界面骨架、动效时间轴、三维档案阵列、
+  解密与内构、启动片头、音效设计均源自 UP 主 **@路北路陈** 公开的
+  [RhineLabUI](https://github.com/LBEILC/RhineLabUI)（MIT）。
+- **Blender 工程文件**：`app/assets/archive-*.glb` 与 `app-rhine/public/**/*.glb` 里的三维资产
+  （档案装配体、档案磁带、内构、外壳细节）由 UP 主 **@路北路陈** 的 Blender 源工程导出，
+  原始 `.blend` 与生成脚本见 `RhineLabUI/art/`；本仓库的
+  [`docs/设计参考-RhineLab视觉规范.md`](docs/设计参考-RhineLab视觉规范.md) 与
+  [`docs/Blender工程-完整规格.md`](docs/Blender工程-完整规格.md) 记录了对它们的核对结果。
+- 本仓库**只做了两件事**：把播放器功能反向整合进这套界面，以及为整合后的界面对齐播放器信息。
+  界面与美术资产的著作权归原作者，按 MIT 授权使用（原始压缩包
+  `RhineLabUI_源码与Blender工程_MIT_2026-09-09.zip` 保留在仓库根目录）。
+
+> 如果这份署名有不准确或需要补充的地方，请提 issue，我会立刻更正。
+
+---
+
 ## 许可
 
 [MIT](LICENSE)
@@ -456,3 +478,4 @@ Windows 的媒体键是**独占**资源，同一时刻只能由一个程序注�
 
 - [Electron](https://github.com/electron/electron) — MIT
 - [ncmdump](https://github.com/taurusxin/ncmdump) — MIT
+- [RhineLabUI](https://github.com/LBEILC/RhineLabUI)（界面源码 + Blender 工程，作者 B 站 **@路北路陈**）— MIT
