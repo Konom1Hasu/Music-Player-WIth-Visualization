@@ -2358,6 +2358,20 @@ body.rhine-night #player-bar #p-play:hover {
   accent-color: #565c46;
   cursor: pointer;
 }
+.p-vol-glyph {
+  font-size: 9px;
+  letter-spacing: 1.2px;
+  color: var(--p-muted);
+  flex: none;
+}
+#p-vol {
+  width: 110px;
+  height: 16px;
+  flex: none;
+  background: transparent;
+  accent-color: #565c46;
+  cursor: pointer;
+}
 
 /* 播放列表：与终端弹窗同一套面板语言 */
 #player-playlist {

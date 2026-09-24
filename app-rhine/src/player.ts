@@ -321,6 +321,12 @@ function syncRecords() {
 
 /* ---------- 播放控制 ---------- */
 function selectSong(id: string) {
+  // 离开这首之前把最后的位置落一次（下次播放它时用来续上）
+  const leaving = songs.find((x) => x.id === currentId);
+  if (leaving && audio.currentTime > 3) {
+    leaving.pos = audio.currentTime;
+    persist(leaving);
+  }
   currentId = id;
   const s = songs.find((x) => x.id === id);
   if (!s) return;
@@ -707,6 +713,62 @@ function renderNow() {
   renderList();
 }
 
+/* 频谱计算搬到 Web Worker：120 段 × 1024 点的 Goertzel 每帧约 12 万次乘加，
+   放主线程会跟三维场景抢帧。worker 失败就退回同步计算（见 vizFrame）。 */
+let spectrumWorker: Worker | null = null;
+let workerEver = false;
+let workerFrames = 0;
+let pendingFreq: Float32Array | null = null;
+function initSpectrumWorker() {
+  try {
+    const src = `
+      const N = 1024, B = 120, LOG101 = Math.log10(101);
+      const hann = new Float32Array(N);
+      for (let i = 0; i < N; i++) hann[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (N - 1)));
+      let bandK = null, sr = 0, kickRef = 0;
+      onmessage = (e) => {
+        const td = new Float32Array(e.data.td);
+        const rate = e.data.sr || 48000;
+        if (!bandK || rate !== sr) {
+          sr = rate;
+          bandK = new Float32Array(B);
+          for (let b = 0; b < B; b++) bandK[b] = (42 * Math.pow(16000 / 42, b / (B - 1)) / sr) * N;
+        }
+        const mags = new Float32Array(B);
+        let mx = 1e-9;
+        for (let b = 0; b < B; b++) {
+          const k = bandK[b], co = 2 * Math.cos(2 * Math.PI * k / N);
+          let s1 = 0, s2 = 0;
+          for (let i = 0; i < N; i++) { const s0 = td[i] * hann[i] + co * s1 - s2; s2 = s1; s1 = s0; }
+          const m = Math.sqrt(Math.max(0, s1 * s1 + s2 * s2 - co * s1 * s2)) / (N / 4);
+          mags[b] = m;
+          if (m > mx) mx = m;
+        }
+        const out = new Float32Array(B + 1);
+        for (let b = 0; b < B; b++) out[b] = Math.log10(1 + 100 * Math.min(1, mags[b] / mx)) / LOG101;
+        let low = 0;
+        for (let b = 2; b <= 8; b++) low += mags[b];
+        low /= 7;
+        if (kickRef <= 0) kickRef = low;
+        const rise = (low - kickRef) / Math.max(kickRef, 1e-6);
+        out[B] = Math.max(0, Math.min(1, (rise - 0.08) * 2.2));
+        kickRef += (low - kickRef) * 0.05;
+        postMessage(out, [out.buffer]);
+      };`;
+    spectrumWorker = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+    spectrumWorker.onmessage = (e) => {
+      pendingFreq = new Float32Array(e.data);
+      workerEver = true;
+    };
+    spectrumWorker.onerror = () => {
+      spectrumWorker = null;
+      workerEver = false;
+    };
+  } catch (e) {
+    spectrumWorker = null;
+  }
+}
+
 /* ---------- 频谱：1.3.0 版独立播放器的自研频谱（见 spectrum.ts） ---------- */
 let actx: AudioContext | null = null;
 let analyserNode: AnalyserNode | null = null;
@@ -769,6 +831,7 @@ async function ensureAnalyser(): Promise<AnalyserNode | null> {
     analyserNode = node;
     freqData = new Uint8Array(node.frequencyBinCount);
     timeData = new Float32Array(node.fftSize);
+    initSpectrumWorker();
   } catch {
     vizDenied = true;
   }
@@ -812,7 +875,21 @@ function vizFrame(ts: number) {
   } else if (analyserNode && spectrum) {
     if (!timeData) timeData = new Float32Array(analyserNode.fftSize);
     analyserNode.getFloatTimeDomainData(timeData);
-    spectrum.update(timeData, actx?.sampleRate);
+    /* 频谱在 Web Worker 里算（1.3.0 的做法）：120 段 × 1024 点的 Goertzel 每帧约 12 万次
+       乘加，放在主线程会和三维场景抢帧 —— 用户在 1.4.5 反馈"可视化帧率很低"就是这条。
+       worker 起不来/没回包时退回同步计算，功能不受影响。 */
+    if (spectrumWorker && workerEver) {
+      const copy = timeData.slice();
+      spectrumWorker.postMessage({ td: copy, sr: actx?.sampleRate ?? 48000 }, [copy.buffer]);
+      if (pendingFreq) spectrum.applyBands(pendingFreq);
+    } else {
+      spectrum.update(timeData, actx?.sampleRate);
+      if (spectrumWorker && ++workerFrames > 45) {
+        // 等了 45 帧还没有回包（worker 被策略挡住等）→ 停掉它，永久走同步路径
+        try { spectrumWorker.terminate(); } catch (e) { /* ignore */ }
+        spectrumWorker = null;
+      }
+    }
     live = !audio.paused;
   } else if (spectrum) {
     live = spectrum.decay();
@@ -907,6 +984,7 @@ function buildUI() {
         <button id="p-next" title="下一首"><svg viewBox="0 0 24 24" width="13" height="13"><path d="M15.6 4H18v16h-2.4zM4 4v16l10-8z"/></svg></button>
         <i class="p-sep" aria-hidden="true"></i>
         <button id="p-mode" title="播放模式">↻</button>
+        <button id="p-rate" title="播放速度">1×</button>
         <button id="p-fav" title="收藏当前曲目">♡</button>
         <button id="p-import" title="导入音乐（右键 ＝ 导入整个文件夹）">＋</button>
         <button id="p-list" title="播放列表 ／ 档案阵列">☰</button>
@@ -920,6 +998,9 @@ function buildUI() {
       <span class="p-time" id="p-time-cur">0:00</span>
       <input id="p-seek" type="range" min="0" max="1000" value="0" title="播放进度" aria-label="播放进度"/>
       <span class="p-time" id="p-time-dur">0:00</span>
+      <i class="p-sep" aria-hidden="true"></i>
+      <span class="p-vol-glyph" title="音量">VOL</span>
+      <input id="p-vol" type="range" min="0" max="100" value="80" title="音量" aria-label="音量"/>
     </div>`;
   root.appendChild(bar);
   nowTitleEl = bar.querySelector("#p-now-title");
@@ -947,6 +1028,54 @@ function buildUI() {
     else toast("还没有正在播放的曲目");
   });
   bar.querySelector("#p-list")!.addEventListener("click", () => listEl!.classList.toggle("open"));
+  /* 播放速度：1× → 1.25× → 1.5× → 2× → 0.75× 循环（原来独立播放器有的倍速） */
+  const rateBtn = bar.querySelector("#p-rate") as HTMLButtonElement;
+  const rates = [1, 1.25, 1.5, 2, 0.75];
+  let rateIndex = 0;
+  try {
+    const saved = Number(localStorage.getItem("rhine-rate") || "1");
+    const at = rates.indexOf(saved);
+    if (at >= 0) rateIndex = at;
+  } catch {
+    /* ignore */
+  }
+  const applyRate = () => {
+    const r = rates[rateIndex];
+    audio.playbackRate = r;
+    rateBtn.textContent = (r === 1 ? "1" : String(r)) + "×";
+    rateBtn.classList.toggle("lit", r !== 1);
+    rateBtn.title = "播放速度：" + r + "×（点击切换）";
+    try {
+      localStorage.setItem("rhine-rate", String(r));
+    } catch {
+      /* ignore */
+    }
+  };
+  rateBtn.addEventListener("click", () => {
+    rateIndex = (rateIndex + 1) % rates.length;
+    applyRate();
+  });
+  applyRate();
+  /* 音量（原来独立播放器有的音量条）；与设置里的背景音乐音量互不影响 */
+  const volEl = bar.querySelector("#p-vol") as HTMLInputElement;
+  let savedVolume = 0.8;
+  try {
+    const v = Number(localStorage.getItem("rhine-volume"));
+    if (isFinite(v) && v >= 0 && v <= 1) savedVolume = v;
+  } catch {
+    /* ignore */
+  }
+  audio.volume = savedVolume;
+  volEl.value = String(Math.round(savedVolume * 100));
+  volEl.addEventListener("input", () => {
+    const v = Number(volEl.value) / 100;
+    audio.volume = v;
+    try {
+      localStorage.setItem("rhine-volume", String(v));
+    } catch {
+      /* ignore */
+    }
+  });
   bar.querySelector("#p-seek")!.addEventListener("input", (e) => {
     if (audio.duration) audio.currentTime = (Number((e.target as HTMLInputElement).value) / 1000) * audio.duration;
   });
@@ -1010,13 +1139,13 @@ export function songDetailMarkup(index: number): string {
         ["DURATION / 时长", "—"],
         ["PLAYED / 播放次数", "—"],
         ["FORMAT / 来源", "—"],
-        ["POSITION / 上次进度", "—"],
+        ["FAVORITE / 收藏", "—"],
       ]
     : [
         ["DURATION / 时长", mmss(s!.duration)],
         ["PLAYED / 播放次数", `${s!.plays || 0} 次`],
         ["FORMAT / 来源", sourceLabel(s!)],
-        ["POSITION / 上次进度", s!.pos > 3 ? mmss(s!.pos) : "从头开始"],
+        ["FAVORITE / 收藏", s!.fav ? "已收藏" : "未收藏"],
       ];
   const actions = empty
     ? `<button class="solid-button" data-action="import-music">＋ IMPORT MUSIC<span>导入音乐</span></button>`
@@ -1068,14 +1197,10 @@ audio.addEventListener("timeupdate", () => {
   const td = document.querySelector("#p-time-dur");
   if (tc) tc.textContent = fmt(cur);
   if (td) td.textContent = fmt(dur);
+  /* 位置只留在内存里：不写"播放进度记录"，只在暂停 / 切歌 / 关窗时才落一次，
+     下次播放这首时用来续上位置（用户要求："不需要记录播放进度，只要记得最后的位置"）。 */
   const s = currentSong();
-  if (s && dur) {
-    s.pos = cur;
-    if (!(s as any)._savedAt || Date.now() - (s as any)._savedAt > 5000) {
-      (s as any)._savedAt = Date.now();
-      persist(s);
-    }
-  }
+  if (s && dur) s.pos = cur;
   stepLyrics();
 });
 audio.addEventListener("loadedmetadata", () => {
@@ -1120,6 +1245,30 @@ const fmt = (s: number) => {
   s = Math.max(0, Math.floor(s));
   return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 };
+
+/* 拖拽导入：文件/文件夹直接拖进窗口（原来独立播放器就有的入口） */
+window.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+});
+window.addEventListener("drop", (e) => {
+  const dt = (e as DragEvent).dataTransfer;
+  if (!dt) return;
+  e.preventDefault();
+  if (dt.files && dt.files.length) void addFiles(dt.files);
+});
+/* 关窗/切到后台时把当前位置落一次，保证下次播放能续上 */
+window.addEventListener("pagehide", savePosition);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) savePosition();
+});
+function savePosition() {
+  const s = currentSong();
+  if (s && audio.currentTime > 3) {
+    s.pos = audio.currentTime;
+    persist(s);
+  }
+}
 
 /* ---------- 昼 / 夜配色（参考图 A 暖白纸面 ↔ 图 B 青石板） ---------- */
 export function toggleNight(force?: boolean) {

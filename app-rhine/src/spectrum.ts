@@ -329,6 +329,14 @@ export class Spectrum {
     this.computeBars();
     this.draw();
   }
+  /** 频谱在 Web Worker 里算好时走这条：直接把 120 段 + kick 喂进来出图（主线程零计算） */
+  applyBands(freq: Float32Array) {
+    const n = Math.min(SPECTRUM_BANDS, freq.length);
+    for (let b = 0; b < n; b++) this.freq[b] = freq[b];
+    this.kickEnergy = freq.length > SPECTRUM_BANDS && isFinite(freq[SPECTRUM_BANDS]) ? freq[SPECTRUM_BANDS] : 0;
+    this.computeBars();
+    this.draw();
+  }
   /** 没有音频时把画面收到静默状态 */
   decay() {
     let live = false;
