@@ -1,7 +1,7 @@
 // 音乐播放器：把本地音乐库映射成"档案"，驱动三维档案阵列，并提供传输控制。
 // 后端能力（NCM 解密 / B 站缓存 / 读封面 / 歌词 / 读音频）复用 Electron 的 window.desktop。
 import { setRecords, type ArchiveRecord } from "./data";
-import { Spectrum, type SpectrumPalette } from "./spectrum";
+import { Spectrum, analysisWindow, SPECTRUM_WINDOW, SPECTRUM_BANDS, type SpectrumPalette } from "./spectrum";
 
 export interface Song {
   id: string;
@@ -35,9 +35,29 @@ const desktop = (window as any).desktop as
 let songs: Song[] = [];
 let currentId: string | null = null;
 let mode = "list"; // list | order | single | shuffle
+/* 诊断开关：URL 参数或 localStorage（探针页刷新后仍要生效，于是也认 localStorage）。
+   只把内部对象挂到 window 上，不改变任何播放 / 频谱行为。 */
+const LS_VIZ_TEST = (() => {
+  try {
+    return localStorage.getItem("rhine-viztest") === "1";
+  } catch {
+    return false;
+  }
+})();
+const LS_DIAG = (() => {
+  try {
+    return localStorage.getItem("rhine-diag") === "1";
+  } catch {
+    return false;
+  }
+})();
+const VIZ_TEST = new URLSearchParams(location.search).get("viztest") === "1" || LS_VIZ_TEST;
+const DIAG = new URLSearchParams(location.search).get("diag") === "1" || LS_DIAG;
+const LIB_LOAD_TIMEOUT = 8000;
 let orderSeq = 0;
 let currentUrl: string | null = null;
 let pendingSeek = 0;
+let posSavedAt = 0;
 const audio = new Audio();
 audio.preload = "metadata";
 const listeners: (() => void)[] = [];
@@ -340,6 +360,8 @@ function selectSong(id: string) {
     audio.src = currentUrl;
   }
   pendingSeek = s.pos > 3 ? s.pos : 0;
+  posSavedAt = s.pos > 3 ? s.pos : 0;
+  if (DIAG) (window as any).__lastLoad = { id: s.id, title: s.title, pos: s.pos, pendingSeek, urlKind: s.srcUrl ? "url" : s.file ? "blob" : "none" };
   spectrum?.resetPeaks();
   renderNow();
   // 让三维档案阵列与详情区跟上正在播放的这一首（播放列表与档案阵列是同一份数据）
@@ -363,6 +385,8 @@ export function playAt(i: number) {
   persist(s);
   audio.play().catch(() => {});
 }
+/* 诊断开关：?viztest=1 / ?diag=1 时把播放内核挂到 window 上，自动化核对"点歌续播"用 */
+if (VIZ_TEST || DIAG) (window as any).__playAt = playAt;
 /* 「下一首播放」：把曲目排到当前这首后面（不动曲库顺序，只在队列里记 id） */
 let nextQueue: string[] = [];
 export function queueNext(id: string) {
@@ -743,21 +767,27 @@ function renderNow() {
   renderList();
 }
 
-/* 频谱计算搬到 Web Worker：120 段 × 1024 点的 Goertzel 每帧约 12 万次乘加，
-   放主线程会跟三维场景抢帧。worker 失败就退回同步计算（见 vizFrame）。 */
+/* 频谱计算搬到 Web Worker：120 段 × 512 点的 Goertzel 每次约 6 万次乘加，
+   放主线程会跟三维场景抢帧。worker 失败就退回同步计算（见 vizFrame）。
+   分析节拍固定 30Hz（worker 每 33ms 一帧），缓冲在两侧轮流用、靠 transfer 归还，
+   避免每帧 new 出垃圾；渲染循环本身跑满 60fps（见 vizFrame 的时间预算）。 */
 let spectrumWorker: Worker | null = null;
 let workerEver = false;
 let workerFrames = 0;
 let pendingFreq: Float32Array | null = null;
+let workerMsAvg = 0; // worker 单次分析耗时（诊断用）
+let workerSentAt = 0;
+let workerRttAvg = 0;
 function initSpectrumWorker() {
   try {
     const src = `
-      const N = 1024, B = 120, LOG101 = Math.log10(101);
+      const N = ${SPECTRUM_WINDOW}, B = ${SPECTRUM_BANDS}, LOG101 = Math.log10(101);
       const hann = new Float32Array(N);
       for (let i = 0; i < N; i++) hann[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (N - 1)));
       let bandK = null, sr = 0, kickRef = 0;
       onmessage = (e) => {
-        const td = new Float32Array(e.data.td);
+        const t0 = performance.now();
+        const td = e.data.td;
         const rate = e.data.sr || 48000;
         if (!bandK || rate !== sr) {
           sr = rate;
@@ -784,11 +814,21 @@ function initSpectrumWorker() {
         out[B] = Math.max(0, Math.min(1, (rise - 0.08) * 2.2));
         kickRef += (low - kickRef) * 0.05;
         postMessage(out, [out.buffer]);
+        // 时域缓冲还回去，下一帧继续用同一块内存（不产生垃圾）
+        postMessage({ __td: td, ms: performance.now() - t0 }, [td.buffer]);
       };`;
     spectrumWorker = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
     spectrumWorker.onmessage = (e) => {
-      pendingFreq = new Float32Array(e.data);
+      const d = e.data;
+      if (d && d.__td) {
+        workerRttAvg += (performance.now() - workerSentAt - workerRttAvg) * 0.1;
+        workerMsAvg += (d.ms - workerMsAvg) * 0.1;
+        if (tdBufs.length < 2) tdBufs.push(new Float32Array(d.__td));
+        return;
+      }
+      pendingFreq = new Float32Array(d);
       workerEver = true;
+      if (VIZ_TEST) (window as any).__workerHits = ((window as any).__workerHits || 0) + 1;
     };
     spectrumWorker.onerror = () => {
       spectrumWorker = null;
@@ -798,6 +838,9 @@ function initSpectrumWorker() {
     spectrumWorker = null;
   }
 }
+const tdBufs: Float32Array[] = [];
+let tdRotate = 0;
+
 
 /* ---------- 频谱：1.3.0 版独立播放器的自研频谱（见 spectrum.ts） ---------- */
 let actx: AudioContext | null = null;
@@ -807,11 +850,9 @@ let timeData: Float32Array<ArrayBuffer> | null = null;
 let vizDenied = false;
 let vizRaf = 0;
 let vizLast = 0;
-let vizTickPhase = 0;
 let spectrum: Spectrum | null = null;
 /* ?viztest=1：不播音乐，用合成信号跑频谱 —— 用来在无音频的环境里核对频谱观感
    （音高固定 55Hz 低音 + 440Hz / 2.4kHz，低音每 4 秒来一次"鼓点"）。 */
-const VIZ_TEST = new URLSearchParams(location.search).get("viztest") === "1";
 let vizTestPhase = 0;
 function vizTestTimeData(out: Float32Array) {
   const sr = actx?.sampleRate ?? 48000;
@@ -867,18 +908,25 @@ async function ensureAnalyser(): Promise<AnalyserNode | null> {
   }
   return analyserNode;
 }
-/** 播放条的 52 格刻度直接取频谱柱（15fps 更新，且只在高度真的变了才写 DOM） */
-function paintTicks() {
+/* 播放条的 52 格刻度直接取频谱柱（跟着渲染节拍走，且只在高度真的变了才写 DOM） */
+let tickLast = 0;
+function paintTicks(now = 0) {
   if (!specEl || !spectrum) return;
+  if (now && now - tickLast < 30) return;
+  tickLast = now;
   const bars = spectrum.levels;
   const kids = specEl.children;
   const step = bars.length / kids.length;
+  const vArr: number[] = [];
   for (let i = 0; i < kids.length; i++) {
     let sum = 0;
     const from = Math.floor(i * step);
     const to = Math.max(from + 1, Math.floor((i + 1) * step));
     for (let b = from; b < to && b < bars.length; b++) sum += bars[b];
-    const v = Math.min(1, sum / (to - from));
+    vArr.push(Math.min(1, sum / (to - from)));
+  }
+  for (let i = 0; i < kids.length; i++) {
+    const v = vArr[i];
     const px = Math.max(2, Math.round(2 + v * 24));
     const el = kids[i] as HTMLElement;
     if (el.style.height !== px + "px") {
@@ -887,45 +935,80 @@ function paintTicks() {
     }
   }
 }
+/* 诊断对象：?viztest=1 时暴露到 window.__rhineViz，用于自动化核对帧率与观感指标 */
+const vizDiag: Record<string, unknown> = { frames: 0, fps: 0, worker: false, workerMs: 0, rttMs: 0 };
 function vizFrame(ts: number) {
   vizRaf = 0;
-  // 帧预算：频谱 30fps、播放条刻度 15fps —— 视觉上够顺，省下的算力留给三维场景
-  if (ts - vizLast < 33) {
+  /* 渲染节拍：播放中 60fps（16ms 预算），暂停后 15fps（只画收起动画）。
+     分析节拍另算 —— worker 每 33ms 才喂一次数据，中间这些帧靠 Spectrum.render()
+     把显示值朝目标值插值，所以柱高是连续滑动的。
+     1.4.7 之前这里是 33ms 的整帧预算，等于把渲染也锁在 30fps，那才是"帧率不够"。 */
+  const dt = vizLast ? Math.min(0.1, (ts - vizLast) / 1000) : 0.033;
+  const budget = VIZ_TEST || !audio.paused ? 15 : 64;
+  if (ts - vizLast < budget) {
     vizRaf = requestAnimationFrame(vizFrame);
     return;
   }
   vizLast = ts;
-  let live = false;
-  if (VIZ_TEST && spectrum) {
-    // 时域缓冲由循环自己保证（不依赖 ensureAnalyser —— 没有音频上下文时也要能跑）
-    if (!timeData) timeData = new Float32Array(1024);
-    vizTestTimeData(timeData);
-    spectrum.update(timeData, actx?.sampleRate);
-    live = true;
-  } else if (analyserNode && spectrum) {
-    if (!timeData) timeData = new Float32Array(analyserNode.fftSize);
-    analyserNode.getFloatTimeDomainData(timeData);
-    /* 频谱在 Web Worker 里算（1.3.0 的做法）：120 段 × 1024 点的 Goertzel 每帧约 12 万次
-       乘加，放在主线程会和三维场景抢帧 —— 用户在 1.4.5 反馈"可视化帧率很低"就是这条。
-       worker 起不来/没回包时退回同步计算，功能不受影响。 */
-    if (spectrumWorker && workerEver) {
-      const copy = timeData.slice();
-      spectrumWorker.postMessage({ td: copy, sr: actx?.sampleRate ?? 48000 }, [copy.buffer]);
-      if (pendingFreq) spectrum.applyBands(pendingFreq);
-    } else {
+  /* 播放中按 60fps 渲染；暂停后降到 15fps —— 不用停循环，收起动画本身就是频谱的一部分，
+     停掉的话暂停瞬间画面会僵在最后一帧。 */
+  const busy = VIZ_TEST || !audio.paused;
+  if (spectrum) {
+    let advance = false;
+    if (VIZ_TEST) {
+      // 时域缓冲由循环自己保证（不依赖 ensureAnalyser —— 没有音频上下文时也要能跑）
+      if (!timeData) timeData = new Float32Array(1024);
+      vizTestTimeData(timeData);
       spectrum.update(timeData, actx?.sampleRate);
-      if (spectrumWorker && ++workerFrames > 45) {
-        // 等了 45 帧还没有回包（worker 被策略挡住等）→ 停掉它，永久走同步路径
-        try { spectrumWorker.terminate(); } catch (e) { /* ignore */ }
-        spectrumWorker = null;
+      advance = true;
+    } else if (analyserNode) {
+      if (!timeData) timeData = new Float32Array(analyserNode.fftSize);
+      analyserNode.getFloatTimeDomainData(timeData);
+      /* 频谱在 Web Worker 里算（1.3.0 的做法）：Goertzel 放主线程会和三维场景抢帧 ——
+         用户在 1.4.5 反馈"可视化帧率很低"就是这条。
+         分析节拍固定 30Hz（= 每 33ms 一帧，足够跟上鼓点），worker 起不来时退回同步。 */
+      if (spectrumWorker && workerEver) {
+        if (ts - workerSentAt >= 33) {
+          const n = analysisWindow(timeData);
+          let buf = tdBufs.length ? (tdBufs[tdRotate++ % tdBufs.length] as Float32Array) : null;
+          if (!buf || buf.length !== n) buf = new Float32Array(n);
+          buf.set(timeData.subarray(timeData.length - n));
+          workerSentAt = ts;
+          spectrumWorker.postMessage({ td: buf, sr: actx?.sampleRate ?? 48000 }, [buf.buffer]);
+        }
+        if (pendingFreq) {
+          spectrum.applyBands(pendingFreq);
+          pendingFreq = null;
+        }
+      } else {
+        spectrum.update(timeData, actx?.sampleRate);
+        if (spectrumWorker && ++workerFrames > 120) {
+          // 等了 120 帧还没有回包（worker 被策略挡住等）→ 停掉它，永久走同步路径
+          try { spectrumWorker.terminate(); } catch (e) { /* ignore */ }
+          spectrumWorker = null;
+        }
       }
+      advance = true;
     }
-    live = !audio.paused;
-  } else if (spectrum) {
-    live = spectrum.decay();
+    if (!advance) spectrum.decay();
+    spectrum.render(dt);
   }
-  if (++vizTickPhase % 2 === 0) paintTicks();
-  if (live) vizRaf = requestAnimationFrame(vizFrame);
+  paintTicks(ts);
+  const d = vizDiag as any;
+  d.frames++;
+  d.rendered = (d.rendered || 0) + 1;
+  d.dt = Math.round(dt * 1000);
+  d.busy = busy;
+  /* 帧间隔分布：中位数与 p90 比"平均帧率"更能看出卡顿（探针用它判断是否真顺） */
+  if (DIAG) {
+    (d.intervals || (d.intervals = [])).push(Math.round(dt * 1000));
+    if (d.intervals.length > 240) d.intervals.shift();
+  }
+  d.worker = Boolean(spectrumWorker);
+  d.workerMs = Math.round(workerMsAvg * 100) / 100;
+  d.rttMs = Math.round(workerRttAvg * 100) / 100;
+  d.workerOn = Boolean(spectrumWorker && workerEver);
+  vizRaf = requestAnimationFrame(vizFrame);
 }
 function vizStop() {
   if (vizRaf) cancelAnimationFrame(vizRaf);
@@ -982,8 +1065,20 @@ function stepLyrics() {
 }
 
 /* ---------- 列表与播放条 ---------- */
+/* 列表只在"内容真的变了"时重建：renderNow() 在播放 / 暂停 / 收藏 / 换曲时都会被调用，
+   每次都重写 300 多行曲目的 innerHTML 会把主线程整块占住（用户反馈卡顿的来源之一）。
+   签名里带当前曲目、队列、收藏与曲目数，任一变化才重建。 */
+let listSig = "";
+function listSignature() {
+  let sig = songs.length + "|" + currentId + "|" + nextQueue.join(",");
+  for (let i = 0; i < songs.length; i++) sig += (songs[i].fav ? "1" : "0");
+  return sig;
+}
 function renderList() {
   if (!listEl) return;
+  const sig = listSignature();
+  if (sig === listSig) return;
+  listSig = sig;
   const s = currentSong();
   const queued = new Set(nextQueue);
   listEl.innerHTML =
@@ -1215,8 +1310,12 @@ export function mountSongDetail(root: ParentNode) {
     spectrum = new Spectrum(cv, actx?.sampleRate ?? 48000);
     spectrum.setPalette(spectrumPalette());
     spectrum.setMode("mix");
-    // 诊断开关：?viztest=1 时把实例挂到 window 上，便于自动化核对柱高（见功能说明）
-    if (VIZ_TEST) (window as any).__spectrum = spectrum;
+    // 诊断开关：?viztest=1 时把实例与帧率对象挂到 window 上，便于自动化核对（见功能说明）
+    if (VIZ_TEST || DIAG) {
+      (window as any).__audioEl = audio;
+      (window as any).__rhineViz = vizDiag;
+      if (VIZ_TEST) (window as any).__spectrum = spectrum;
+    }
   }
   if (vizRaf) return;
   const live = (analyserNode && !audio.paused) || VIZ_TEST;
@@ -1233,10 +1332,17 @@ audio.addEventListener("timeupdate", () => {
   const td = document.querySelector("#p-time-dur");
   if (tc) tc.textContent = fmt(cur);
   if (td) td.textContent = fmt(dur);
-  /* 位置只留在内存里：不写"播放进度记录"，只在暂停 / 切歌 / 关窗时才落一次，
-     下次播放这首时用来续上位置（用户要求："不需要记录播放进度，只要记得最后的位置"）。 */
+  /* 位置只为"下次接着放"而存：内存里逐帧更新，落库有两条保护 ——
+     （a）每 4 秒一次的兜底落库（用户反馈"点歌还是从头开始"就是把进度丢在了崩溃/强杀上），
+     （b）暂停 / 切歌 / 关窗时各落一次，与原来一致。 */
   const s = currentSong();
-  if (s && dur) s.pos = cur;
+  if (s && dur) {
+    s.pos = cur;
+    if (cur - posSavedAt >= 4) {
+      posSavedAt = cur;
+      persist(s);
+    }
+  }
   stepLyrics();
 });
 audio.addEventListener("loadedmetadata", () => {
@@ -1245,16 +1351,34 @@ audio.addEventListener("loadedmetadata", () => {
     s.duration = audio.duration;
     persist(s);
   }
-  if (pendingSeek > 3 && audio.duration && pendingSeek < audio.duration - 5) {
+  /* 续播：把上次这首停在的位置接上。两处保护 ——
+     ① 位置离曲尾太近（不足 5 秒或不足 4%）就从头上放，不然一进来就结束；
+     ② 只有真的落上了才清 pendingSeek，避免某些容器上 loadedmetadata 早于可寻址、
+        currentTime 赋值被丢掉之后没人再补一次（见下面的 playing 兜底）。 */
+  if (pendingSeek > 3 && audio.duration && pendingSeek < audio.duration - Math.max(5, audio.duration * 0.04)) {
+    try {
+      audio.currentTime = pendingSeek;
+      if (DIAG) (window as any).__lastSeek = { at: "loadedmetadata", want: pendingSeek, got: audio.currentTime };
+      if (Math.abs(audio.currentTime - pendingSeek) < 1) pendingSeek = 0;
+    } catch {
+      pendingSeek = 0;
+    }
+  } else {
+    if (DIAG) (window as any).__lastSeek = { at: "loadedmetadata", want: pendingSeek || 0, got: -1, skipped: true };
+    pendingSeek = 0;
+  }
+});
+/* 播放真正开始后再补一次续播：个别容器在 loadedmetadata 阶段还寻址不了 */
+audio.addEventListener("playing", () => {
+  if (pendingSeek > 3 && audio.currentTime < 1 && audio.duration > pendingSeek + 5) {
     try {
       audio.currentTime = pendingSeek;
     } catch {
       /* ignore */
     }
   }
-  pendingSeek = 0;
-});
-audio.addEventListener("play", () => {
+  if (audio.currentTime >= Math.max(1, pendingSeek - 1)) pendingSeek = 0;
+});audio.addEventListener("play", () => {
   renderNow();
   void startViz();
 });
@@ -1337,23 +1461,51 @@ export async function initPlayer() {
     /* ignore */
   }
   buildUI();
-  try {
-    // ★ 不能让启动流程被 IndexedDB 卡住：某些环境（虚拟时间、隐私模式、DB 被占用）
-    //   下 open/getAll 可能既不成功也不失败，await 就永久挂起 → 开屏一直停在加载层。
-    //   这里加超时兜底，超时就当作空库继续启动。
-    const saved = await Promise.race([
-      idb.all(),
-      new Promise<Song[]>((resolve) => setTimeout(() => resolve([]), 1500)),
-    ]);
-    if (saved.length) {
-      songs = saved.sort((a, b) => (a.order || 0) - (b.order || 0));
-      orderSeq = songs.reduce((m, s) => Math.max(m, s.order || 0), 0) + 1;
-      currentId = null;
-    }
-  } catch {
-    /* ignore */
-  }
-  // 始终同步一次：空库时写入"导入音乐"占位档案，保证三维阵列有内容可显示
+  // 先落一份（可能是空库 → 占位档案），保证三维档案阵列一进来就有东西可显示
   syncRecords();
+  /* ★ 不 await 读库：IndexedDB 第一次打开要好几秒（实测 1.2–7 秒，取决于库大小与磁盘），
+     挡在这里会让开屏、三维阵列和详情面板都跟着等。先按空库把界面立起来，
+     读回来之后再通过 notify() 补一次 —— 空库时显示的"导入音乐"占位档案会被真实曲目替换。
+     这同时修掉了旧写法的一个真实故障：原来是 1.5 秒的 Promise.race 超时，
+     读得慢就整轮当空库，那一轮所有曲目都进不来。 */
+  void loadLibrary().then(applyLibrary);
   void repairTags();
+}
+
+/** 读库兜底：库打开 / 读数据都不返回时按空库继续，开屏不会被卡住。
+    注意这是"真的一条都没回来"才生效 —— 只要数据回来了就用真实结果。 */
+function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let done = false;
+    const timer = window.setTimeout(() => {
+      if (!done) {
+        done = true;
+        resolve(fallback);
+      }
+    }, ms);
+    const finish = (v: T) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(v);
+    };
+    p.then(finish, () => finish(fallback));
+  });
+}
+/** 读曲库。库大 + 磁盘忙时打开就要好几秒（实测 7 秒以上），
+    所以超时预算给到 8 秒；以前是固定 1.5 秒的 Promise.race，
+    读得慢就整轮当空库、所有曲目都进不来 —— 那就是用户看到的"曲库像空的"。 */
+async function loadLibrary(): Promise<Song[]> {
+  return withTimeout(idb.all(), LIB_LOAD_TIMEOUT, []).catch(() => []);
+}
+function applyLibrary(saved: Song[]) {
+  if (saved.length) {
+    songs = saved.sort((a, b) => (a.order || 0) - (b.order || 0));
+    orderSeq = songs.reduce((m, s) => Math.max(m, s.order || 0), 0) + 1;
+    currentId = null;
+  }
+  if (VIZ_TEST) (window as any).__libraryLoaded = songs.length;
+  // 曲库到位：重排档案阵列、刷新播放列表与详情区（空库时的占位档案会被真实曲目换掉）
+  notify();
+  renderNow();
 }
