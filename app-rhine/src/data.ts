@@ -18,7 +18,8 @@ export let archiveColumns: string[] = ["音乐 Ⅰ", "音乐 Ⅱ", "音乐 Ⅲ",
 /* ★ records 从第一行代码起就不能为空：main.ts 在模块加载期就会调用 updateSelection()
    读取 records[selected]，空数组会让它在 start() 之前抛错，开屏直接卡在加载层。 */
 export let records: ArchiveRecord[] = [placeholderRecord(archiveColumns[0])];
-export const categories = ["全部音乐"];
+/* 检索弹窗的分类过滤：第一项是"全部"，其余按档案阵列的列（＝播放列表的分组）分。 */
+export let categories: string[] = ["全部音乐", ...archiveColumns];
 
 const changeListeners: (() => void)[] = [];
 export function onRecordsChange(fn: () => void) {
@@ -27,6 +28,7 @@ export function onRecordsChange(fn: () => void) {
 export function setRecords(next: ArchiveRecord[], columns: string[]) {
   records = next.length ? next : [placeholderRecord(columns[0] || "音乐 Ⅰ")];
   archiveColumns = columns.length ? columns : ["音乐档案"];
+  categories = ["全部音乐", ...archiveColumns];
   changeListeners.forEach((fn) => {
     try {
       fn();
@@ -36,18 +38,19 @@ export function setRecords(next: ArchiveRecord[], columns: string[]) {
   });
 }
 
-/* 音乐库为空时的占位档案：让三维阵列始终有内容可显示，选中它提示去导入。 */
+/* 音乐库为空时的占位档案：让三维阵列始终有内容可显示，选中它提示去导入。
+   字段按播放器语义填写，界面上不再出现"科室 / 编目范围 / 相关人物"这类档案词条。 */
 function placeholderRecord(category: string): ArchiveRecord {
   return {
     id: "X-000",
-    title: "导入音乐",
-    en: "IMPORT MUSIC",
-    department: "文件夹 / NCM / B站缓存",
+    title: "尚无曲目",
+    en: "EMPTY LIBRARY",
+    department: "尚未导入曲目",
     category,
-    date: "EMPTY LIBRARY",
-    lead: "点击播放条左侧 ＋ 导入",
-    clearance: "AUTHORIZED",
-    abstract: "音乐库为空。点击播放条左侧的 ＋ 选择音频文件，也可以把本地音乐文件夹直接拖进窗口。",
+    date: "—",
+    lead: "文件夹 / NCM / B 站缓存",
+    clearance: "等待导入",
+    abstract: "音乐库为空。点击播放条上的 ＋ 选择音频文件，也可以把本地音乐文件夹直接拖进窗口。",
     findings: [],
     source: "",
   };

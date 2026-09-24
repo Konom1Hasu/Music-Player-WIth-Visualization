@@ -284,6 +284,9 @@ let miniKeepTopTimer = null; // 周期重申置顶的定时器
 const UI_DIR = path.join(__dirname, 'ui');
 let uiServer = null;
 let uiServerUrl = null;
+/* 固定端口：保证 http://127.0.0.1:<port> 这个"源"跨启动稳定，
+   否则 IndexedDB 里的曲库 / 收藏 / 播放进度每次重启都会读不到。 */
+const UI_PORT = Number(process.env.RHINE_UI_PORT) || 41739;
 function startUiServer() {
   return new Promise((resolve, reject) => {
     if (uiServerUrl) return resolve(uiServerUrl);
@@ -317,10 +320,31 @@ function startUiServer() {
       } catch (e) { res.writeHead(500); res.end(); }
     });
     uiServer.on('error', reject);
-    uiServer.listen(0, '127.0.0.1', () => {
-      uiServerUrl = 'http://127.0.0.1:' + uiServer.address().port + '/';
-      resolve(uiServerUrl);
-    });
+    /* ★ 端口必须固定。界面跑在 http://127.0.0.1:<port>，而 IndexedDB 是按"源"隔离的
+       （scheme + host + port 三者一起算）—— 用 listen(0) 每次启动随机端口，
+       等于每次都是全新的存储域：曲库、收藏、播放进度全部读不回来。
+       端口被占用时才退回随机端口（此时会记一条日志说明本次存储域是新的）。 */
+    let settled = false;
+    const tryListen = (port, allowFallback) => {
+      uiServer.once('error', (err) => {
+        if (settled) return;
+        if (allowFallback && (err.code === 'EADDRINUSE' || err.code === 'EACCES')) {
+          logMainError('UI 服务', new Error(
+            '端口 ' + port + ' 不可用，改用随机端口：本次曲库存储域与上次不同'));
+          tryListen(0, false);
+          return;
+        }
+        settled = true;
+        reject(err);
+      });
+      uiServer.listen(port, '127.0.0.1', () => {
+        if (settled) return;
+        settled = true;
+        uiServerUrl = 'http://127.0.0.1:' + uiServer.address().port + '/';
+        resolve(uiServerUrl);
+      });
+    };
+    tryListen(UI_PORT, true);
   });
 }
 

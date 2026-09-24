@@ -168,54 +168,133 @@ function coverToDataUrl(src: string) {
     img.src = src;
   });
 }
-/* 精简 ID3：标题/歌手/专辑 + 内嵌封面 */
+/* ID3 文本帧解码。
+   ★ 这里以前写死了 UTF-8，于是中文标签必然乱码，两种情况都踩中：
+     ① 编码字节 1（带 BOM 的 UTF-16，中文 MP3 最常见）—— 跳过 2 字节后按 UTF-8 解，
+        整条变成"�"或成串怪字；
+     ② 编码字节 0（规范上是 ISO-8859-1，但国内大量标签实际写的是 GBK/GB18030）。
+   现在按编码字节分派；对"标称 Latin-1"的再做一次判别：先严格试 UTF-8，
+   不成立且高位字节占多数时按 GB18030 解，只有真的是拉丁文本才落回 windows-1252。 */
+function decodeTagText(bytes: Uint8Array): string {
+  if (!bytes || !bytes.length) return "";
+  const enc = bytes[0];
+  const body = bytes.subarray(1);
+  const run = (label: string, input: Uint8Array = body, fatal = false) => {
+    try {
+      return new TextDecoder(label, { fatal }).decode(input);
+    } catch {
+      return "";
+    }
+  };
+  let text = "";
+  if (enc === 1) {
+    // 显式看 BOM 决定字节序：TextDecoder("utf-16") 在部分运行时里不按大端 BOM 切换
+    const be = body.length >= 2 && body[0] === 0xfe && body[1] === 0xff;
+    const le = body.length >= 2 && body[0] === 0xff && body[1] === 0xfe;
+    text = run(be ? "utf-16be" : "utf-16le", be || le ? body.subarray(2) : body);
+  } else if (enc === 2) text = run("utf-16be");
+  else if (enc === 3) text = run("utf-8");
+  else {
+    const utf8 = run("utf-8", body, true); // 有些工具标 0 但真的写 UTF-8
+    if (utf8) text = utf8;
+    else {
+      let high = 0;
+      for (let i = 0; i < body.length; i++) if (body[i] >= 0x80) high++;
+      const gbk = high / Math.max(1, body.length) > 0.5 ? run("gb18030") : "";
+      text =
+        gbk && !gbk.includes("\uFFFD") && /[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(gbk)
+          ? gbk
+          : run("windows-1252");
+    }
+  }
+  return text.replace(/\0+$/g, "").replace(/\0+/g, " / ").trim();
+}
+/** ID3v1（文件末尾 128 字节）—— 没有 v2 标签的老文件靠它兜底。 */
+function parseId3v1(tail: Uint8Array) {
+  const out = { title: "", artist: "", album: "" };
+  if (!tail || tail.length < 128) return out;
+  const t = tail.subarray(tail.length - 128);
+  if (String.fromCharCode(t[0], t[1], t[2]) !== "TAG") return out;
+  const field = (from: number, len: number) => decodeTagText(new Uint8Array([0, ...t.subarray(from, from + len)]));
+  out.title = field(3, 30);
+  out.artist = field(33, 30);
+  out.album = field(63, 30);
+  return out;
+}
+/* 精简 ID3v2：标题/歌手/专辑 + 内嵌封面 */
 function parseID3(buf: Uint8Array) {
   const out: { title: string; artist: string; album: string; cover: string | null } = { title: "", artist: "", album: "", cover: null };
   try {
     if (buf.length < 10 || String.fromCharCode(buf[0], buf[1], buf[2]) !== "ID3") return out;
-    const v4 = buf[3] === 4;
+    const major = buf[3];
+    const v4 = major === 4;
+    const idLen = major === 2 ? 3 : 4; // ID3v2.2 的帧头是 3 字节 ID + 3 字节长度
     const size = ((buf[6] & 0x7f) << 21) | ((buf[7] & 0x7f) << 14) | ((buf[8] & 0x7f) << 7) | (buf[9] & 0x7f);
     let i = 10;
     const end = Math.min(buf.length, 10 + size);
-    while (i + 10 <= end) {
-      const id = String.fromCharCode(buf[i], buf[i + 1], buf[i + 2], buf[i + 3]);
+    while (i + idLen + (idLen === 3 ? 3 : 6) <= end) {
+      const id = String.fromCharCode(...buf.subarray(i, i + idLen));
       const sz = v4
         ? ((buf[i + 4] & 0x7f) << 21) | ((buf[i + 5] & 0x7f) << 14) | ((buf[i + 6] & 0x7f) << 7) | (buf[i + 7] & 0x7f)
-        : (buf[i + 4] << 24) | (buf[i + 5] << 16) | (buf[i + 6] << 8) | buf[i + 7];
-      const d = buf.subarray(i + 10, i + 10 + sz);
-      const txt = () => {
-        let s = 0;
-        if (d[0] === 1) s = 2;
-        else if (d[0] === 0) s = 1;
-        try {
-          return new TextDecoder("utf-8").decode(d.subarray(s)).replace(/\0+$/, "");
-        } catch {
-          return "";
-        }
-      };
-      if (id === "TIT2") out.title = txt();
-      else if (id === "TPE1") out.artist = txt();
-      else if (id === "TALB") out.album = txt();
-      else if (id === "APIC") {
+        : idLen === 3
+          ? (buf[i + 3] << 16) | (buf[i + 4] << 8) | buf[i + 5]
+          : (buf[i + 4] << 24) | (buf[i + 5] << 16) | (buf[i + 6] << 8) | buf[i + 7];
+      const d = buf.subarray(i + idLen + (idLen === 3 ? 3 : 6), i + idLen + (idLen === 3 ? 3 : 6) + (sz > 0 ? sz : 0));
+      if (id === "TIT2" || id === "TT2") out.title = decodeTagText(d);
+      else if (id === "TPE1" || id === "TP1") out.artist = decodeTagText(d);
+      else if (id === "TALB" || id === "TAL") out.album = decodeTagText(d);
+      else if (id === "APIC" || id === "PIC") {
+        const utf16 = d[0] === 1 || d[0] === 2;
         let p = 0;
         if (d[0] === 0 || d[0] === 3) p = 1;
-        while (p < d.length && d[p] !== 0) p++;
+        while (p < d.length && d[p] !== 0) p++; // MIME
         p++;
-        while (p < d.length && d[p] !== 0) p++;
-        p++;
-        out.cover = URL.createObjectURL(new Blob([d.slice(p) as BlobPart], { type: "image/jpeg" }));
+        if (id === "PIC") p += 3; // v2.2 多一个 3 字节图片格式
+        if (utf16) {
+          // UTF-16 描述以 00 00 结尾，逐字节找第一个 0 会提前截断
+          while (p + 1 < d.length && !(d[p] === 0 && d[p + 1] === 0)) p += 2;
+          p += 2;
+        } else {
+          while (p < d.length && d[p] !== 0) p++;
+          p++;
+        }
+        if (p < d.length) out.cover = URL.createObjectURL(new Blob([d.slice(p) as BlobPart], { type: "image/jpeg" }));
       }
-      if (sz === 0 || id === "\0\0\0\0") break;
-      i += 10 + sz;
+      if (!sz) break;
+      i += idLen + (idLen === 3 ? 3 : 6) + sz;
     }
   } catch {
     /* ignore */
   }
   return out;
 }
+/** 同时读头尾：v2 标签在文件头，v1 在文件尾，缺哪个补哪个。 */
+async function readTags(blob: Blob) {
+  const head = new Uint8Array(await blob.slice(0, 1024 * 1024).arrayBuffer());
+  const meta = parseID3(head);
+  if (!meta.title || !meta.artist || !meta.album) {
+    try {
+      const tail = new Uint8Array(await blob.slice(Math.max(0, blob.size - 128)).arrayBuffer());
+      const v1 = parseId3v1(tail);
+      if (!meta.title) meta.title = v1.title;
+      if (!meta.artist) meta.artist = v1.artist;
+      if (!meta.album) meta.album = v1.album;
+    } catch {
+      /* ignore */
+    }
+  }
+  return meta;
+}
 
-/* ---------- 歌曲 → 档案映射 ---------- */
+/* ---------- 歌曲 → 档案映射 ----------
+   字段一律按播放器信息填：原来照搬档案语义的"科室 / 编目范围 / 相关人物 / 权限"
+   分别改成 艺术家 / 时长 / 专辑 / 来源格式，检索列与选中提示也读这几个字段。 */
 const LANES = ["音乐 Ⅰ", "音乐 Ⅱ", "音乐 Ⅲ", "音乐 Ⅳ", "音乐 Ⅴ"];
+const clockText = (sec: number) => {
+  if (!isFinite(sec) || sec <= 0) return "—";
+  const s = Math.floor(sec);
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+};
 function toRecord(s: Song, index: number): ArchiveRecord {
   const no = String(index + 1).padStart(3, "0");
   return {
@@ -224,10 +303,10 @@ function toRecord(s: Song, index: number): ArchiveRecord {
     en: s.artist || s.title,
     department: s.artist || "未知艺术家",
     category: LANES[index % LANES.length],
-    date: "AUDIO",
+    date: clockText(s.duration),
     lead: s.album || "未知专辑",
-    clearance: "AUTHORIZED",
-    abstract: `${s.artist || "未知艺术家"} · ${s.album || "未知专辑"}${s.duration ? " · " + Math.round(s.duration) + "s" : ""}`,
+    clearance: sourceLabel(s),
+    abstract: `${s.artist || "未知艺术家"} · ${s.album || "未知专辑"}${s.duration ? " · " + clockText(s.duration) : ""}${s.fav ? " · 已收藏" : ""}`,
     findings: [],
     source: "",
   };
@@ -382,7 +461,7 @@ async function addFiles(fileList: FileList | File[]) {
       }
     }
     try {
-      const meta = parseID3(new Uint8Array(await audioFile.slice(0, 1024 * 1024).arrayBuffer()));
+      const meta = await readTags(audioFile);
       if (!title) title = meta.title;
       if (!artist) artist = meta.artist;
       if (!album) album = meta.album;
@@ -449,6 +528,53 @@ function probeDuration(s: Song) {
   tmp.onerror = () => {};
   tmp.src = url;
 }
+
+/* ---------- 旧曲库的乱码修复 ----------
+   0.0 之前的版本用 UTF-8 硬解 ID3，中文标题/歌手已经被写进曲库。
+   只对"看起来就是乱码"的条目重跑一次识别并修回来（不扫全库，避免拖慢启动）。 */
+const MOJIBAKE_LATIN = /[\u00a0-\u00ff]/;
+const HAS_CJK = /[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/;
+function looksBroken(text: string | undefined): boolean {
+  if (!text) return false;
+  if (text.includes("\uFFFD")) return true;
+  if (HAS_CJK.test(text) || !MOJIBAKE_LATIN.test(text)) return false;
+  const hits = (text.match(/[\u00a0-\u00ff]/g) || []).length;
+  return hits / text.length >= 0.4;
+}
+let tagsRepaired = false;
+async function repairTags() {
+  if (tagsRepaired) return;
+  tagsRepaired = true;
+  let fixed = 0;
+  for (const s of songs) {
+    if (!s.file) continue;
+    if (!looksBroken(s.title) && !looksBroken(s.artist) && !looksBroken(s.album)) continue;
+    try {
+      const meta = await readTags(s.file);
+      let changed = false;
+      const take = (next: string, current: string, looks: boolean) => {
+        if (!next || next === current) return current;
+        if (!looks && !looksBroken(current)) return current;
+        changed = true;
+        return next;
+      };
+      s.title = take(meta.title, s.title, looksBroken(s.title));
+      s.artist = take(meta.artist, s.artist, looksBroken(s.artist));
+      s.album = take(meta.album, s.album, looksBroken(s.album));
+      if (changed) {
+        persist(s);
+        fixed++;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  if (fixed) {
+    notify();
+    toast(`已修正 ${fixed} 首曲目的乱码标签`);
+  }
+}
+
 export async function importFolder() {
   const input = document.createElement("input");
   input.type = "file";
@@ -575,7 +701,8 @@ function renderNow() {
   const exp = document.querySelector<HTMLElement>('.detail-content .export-button[data-action="play-now"]');
   if (exp) exp.innerHTML = `${audio.paused ? "PLAY" : "PAUSE"} <span>${audio.paused ? "▶" : "■"}</span>`;
   const kicker = document.querySelector<HTMLElement>(".detail-content .song-mode-kicker");
-  if (kicker) kicker.textContent = `${audio.paused ? "READY" : "PLAYING"} · ${MODE_EN[mode] ?? "LOOP"}`;
+  if (kicker && songs.length)
+    kicker.textContent = `${audio.paused ? "READY" : "PLAYING"} · ${MODE_EN[mode] ?? "LOOP"}`;
   renderList();
 }
 
@@ -862,27 +989,40 @@ function sourceLabel(s: Song): string {
   return "本地文件";
 }
 export function songDetailMarkup(index: number): string {
-  const s = songs[index];
-  if (!s) return "";
+  const s = songs[index] ?? null;
+  const empty = !s;
   const total = String(songs.length).padStart(3, "0");
-  const status = audio.paused ? "READY" : "PLAYING";
-  const fav = s.fav ? "♥" : "♡";
+  const status = empty ? "NO LIBRARY" : audio.paused ? "READY" : "PLAYING";
+  const title = s ? s.title : "尚无曲目";
+  const artist = s ? s.artist : "音乐库为空";
+  const album = s ? s.album : "把音乐文件拖进窗口，或按下方 ＋ 导入";
+  const facts: [string, string][] = empty
+    ? [
+        ["DURATION / 时长", "—"],
+        ["PLAYED / 播放次数", "—"],
+        ["FORMAT / 来源", "—"],
+        ["POSITION / 上次进度", "—"],
+      ]
+    : [
+        ["DURATION / 时长", mmss(s!.duration)],
+        ["PLAYED / 播放次数", `${s!.plays || 0} 次`],
+        ["FORMAT / 来源", sourceLabel(s!)],
+        ["POSITION / 上次进度", s!.pos > 3 ? mmss(s!.pos) : "从头开始"],
+      ];
+  const actions = empty
+    ? `<button class="solid-button" data-action="import-music">＋ IMPORT MUSIC<span>导入音乐</span></button>`
+    : `<button class="solid-button" data-action="fav-track" aria-pressed="${s!.fav}">${s!.fav ? "− REMOVE FROM SAVED" : "＋ SAVE TRACK"}<span>${s!.fav ? "♥ 已收藏" : "♡ 收藏曲目"}</span></button>`;
   return `
-  <div class="detail-kicker"><span>TRACK ${esc(s.id.slice(-3).toUpperCase().padStart(3, "0"))}</span><span class="song-mode-kicker">${status} · ${MODE_EN[mode] ?? "LOOP"}</span></div>
+  <div class="detail-kicker"><span>TRACK ${empty ? "000" : esc(s!.id.slice(-3).toUpperCase())}</span><span class="song-mode-kicker">${status} · ${MODE_EN[mode] ?? "LOOP"}</span></div>
   <div class="song-head">
-    <div class="song-cover">${s.cover ? `<img src="${s.cover}" alt="${esc(s.title)} 封面"/>` : ""}</div>
+    <div class="song-cover">${s && s.cover ? `<img src="${s.cover}" alt="${esc(s.title)} 封面"/>` : ""}</div>
     <div class="song-head-text">
-      <h2>${esc(s.title)}</h2>
-      <div class="detail-title-cn">${esc(s.artist)}<span>${esc(s.album)}</span></div>
+      <h2>${esc(title)}</h2>
+      <div class="detail-title-cn">${esc(artist)}<span>${esc(album)}</span></div>
     </div>
   </div>
   <div class="detail-rule"></div>
-  <dl class="metadata">
-    <div><dt>DURATION / 时长</dt><dd>${mmss(s.duration)}</dd></div>
-    <div><dt>PLAYED / 播放次数</dt><dd><i></i>${s.plays || 0} 次</dd></div>
-    <div><dt>FORMAT / 来源</dt><dd>${esc(sourceLabel(s))}</dd></div>
-    <div><dt>POSITION / 上次进度</dt><dd>${s.pos > 3 ? mmss(s.pos) : "从头开始"}</dd></div>
-  </dl>
+  <dl class="metadata">${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${k.startsWith("PLAYED") ? "<i></i>" : ""}${esc(v)}</dd></div>`).join("")}</dl>
   <div class="song-viz">
     <div class="panel-label">SPECTRUM / 实时频谱</div>
     <canvas id="p-detail-spectrum" width="${636 * 2}" height="${72 * 2}" aria-hidden="true"></canvas>
@@ -890,12 +1030,14 @@ export function songDetailMarkup(index: number): string {
   </div>
   <div class="detail-tabs" role="tablist"><button id="tab-overview" class="active" role="tab" aria-controls="tab-panel" aria-selected="true" data-tab="overview">01 <span>曲目</span></button><button id="tab-notes" role="tab" aria-controls="tab-panel" aria-selected="false" data-tab="notes">02 <span>歌词</span></button><button id="tab-history" role="tab" aria-controls="tab-panel" aria-selected="false" data-tab="history">03 <span>播放记录</span></button><i class="tab-indicator" aria-hidden="true"></i></div>
   <div id="tab-panel" class="tab-panel" role="tabpanel">${songTabMarkup("overview", index)}</div>
-  <div class="detail-actions"><button class="solid-button" data-action="fav-track" aria-pressed="${s.fav}">${s.fav ? "− REMOVE FROM SAVED" : "＋ SAVE TRACK"}<span>${fav} ${s.fav ? "已收藏" : "收藏曲目"}</span></button><button class="export-button" data-action="play-now">${audio.paused ? "PLAY" : "PAUSE"} <span>${audio.paused ? "▶" : "■"}</span></button></div>
-  <div class="detail-footnote"><span>${esc(s.artist)} · ${esc(s.album)}</span><span>${String(index + 1).padStart(3, "0")} / ${total}</span></div>`;
+  <div class="detail-actions">${actions}<button class="export-button" data-action="play-now">${audio.paused ? "PLAY" : "PAUSE"} <span>${audio.paused ? "▶" : "■"}</span></button></div>
+  <div class="detail-footnote"><span>${esc(artist)} · ${esc(album)}</span><span>${empty ? "000" : String(index + 1).padStart(3, "0")} / ${total}</span></div>`;
 }
 export function songTabMarkup(tab: string, index: number): string {
-  const s = songs[index];
-  if (!s) return "";
+  const s = songs[index] ?? null;
+  if (!s) {
+    return `<div class="panel-label">OVERVIEW / 曲目摘要</div><p class="song-lyrics-empty">音乐库为空。点击播放条上的 ＋ 导入音频文件，或把音乐文件夹直接拖进窗口 —— 导入后这里会显示封面、曲目信息与实时频谱。</p>`;
+  }
   if (tab === "notes") {
     const lines = lrcLines(s);
     if (!lines.length)
@@ -909,7 +1051,7 @@ export function songTabMarkup(tab: string, index: number): string {
       ["PLAY COUNT / 播放次数", `${s.plays || 0} 次`],
       ["LAST POSITION / 上次进度", s.pos > 3 ? mmss(s.pos) : "从头开始"],
       ["FAVORITE / 收藏", s.fav ? "已收藏" : "未收藏"],
-      ["LIBRARY ORDER / 入库顺序", `第 ${(s.order || 0) + 1} 首`],
+      ["SOURCE / 来源", sourceLabel(s)],
     ];
     return (
       `<div class="panel-label">PLAYBACK LOG / 播放记录</div>` +
@@ -1042,4 +1184,5 @@ export async function initPlayer() {
   }
   // 始终同步一次：空库时写入"导入音乐"占位档案，保证三维阵列有内容可显示
   syncRecords();
+  void repairTags();
 }

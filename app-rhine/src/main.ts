@@ -34,6 +34,7 @@ import {
   songTabMarkup,
   mountSongDetail,
   toggleFavAt,
+  importFiles,
 } from "./player";
 import { TerminalAudio } from "./audio";
 import { audioSettingsMarkup } from "./audio-settings";
@@ -49,8 +50,8 @@ $("#stage").innerHTML = `
   <div id="boot-background" class="boot-background"><svg viewBox="0 0 1920 1080" preserveAspectRatio="none"><g fill="none" stroke="#fff" stroke-width="3"><path d="M-210 705C-45 705 182 704 247 567C337 377 99 306 4 435S27 680 169 631C309 584 227 314 279 111S568-113 568-113"/><path d="M1560-80C1374 114 1671 168 1601 323S1371 367 1431 480S1692 666 1559 787S1329 886 1498 1130"/><circle cx="1450" cy="648" r="346"/><circle cx="1450" cy="648" r="348"/></g></svg></div>
   <header class="brand">${brandHeading}</header>
   <nav class="system-nav" aria-label="系统导航">
-    <button data-action="search"><span class="nav-glyph">⌕</span> ARCHIVE INDEX <span class="key">/</span></button>
-    <button data-action="saved" aria-label="查看收藏档案" title="收藏档案">＋ SAVED <span id="saved-count">00</span></button>
+    <button data-action="search"><span class="nav-glyph">⌕</span> TRACK INDEX <span class="key">/</span></button>
+    <button data-action="saved" aria-label="查看收藏曲目" title="收藏曲目">＋ SAVED <span id="saved-count">00</span></button>
     <button data-action="settings" aria-label="系统设置" title="系统设置"><span class="settings-glyph">◷</span></button>
   </nav>
   <button id="skip" class="skip" data-action="skip">ENTER SYSTEM <span>↗</span></button>
@@ -64,16 +65,16 @@ $("#stage").innerHTML = `
   <div id="cinema-caption" class="cinema-caption"></div>
   <svg id="inspection-marks" viewBox="0 0 1920 1080" aria-hidden="true"><path id="inspection-lines"/><g id="inspection-corners"></g><circle id="inspection-point" r="1.8"/></svg>
   <div id="inspection-text" aria-hidden="true">CONFIDENTIALITY:<strong>GENERAL BUSINESS USE</strong></div>
-  <section id="archive-ui" class="archive-ui" aria-label="档案选择">
-    <div class="archive-callout"><div class="eyebrow">INTERNAL DATABASE <span>／</span> <span id="archive-category">机构档案</span></div><button class="file-title" data-action="open">FILE NUMBER: <span id="selected-id">X-<span id="selected-code">001</span></span><span class="file-open">↗</span></button><div class="callout-rule"><i></i></div><div class="file-summary"><span id="selected-title">莱茵生命</span><span id="selected-clearance">BUSINESS AREA</span></div><button class="read-file" data-action="open">ACCESS FILE <span>→</span></button></div>
+  <section id="archive-ui" class="archive-ui" aria-label="曲目选择">
+    <div class="archive-callout"><div class="eyebrow">NOW SELECTED <span>／</span> <span id="archive-category">音乐档案</span></div><button class="file-title" data-action="open">TRACK NUMBER: <span id="selected-id">X-<span id="selected-code">001</span></span><span class="file-open">↗</span></button><div class="callout-rule"><i></i></div><div class="file-summary"><span id="selected-title">尚无曲目</span><span id="selected-clearance">等待导入</span></div><button class="read-file" data-action="open">PLAY TRACK <span>→</span></button></div>
     <div id="hover-label" class="hover-label" hidden>X-<span id="hover-code">001</span> / <span id="hover-title"></span></div>
-    <div class="archive-counter"><span class="tiny-label">ARCHIVE / SELECT</span><div><span id="selected-number">01</span><i>/</i><span class="count-total">12</span></div></div>
-    <div class="archive-navigation"><button data-action="prev" aria-label="上一个档案">↑</button><div id="file-ticks" class="file-ticks"></div><button data-action="next" aria-label="下一个档案">↓</button></div>
-    <div class="column-navigation"><button data-action="column-prev" aria-label="上一列">←</button><div><span id="column-number">COLUMN <span id="column-index">03</span> / 05</span><strong id="column-name">机构档案</strong></div><button data-action="column-next" aria-label="下一列">→</button></div>
-    <div class="archive-hint"><kbd>←</kbd> <kbd>→</kbd> 切换列 <span>／</span> <kbd>↑</kbd> <kbd>↓</kbd> 前后档案 <span>／</span> <kbd>ENTER</kbd> 读取</div>
+    <div class="archive-counter"><span class="tiny-label">TRACK / SELECT</span><div><span id="selected-number">01</span><i>/</i><span class="count-total">12</span></div></div>
+    <div class="archive-navigation"><button data-action="prev" aria-label="上一个曲目">↑</button><div id="file-ticks" class="file-ticks"></div><button data-action="next" aria-label="下一个曲目">↓</button></div>
+    <div class="column-navigation"><button data-action="column-prev" aria-label="上一组">←</button><div><span id="column-number">GROUP <span id="column-index">03</span> / 05</span><strong id="column-name">音乐档案</strong></div><button data-action="column-next" aria-label="下一组">→</button></div>
+    <div class="archive-hint"><kbd>←</kbd> <kbd>→</kbd> 切换分组 <span>／</span> <kbd>↑</kbd> <kbd>↓</kbd> 前后曲目 <span>／</span> <kbd>ENTER</kbd> 播放</div>
   </section>
   <section id="detail-ui" class="detail-ui" aria-label="档案内容" hidden>
-    <button class="back-button" data-action="back">← <span>ARCHIVE OVERVIEW</span><small>ESC</small></button>
+    <button class="back-button" data-action="back">← <span>TRACK OVERVIEW</span><small>ESC</small></button>
     <div class="object-caption"><span id="object-id">NO.001</span><div>INTERNAL DATABASE</div><small>DRAG TO INSPECT <span>↔</span></small><button class="viewer-open" data-action="model-viewer">360° 查看文档模型 <span>↗</span></button></div>
     <article id="detail-content" class="detail-content"></article>
   </section>
@@ -97,7 +98,7 @@ let mode: Mode = "boot",
   ready = false;
 let modal: "search" | "saved" | "settings" | null = null,
   searchQuery = "",
-  filter = "全部档案";
+  filter = categories[0];
 let activeTab = "overview";
 const reviewParams = new URLSearchParams(location.search);
 let frozenTime =
@@ -135,7 +136,7 @@ function readLocal<T>(key: string, fallback: T): T {
     return fallback;
   }
 }
-const saved = new Set<string>(readLocal<string[]>("rhine-saved", []));
+/* 收藏以播放器曲目的 fav 字段为准（saved-count 也按它统计）。 */
 const storedPrefs = readLocal<Partial<{ sound: boolean; music: boolean; soundVolume: number; musicVolume: number; reduced: boolean; quality: boolean; rendering: RenderQuality }>>("rhine-settings", {});
 const prefs = {
   sound: true,
@@ -317,7 +318,7 @@ function setMode(next: Mode) {
   scene?.setMode(next === "boot" ? "hidden" : next);
   if (next !== "boot") {
     bootSequence.reset();
-    $(".file-title").firstChild!.textContent = "FILE NUMBER: ";
+    $(".file-title").firstChild!.textContent = "TRACK NUMBER: ";
     $("#stage").dataset.boot = "done";
     $("#cinema-caption").textContent = "";
   }
@@ -395,7 +396,8 @@ function updateSelection(navigation?: ArchiveNavigation) {
     button.classList.toggle("selected", index === selected);
     button.setAttribute("aria-pressed", String(index === selected));
   });
-  $("#saved-count").textContent = String(saved.size).padStart(2, "0");
+  // 收藏计数 = 播放器里的收藏曲目数（不再是档案收藏集合）
+  $("#saved-count").textContent = String(getSongs().filter((s) => s.fav).length).padStart(2, "0");
 }
 function replayBoot(forcePreview = false) {
   if (!ready) return;
@@ -414,67 +416,25 @@ function replayBootAfterModal(forcePreview: boolean) {
 }
 function openFile() {
   if (!ready) return;
-  // 选中档案即播放对应歌曲（空库占位档案不会触发）
+  // 选中曲目即播放（空库的占位档案不会触发）
   if (getSongs().length) playAt(selected);
   closeModal(() => {
     setMode("detail");
     audio.play("open");
   });
 }
-function toggleSaved() {
-  const id = records[selected].id;
-  if (saved.has(id)) saved.delete(id);
-  else saved.add(id);
-  try {
-    localStorage.setItem("rhine-saved", JSON.stringify([...saved]));
-  } catch {}
-  $("#saved-count").textContent = String(saved.size).padStart(2, "0");
-  const button = $<HTMLButtonElement>('[data-action="bookmark"]');
-  const added = saved.has(id);
-  button.firstChild!.textContent = added ? "− REMOVE FROM SAVED" : "＋ SAVE ARCHIVE";
-  button.querySelector("span")!.textContent = added ? "已收藏" : "收藏档案";
-  button.setAttribute("aria-pressed", String(added));
-  bookmarkFeedback?.cancel();
-  if (!prefs.reduced) bookmarkFeedback = button.animate(
-    [{ backgroundColor: "#67634c" }, { backgroundColor: "#252820" }],
-    { duration: 220, easing: "ease-out" },
-  );
-  audio.play("confirm");
-  notify(saved.has(id) ? "档案已加入收藏" : "已取消收藏");
-}
 function renderDetail() {
   tabTransition.cancel();
-  const r = records[selected];
   $("#object-id").textContent = "NO." + String(selected + 1).padStart(3, "0");
-  // 音乐库非空时，右侧这一栏不再是"档案内容"，而是曲目面板：
-  // 封面 / 曲目信息 / 实时频谱 / 歌词 / 播放记录。
-  if (hasSongs()) {
-    const content = $("#detail-content");
-    content.classList.add("song-mode");
-    content.innerHTML = songDetailMarkup(selected);
-    content.setAttribute("tabindex", "-1");
-    documentDecryption.reset(content, prefs.reduced || scene.decryptionFrame.phase === "clear");
-    setTab(activeTab, false);
-    mountSongDetail(content);
-    return;
-  }
-  $("#detail-content").classList.remove("song-mode");
-  $("#detail-content").innerHTML = `
-  <div class="detail-kicker"><span>FILE ${r.id}</span><span>${escapeHtml(r.clearance)}</span></div>
-  <h2>${escapeHtml(r.en)}</h2><div class="detail-title-cn">${escapeHtml(r.title)}<span>${escapeHtml(r.category)}</span></div>
-  <div class="detail-rule"></div>
-  <dl class="metadata"><div><dt>DEPARTMENT / 科室</dt><dd>${escapeHtml(r.department)}</dd></div><div><dt>COLLECTION / 编目范围</dt><dd>${escapeHtml(r.date)}</dd></div><div><dt>RELATED / 相关人物</dt><dd>${escapeHtml(r.lead)}</dd></div><div><dt>STATUS / 状态</dt><dd><i></i>${r.clearance === "RESTRICTED" ? "目录访问" : "已归档 · 可读取"}</dd></div></dl>
-  <div class="detail-tabs" role="tablist"><button id="tab-overview" class="active" role="tab" aria-controls="tab-panel" aria-selected="true" data-tab="overview">01 <span>概述</span></button><button id="tab-notes" role="tab" aria-controls="tab-panel" aria-selected="false" data-tab="notes">02 <span>研究记录</span></button><button id="tab-history" role="tab" aria-controls="tab-panel" aria-selected="false" data-tab="history">03 <span>访问日志</span></button><i class="tab-indicator" aria-hidden="true"></i></div>
-  <div id="tab-panel" class="tab-panel" role="tabpanel">${overview()}</div>
-  <div class="detail-actions"><button class="solid-button" data-action="bookmark">${saved.has(r.id) ? "− REMOVE FROM SAVED" : "＋ SAVE ARCHIVE"}<span>${saved.has(r.id) ? "已收藏" : "收藏档案"}</span></button><button class="export-button" data-action="play-now">PLAY <span>▶</span></button></div>
-  <div class="detail-footnote"><span>${escapeHtml(r.lead)}</span><span>${String(selected + 1).padStart(3, "0")} / ${String(records.length).padStart(3, "0")}</span></div>`;
-  $("#detail-content").setAttribute("tabindex", "-1");
-  $('[data-action="bookmark"]').setAttribute("aria-pressed", String(saved.has(r.id)));
-  documentDecryption.reset($("#detail-content"), prefs.reduced || scene.decryptionFrame.phase === "clear");
+  // 右侧这一栏就是曲目面板：封面 / 曲目信息 / 实时频谱 / 歌词 / 播放记录。
+  // 空库时用同一套版式的占位态，界面上不再出现"科室 / 编目范围 / 相关人物"这类档案词条。
+  const content = $("#detail-content");
+  content.classList.add("song-mode");
+  content.innerHTML = songDetailMarkup(selected);
+  content.setAttribute("tabindex", "-1");
+  documentDecryption.reset(content, prefs.reduced || scene.decryptionFrame.phase === "clear");
   setTab(activeTab, false);
-}
-function overview() {
-  return `<div class="panel-label">ABSTRACT / 摘要</div><p>${escapeHtml(records[selected].abstract)}</p>`;
+  mountSongDetail(content);
 }
 function setTab(tab: string, sound = true) {
   if (sound && tab === activeTab) return;
@@ -485,28 +445,12 @@ function setTab(tab: string, sound = true) {
     b.setAttribute("aria-selected", String(active));
     b.setAttribute("tabindex", active ? "0" : "-1");
   });
-  const r = records[selected];
   const tabButton = $<HTMLButtonElement>(`[data-tab="${tab}"]`);
   const indicator = $(".tab-indicator");
   indicator.style.transition = sound ? "" : "none";
   indicator.style.transform = `translateX(${tabButton.offsetLeft}px) scaleX(${tabButton.offsetWidth})`;
   $("#tab-panel").setAttribute("aria-labelledby", tabButton.id);
-  $("#tab-panel").innerHTML = hasSongs()
-    ? songTabMarkup(tab, selected)
-    : tab === "overview"
-      ? overview()
-      : tab === "notes"
-        ? `<div class="panel-label">RESEARCH NOTES / 研究记录</div><ol class="research-notes">${r.findings.map((f, i) => `<li><span>${String(i + 1).padStart(2, "0")}</span>${escapeHtml(f)}</li>`).join("")}</ol>`
-        : `<div class="panel-label">ACCESS LOG / 本次访问</div>${accessLog
-            .filter((entry) => entry.id === r.id)
-            .slice(0, 4)
-            .map(
-              (entry) =>
-                `<div class="log-row"><span>${entry.time}</span><span>${getOperator()}</span><b>READ AUTHORIZED</b></div>`,
-            )
-            .join(
-              "",
-            )}<p class="log-note">本次会话已通过身份验证。档案内容以当前终端可访问范围展示。</p>`;
+  $("#tab-panel").innerHTML = songTabMarkup(tab, selected);
   $("#tab-panel").scrollTop = 0;
   documentDecryption.refresh();
   if (sound) {
@@ -533,7 +477,7 @@ function openModal(kind: NonNullable<typeof modal>) {
   modalClosing = false;
   modal = kind;
   searchQuery = "";
-  filter = "全部档案";
+  filter = categories[0];
   audio.play("page-open");
   renderModal();
 }
@@ -562,7 +506,7 @@ function renderModal() {
   if (!modal) return;
   modalTransition?.dispose();
   $("#modal-root").innerHTML =
-    `<div class="modal-backdrop"><section class="terminal-modal ${modal === "settings" ? "settings-modal" : ""}" role="dialog" aria-modal="true" aria-label="${modal === "settings" ? "系统设置" : modal === "saved" ? "收藏档案" : "档案检索"}"><div class="modal-top"><span>RHINE LAB / ${modal === "settings" ? "SYSTEM PREFERENCES" : "ARCHIVE DIRECTORY"}</span><button data-action="close-modal" aria-label="关闭窗口">CLOSE <span>×</span></button></div>${modal === "settings" ? settingsMarkup() : `<h2>${modal === "saved" ? "SAVED ARCHIVES" : "ARCHIVE INDEX"}<small>${modal === "saved" ? "收藏档案" : "内部档案检索"}</small></h2><div class="search-field"><span>⌕</span><input id="archive-search" type="search" autocomplete="off" placeholder="输入档案编号、名称或科室" aria-label="检索档案"/><span class="key">ESC</span></div><div class="category-filters">${categories.map((c, i) => `<button data-filter="${escapeHtml(c)}" class="${i === 0 ? "active" : ""}">${escapeHtml(c)}</button>`).join("")}</div><div class="result-header"><span>FILE / 档案</span><span>DEPARTMENT / 科室</span><span>ACCESS</span></div><div id="search-results" class="search-results"></div><div class="modal-bottom"><span id="result-count"></span><span>INTERNAL DATABASE <i>●</i> CONNECTED</span></div>`}</section></div>`;
+    `<div class="modal-backdrop"><section class="terminal-modal ${modal === "settings" ? "settings-modal" : ""}" role="dialog" aria-modal="true" aria-label="${modal === "settings" ? "系统设置" : modal === "saved" ? "收藏曲目" : "曲目检索"}"><div class="modal-top"><span>RHINE LAB / ${modal === "settings" ? "SYSTEM PREFERENCES" : "TRACK DIRECTORY"}</span><button data-action="close-modal" aria-label="关闭窗口">CLOSE <span>×</span></button></div>${modal === "settings" ? settingsMarkup() : `<h2>${modal === "saved" ? "SAVED TRACKS" : "TRACK INDEX"}<small>${modal === "saved" ? "收藏曲目" : "音乐库检索"}</small></h2><div class="search-field"><span>⌕</span><input id="archive-search" type="search" autocomplete="off" placeholder="输入曲名、艺术家或专辑" aria-label="检索曲目"/><span class="key">ESC</span></div><div class="category-filters">${categories.map((c, i) => `<button data-filter="${escapeHtml(c)}" class="${c === filter ? "active" : ""}">${escapeHtml(c)}</button>`).join("")}</div><div class="result-header"><span>TRACK / 曲目</span><span>ARTIST / 艺术家</span><span>LENGTH / 时长</span></div><div id="search-results" class="search-results"></div><div class="modal-bottom"><span id="result-count"></span><span>INTERNAL DATABASE <i>●</i> CONNECTED</span></div>`}</section></div>`;
   const backdrop = $(".modal-backdrop");
   backdrop.hidden = true;
   modalTransition = new SurfaceTransition(backdrop, $(".terminal-modal"));
@@ -584,12 +528,17 @@ function renderModal() {
     });
 }
 function renderResults() {
+  // 收藏弹窗列的是播放器里收藏过的曲目（不再是独立的档案收藏集合）
+  const favIndexes = new Set<number>();
+  getSongs().forEach((song, i) => {
+    if (song.fav) favIndexes.add(i);
+  });
   const results = records
     .map((r, i) => ({ r, i }))
     .filter(
-      ({ r }) =>
-        (modal !== "saved" || saved.has(r.id)) &&
-        (filter === "全部档案" || r.category === filter) &&
+      ({ r, i }) =>
+        (modal !== "saved" || favIndexes.has(i)) &&
+        (filter === categories[0] || r.category === filter) &&
         `${r.id} ${r.title} ${r.en} ${r.department} ${r.lead}`
           .toLowerCase()
           .includes(searchQuery.toLowerCase()),
@@ -598,12 +547,11 @@ function renderResults() {
     ? results
         .map(
           ({ r, i }) =>
-            `<button class="result-row" data-result="${i}"><span class="result-name"><b>${r.id}</b><span>${escapeHtml(r.title)}<small>${escapeHtml(r.en)}</small></span>${saved.has(r.id) ? "<i>＋</i>" : ""}</span><span>${escapeHtml(r.department)}</span><span>${r.clearance === "RESTRICTED" ? "CATALOG ONLY" : "AUTHORIZED"} <i>↗</i></span></button>`,
+            `<button class="result-row" data-result="${i}"><span class="result-name"><b>${r.id}</b><span>${escapeHtml(r.title)}<small>${escapeHtml(r.en)}</small></span>${favIndexes.has(i) ? "<i>＋</i>" : ""}</span><span>${escapeHtml(r.department)}</span><span>${escapeHtml(r.date)} <i>↗</i></span></button>`,
         )
         .join("")
-    : `<div class="empty-results"><span>∅</span><strong>${modal === "saved" && !searchQuery ? "尚无收藏档案" : "没有匹配的档案"}</strong><p>${modal === "saved" && !searchQuery ? "读取档案时，选择 SAVE ARCHIVE 将其保存在此处。" : "尝试其他名称、档案编号，或切换科室分类。"}</p><button data-action="reset-search">${modal === "saved" ? "查看全部档案 →" : "重置检索 →"}</button></div>`;
-  $("#result-count").textContent =
-    `${String(results.length).padStart(2, "0")} RECORDS FOUND`;
+    : `<div class="empty-results"><span>∅</span><strong>${modal === "saved" && !searchQuery ? "尚无收藏曲目" : "没有匹配的曲目"}</strong><p>${modal === "saved" && !searchQuery ? "在曲目面板上点「＋ SAVE TRACK」，或在播放条上点 ♡ 收藏曲目，会出现在这里。" : "换个曲名、艺术家或专辑再试，也可以切换分组筛选。"}</p><button data-action="reset-search">${modal === "saved" ? "查看全部曲目 →" : "重置检索 →"}</button></div>`;
+  $("#result-count").textContent = `${String(results.length).padStart(2, "0")} TRACKS FOUND`;
 }
 function updateQualitySummary() {
   const summary = document.querySelector("#quality-summary");
@@ -720,7 +668,6 @@ document.addEventListener("click", (e) => {
   if (action === "search" || action === "saved" || action === "settings")
     openModal(action);
   if (action === "close-modal") closeModal();
-  if (action === "bookmark") toggleSaved();
   if (action === "fav-track") {
     toggleFavAt(selected);
     const song = songAt(selected);
@@ -737,11 +684,12 @@ document.addEventListener("click", (e) => {
       audio.play("confirm");
     }
   }
+  if (action === "import-music") importFiles();
   if (action === "play-now") togglePlay();
   if (action === "reset-search") {
     modal = "search";
     searchQuery = "";
-    filter = "全部档案";
+    filter = categories[0];
     renderModal();
   }
   if (action === "replay" || action === "restart") {
@@ -870,7 +818,7 @@ function bootFrame(t: number) {
   $(".file-title").firstChild!.textContent =
     step === "array"
       ? "SELECTING FILES...".slice(0, Math.max(0, Math.floor((t - 21.94) * 18)))
-      : "FILE NUMBER: ";
+      : "TRACK NUMBER: ";
   $("#stage").style.setProperty(
     "--entry-opacity",
     String(ease((t - 21.9) / 0.13)),
@@ -1020,7 +968,8 @@ Object.assign(window, {
       ready,
       bootTime: mode === "boot" ? (frozenTime ?? performance.now() / 1000 - bootStart) + 5 : null,
       selected: records[selected].id,
-      saved: [...saved],
+      // 收藏统一以播放器曲目的 fav 字段为准（原来的档案收藏集合已废弃）
+      saved: getSongs().filter((s) => s.fav).map((s) => s.title),
       audio: audio.stats(),
     }),
   },

@@ -2192,13 +2192,14 @@ body.rhine-night #player-playlist {
 #player-bar {
   position: absolute;
   left: 59px;
-  bottom: 124px;
+  bottom: 94px;
   width: 880px;
-  height: 104px;
+  height: 134px;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  padding: 11px 18px 12px;
+  justify-content: center;
+  gap: 9px;
+  padding: 11px 22px;
   background: var(--p-panel);
   border-top: 1px solid var(--p-hair);
   backdrop-filter: blur(7px);
@@ -2214,22 +2215,26 @@ body.rhine-night #player-playlist {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 20px;
+  flex: none;
 }
 .p-label {
   font-size: 9px;
-  letter-spacing: 1.4px;
+  letter-spacing: 1.6px;
   color: var(--p-muted);
   text-transform: uppercase;
+  white-space: nowrap;
 }
 .p-label i {
   font-style: normal;
-  margin: 0 3px;
+  margin: 0 4px;
   color: var(--p-faint);
 }
 .p-controls {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 11px;
+  flex: none;
 }
 #player-bar button {
   width: 32px;
@@ -2257,8 +2262,8 @@ body.rhine-night #player-playlist {
   display: block;
 }
 #player-bar #p-play {
-  width: 38px;
-  height: 38px;
+  width: 36px;
+  height: 36px;
   background: var(--p-strong);
   border-color: var(--p-strong);
   color: var(--p-strong-ink);
@@ -2279,25 +2284,26 @@ body.rhine-night #player-bar #p-play:hover {
 }
 .p-sep {
   width: 1px;
-  height: 22px;
+  height: 20px;
   background: var(--p-hair-soft);
   display: inline-block;
-  margin: 0 3px;
+  margin: 0 5px;
 }
 .p-mid {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 24px;
-  min-height: 0;
+  gap: 22px;
+  flex: none;
 }
 .p-now {
   min-width: 0;
-  flex: 1;
+  flex: 1 1 auto;
 }
 #p-now-title {
   display: block;
-  font-size: 18px;
+  font-size: 17px;
+  line-height: 1.25;
   font-weight: 600;
   letter-spacing: -0.2px;
   white-space: nowrap;
@@ -2306,8 +2312,9 @@ body.rhine-night #player-bar #p-play:hover {
 }
 #p-now-artist {
   display: block;
-  margin-top: 5px;
+  margin-top: 4px;
   font-size: 11px;
+  line-height: 1.35;
   letter-spacing: 0.6px;
   color: var(--p-body);
   white-space: nowrap;
@@ -2318,7 +2325,7 @@ body.rhine-night #player-bar #p-play:hover {
   display: flex;
   align-items: flex-end;
   gap: 2px;
-  height: 26px;
+  height: 24px;
   flex: none;
 }
 .p-spectrum i {
@@ -2331,14 +2338,15 @@ body.rhine-night #player-bar #p-play:hover {
 .p-bot {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 16px;
+  flex: none;
 }
 .p-time {
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.6px;
   color: var(--p-body);
   font-variant-numeric: tabular-nums;
-  min-width: 40px;
+  min-width: 46px;
 }
 .p-time:last-child {
   text-align: right;

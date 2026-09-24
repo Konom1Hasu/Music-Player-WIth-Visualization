@@ -249,7 +249,8 @@ Write-Step '运行验证'
 $checks = @(
     @{ name = '文档一致性'; file = 'scripts\文档一致性验证.js' },
     @{ name = '数据管控';   file = 'scripts\数据管控验证.js' },
-    @{ name = '设置持久化'; file = 'scripts\设置持久化验证.js' }
+    @{ name = '设置持久化'; file = 'scripts\设置持久化验证.js' },
+    @{ name = 'ID3 编码';   file = 'scripts\ID3编码验证.js' }
 )
 foreach ($c in $checks) {
     $p = Join-Path $Root $c.file
