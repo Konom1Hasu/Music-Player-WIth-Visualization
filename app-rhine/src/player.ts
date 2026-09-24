@@ -1,6 +1,7 @@
 // 音乐播放器：把本地音乐库映射成"档案"，驱动三维档案阵列，并提供传输控制。
 // 后端能力（NCM 解密 / B 站缓存 / 读封面 / 歌词 / 读音频）复用 Electron 的 window.desktop。
 import { setRecords, type ArchiveRecord } from "./data";
+import { Spectrum, type SpectrumPalette } from "./spectrum";
 
 export interface Song {
   id: string;
@@ -333,7 +334,7 @@ function selectSong(id: string) {
     audio.src = currentUrl;
   }
   pendingSeek = s.pos > 3 ? s.pos : 0;
-  vizPeaks.fill(0);
+  spectrum?.resetPeaks();
   renderNow();
   // 让三维档案阵列与详情区跟上正在播放的这一首（播放列表与档案阵列是同一份数据）
   const index = songs.findIndex((x) => x.id === id);
@@ -706,27 +707,40 @@ function renderNow() {
   renderList();
 }
 
-/* ---------- 频谱：Web Audio 分析当前播放的音频元素 ---------- */
+/* ---------- 频谱：1.3.0 版独立播放器的自研频谱（见 spectrum.ts） ---------- */
 let actx: AudioContext | null = null;
 let analyserNode: AnalyserNode | null = null;
 let freqData: Uint8Array<ArrayBuffer> | null = null;
+let timeData: Float32Array<ArrayBuffer> | null = null;
 let vizDenied = false;
 let vizRaf = 0;
 let vizLast = 0;
 let vizTickPhase = 0;
-const DETAIL_BARS = 96;
-const vizRaw = new Float32Array(DETAIL_BARS); // 本帧原始能量
-const levels = new Float32Array(DETAIL_BARS); // 平滑后的显示值
-const vizPeaks = new Float32Array(DETAIL_BARS); // 峰值保持线
-/* 静态底板（网格线 / 基线 / 刻度）画一次缓存起来，每帧只 blit，不重复描 */
-let vizBg: HTMLCanvasElement | null = null;
-let vizBgKey = "";
-let vizGrad: CanvasGradient | null = null;
-let vizGradKey = "";
-/* 动态观感：自动增益 + 鼓点泵浦 */
-let normRef = 0.35;
-let lowRef = 0.05;
-let pump = 1;
+let spectrum: Spectrum | null = null;
+/* ?viztest=1：不播音乐，用合成信号跑频谱 —— 用来在无音频的环境里核对频谱观感
+   （音高固定 55Hz 低音 + 440Hz / 2.4kHz，低音每 4 秒来一次"鼓点"）。 */
+const VIZ_TEST = new URLSearchParams(location.search).get("viztest") === "1";
+let vizTestPhase = 0;
+function vizTestTimeData(out: Float32Array) {
+  const sr = actx?.sampleRate ?? 48000;
+  vizTestPhase += 1;
+  const beat = Math.pow(Math.max(0, Math.sin((vizTestPhase / 120) * Math.PI * 2)), 8);
+  for (let i = 0; i < out.length; i++) {
+    const t = i / sr;
+    let s = (0.35 + 0.5 * beat) * Math.sin(2 * Math.PI * 55 * t);
+    s += 0.18 * Math.sin(2 * Math.PI * 440 * t + vizTestPhase * 0.02);
+    s += 0.1 * Math.sin(2 * Math.PI * 2400 * t);
+    s += 0.04 * (Math.random() * 2 - 1);
+    out[i] = s * 0.7;
+  }
+  return beat;
+}
+
+function spectrumPalette(): Partial<SpectrumPalette> {
+  return document.body.classList.contains("rhine-night")
+    ? { light: "#dcbb8c", strong: "#c08b52", base: "#4b4a3b", ring: "#c08b52" }
+    : { light: "#c9a878", strong: "#9b7247", base: "#252820", ring: "#9b7247" };
+}
 
 async function ensureAnalyser(): Promise<AnalyserNode | null> {
   if (analyserNode || vizDenied) return analyserNode;
@@ -747,74 +761,30 @@ async function ensureAnalyser(): Promise<AnalyserNode | null> {
     }
     const source = ctx.createMediaElementSource(audio);
     const node = ctx.createAnalyser();
-    node.fftSize = 2048;
-    node.smoothingTimeConstant = 0.7;
-    /* 分析器的 dB 窗口决定"多响算满格"。默认 −100…−30dBFS 对音乐太宽，
-       安静段落几乎不动；收到 −85…−25dB（60dB 窗口）后，正常播放就能铺开。 */
-    node.minDecibels = -85;
-    node.maxDecibels = -25;
+    node.fftSize = 1024; // 与 1.3.0 的分析窗长一致
+    node.smoothingTimeConstant = 0.6;
     source.connect(node);
     node.connect(ctx.destination);
     actx = ctx;
     analyserNode = node;
     freqData = new Uint8Array(node.frequencyBinCount);
+    timeData = new Float32Array(node.fftSize);
   } catch {
     vizDenied = true;
   }
   return analyserNode;
 }
-function readLevels() {
-  if (!analyserNode || !freqData) return false;
-  analyserNode.getByteFrequencyData(freqData);
-  const nyquist = (actx?.sampleRate ?? 48000) / 2;
-  const binHz = nyquist / freqData.length;
-  const minBin = Math.max(1, Math.floor(42 / binHz));
-  const maxBin = Math.max(minBin + DETAIL_BARS, Math.min(freqData.length - 1, Math.ceil(16000 / binHz)));
-  const ratio = maxBin / minBin;
-  let frameMax = 0;
-  let lowSum = 0;
-  for (let i = 0; i < DETAIL_BARS; i++) {
-    const from = Math.max(0, Math.floor(minBin * Math.pow(ratio, i / DETAIL_BARS)));
-    const to = Math.max(from + 1, Math.floor(minBin * Math.pow(ratio, (i + 1) / DETAIL_BARS)));
-    let peak = 0;
-    for (let b = from; b < to && b < freqData.length; b++) if (freqData[b] > peak) peak = freqData[b];
-    const raw = Math.pow(peak / 255, 1.05);
-    if (raw > frameMax) frameMax = raw;
-    if (i < 8) lowSum += raw;
-    // 倾斜补偿：高频能量天然低；低频前段再抬一点，让低频尖峰立得起来
-    const tilt = 0.88 + 0.3 * (i / DETAIL_BARS);
-    const spike = 1 + 0.2 * Math.exp(-Math.pow((i - 3) / 3.2, 2));
-    vizRaw[i] = raw * tilt * spike;
-  }
-  /* 自动增益只用来"救安静段落"，不做满量程归一。
-     ★ 之前是 gain = 1/normRef，等于每帧都把最响的那根柱拉到满格 —— 用户反馈
-       "可视化一直顶满"就是它。现在留 0.78 的参考余量并把增益封顶到 1.5：
-     正常音量的歌 gain 恒为 1，只有整体很轻时才抬一点，且最高也到不了顶。 */
-  normRef = Math.max(frameMax, normRef * 0.996, 0.2);
-  const gain = Math.min(1.5, Math.max(1, 0.78 / normRef));
-  // 鼓点泵浦：低频能量高于慢速参考就整排抬一下，快起慢落（幅度收敛，免得整体冲顶）
-  const low = lowSum / 8;
-  lowRef += (low - lowRef) * 0.02;
-  if (low > lowRef * 1.2 && low > 0.06) pump = Math.min(1.32, pump + 0.2);
-  else pump += (1 - pump) * 0.16;
-  for (let i = 0; i < DETAIL_BARS; i++) {
-    const target = Math.min(0.97, vizRaw[i] * gain * pump);
-    const cur = levels[i];
-    levels[i] = target > cur ? cur + (target - cur) * 0.55 : cur + (target - cur) * 0.12;
-    vizPeaks[i] = Math.max(levels[i], vizPeaks[i] - 0.008);
-  }
-  return true;
-}
-/** 播放条的 52 格刻度：15fps 更新，且只在高度真的变了才写 DOM（避免每帧触发布局） */
+/** 播放条的 52 格刻度直接取频谱柱（15fps 更新，且只在高度真的变了才写 DOM） */
 function paintTicks() {
-  if (!specEl) return;
+  if (!specEl || !spectrum) return;
+  const bars = spectrum.levels;
   const kids = specEl.children;
-  const step = DETAIL_BARS / kids.length;
+  const step = bars.length / kids.length;
   for (let i = 0; i < kids.length; i++) {
     let sum = 0;
     const from = Math.floor(i * step);
     const to = Math.max(from + 1, Math.floor((i + 1) * step));
-    for (let b = from; b < to && b < DETAIL_BARS; b++) sum += levels[b];
+    for (let b = from; b < to && b < bars.length; b++) sum += bars[b];
     const v = Math.min(1, sum / (to - from));
     const px = Math.max(2, Math.round(2 + v * 24));
     const el = kids[i] as HTMLElement;
@@ -822,72 +792,6 @@ function paintTicks() {
       el.style.height = px + "px";
       el.style.opacity = String(0.34 + v * 0.66);
     }
-  }
-}
-function detailColors() {
-  const night = document.body.classList.contains("rhine-night");
-  return {
-    night,
-    ink: night ? "#f0eee5" : "#252820",
-    ghost: night ? "#4b4a3b" : "#b8b3a8",
-    grid: night ? "#3a4032" : "#cfcabf",
-    accent: night ? "#c08b52" : "#9b7247",
-  };
-}
-function ensureVizBg(cv: HTMLCanvasElement, c: ReturnType<typeof detailColors>) {
-  const key = cv.width + "x" + cv.height + (c.night ? "n" : "d");
-  if (vizBg && vizBgKey === key) return;
-  const bg = document.createElement("canvas");
-  bg.width = cv.width;
-  bg.height = cv.height;
-  const g = bg.getContext("2d");
-  if (!g) return;
-  const W = bg.width;
-  const H = bg.height;
-  g.fillStyle = c.ghost;
-  g.fillRect(0, H - 4, W, 4); // 静默基线（与终端 .file-ticks 同一种刻度）
-  g.fillStyle = c.grid;
-  for (const r of [0.25, 0.5, 0.75]) g.fillRect(0, Math.round(H * r), W, 1); // 参考网格
-  vizBg = bg;
-  vizBgKey = key;
-}
-function ensureVizGrad(ctx: CanvasRenderingContext2D, H: number, c: ReturnType<typeof detailColors>) {
-  const key = H + (c.night ? "n" : "d");
-  if (vizGrad && vizGradKey === key) return;
-  const grad = ctx.createLinearGradient(0, H, 0, H * 0.08);
-  grad.addColorStop(0, c.night ? "#6f7757" : "#6d6a5f");
-  grad.addColorStop(0.45, c.ink);
-  grad.addColorStop(1, c.accent);
-  vizGrad = grad;
-  vizGradKey = key;
-}
-function paintDetail() {
-  const cv = document.querySelector<HTMLCanvasElement>("#p-detail-spectrum");
-  if (!cv) return;
-  const ctx = cv.getContext("2d");
-  if (!ctx) return;
-  const c = detailColors();
-  const W = cv.width;
-  const H = cv.height;
-  ensureVizBg(cv, c);
-  ensureVizGrad(ctx, H, c);
-  if (vizBg) ctx.drawImage(vizBg, 0, 0);
-  else ctx.clearRect(0, 0, W, H);
-  const pitch = W / DETAIL_BARS;
-  const barW = Math.max(3, Math.round(pitch * 0.62));
-  const base = H - 4;
-  ctx.fillStyle = vizGrad ?? c.ink;
-  for (let i = 0; i < DETAIL_BARS; i++) {
-    const v = levels[i];
-    if (v <= 0.012) continue;
-    const h = Math.max(3, Math.round(v * (base - 6)));
-    ctx.fillRect(i * pitch, base - h, barW, h);
-  }
-  ctx.fillStyle = c.accent;
-  for (let i = 0; i < DETAIL_BARS; i++) {
-    const p = vizPeaks[i];
-    if (p <= 0.05) continue;
-    ctx.fillRect(i * pitch, Math.max(0, base - 3 - Math.round(p * (base - 6))), barW, 3);
   }
 }
 function vizFrame(ts: number) {
@@ -898,11 +802,23 @@ function vizFrame(ts: number) {
     return;
   }
   vizLast = ts;
-  const live = readLevels();
-  paintDetail();
+  let live = false;
+  if (VIZ_TEST && spectrum) {
+    // 时域缓冲由循环自己保证（不依赖 ensureAnalyser —— 没有音频上下文时也要能跑）
+    if (!timeData) timeData = new Float32Array(1024);
+    vizTestTimeData(timeData);
+    spectrum.update(timeData, actx?.sampleRate);
+    live = true;
+  } else if (analyserNode && spectrum) {
+    if (!timeData) timeData = new Float32Array(analyserNode.fftSize);
+    analyserNode.getFloatTimeDomainData(timeData);
+    spectrum.update(timeData, actx?.sampleRate);
+    live = !audio.paused;
+  } else if (spectrum) {
+    live = spectrum.decay();
+  }
   if (++vizTickPhase % 2 === 0) paintTicks();
-  const busy = live && (!audio.paused || levels.some((v) => v > 0.012));
-  if (busy) vizRaf = requestAnimationFrame(vizFrame);
+  if (live) vizRaf = requestAnimationFrame(vizFrame);
 }
 function vizStop() {
   if (vizRaf) cancelAnimationFrame(vizRaf);
@@ -1128,9 +1044,17 @@ export function songDetailMarkup(index: number): string {
 /** 详情区渲染完成后调用：接管频谱画布并点亮当前歌词行。 */
 export function mountSongDetail(root: ParentNode) {
   stepLyrics();
+  const cv = (root as HTMLElement).querySelector?.("#p-detail-spectrum") as HTMLCanvasElement | null;
+  if (cv) {
+    // 面板每次重绘都是新画布，因此频谱实例跟着重建（画布尺寸决定柱宽与渐变）
+    spectrum = new Spectrum(cv, actx?.sampleRate ?? 48000);
+    spectrum.setPalette(spectrumPalette());
+    spectrum.setMode("mix");
+    // 诊断开关：?viztest=1 时把实例挂到 window 上，便于自动化核对柱高（见功能说明）
+    if (VIZ_TEST) (window as any).__spectrum = spectrum;
+  }
   if (vizRaf) return;
-  const live = analyserNode && !audio.paused;
-  paintDetail();
+  const live = (analyserNode && !audio.paused) || VIZ_TEST;
   if (live) vizRaf = requestAnimationFrame(vizFrame);
 }
 
@@ -1207,7 +1131,7 @@ export function toggleNight(force?: boolean) {
   } catch {
     /* ignore */
   }
-  paintDetail();
+  spectrum?.setPalette(spectrumPalette());
 }
 
 /* ---------- 初始化 ---------- */

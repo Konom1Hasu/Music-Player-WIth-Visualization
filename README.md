@@ -267,6 +267,7 @@ cd Music-Player-WIth-Visualization
 │   ├── setup-push-tls.ps1      # 准备推送通道（schannel 不可用时改用 openssl + 本机 CA）
 │   ├── release.ps1             # 发布：升版本号 → 查文档 → 验证 → 构建 → 打标签 → 推送
 │   ├── glb-inspect.js          # 读 GLB：场景树 / 材质 / 包围盒（核对 Blender 导出件）
+│   ├── 生成频谱探针.ps1         # 生成频谱探针页（预置曲目 + 回传柱高，自动化核对频谱）
 │   ├── 渲染快照.ps1             # 给界面拍快照并转成 ASCII（无图形环境也能"看"界面）
 │   ├── 截图转文本.js            # PNG → ASCII 灰度图（纯 Node，无第三方依赖）
 │   ├── 文档一致性验证.js        # 文档与代码是否同步的检查（16 项）
