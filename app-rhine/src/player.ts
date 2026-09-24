@@ -749,6 +749,10 @@ async function ensureAnalyser(): Promise<AnalyserNode | null> {
     const node = ctx.createAnalyser();
     node.fftSize = 2048;
     node.smoothingTimeConstant = 0.7;
+    /* 分析器的 dB 窗口决定"多响算满格"。默认 −100…−30dBFS 对音乐太宽，
+       安静段落几乎不动；收到 −85…−25dB（60dB 窗口）后，正常播放就能铺开。 */
+    node.minDecibels = -85;
+    node.maxDecibels = -25;
     source.connect(node);
     node.connect(ctx.destination);
     actx = ctx;
@@ -774,24 +778,27 @@ function readLevels() {
     const to = Math.max(from + 1, Math.floor(minBin * Math.pow(ratio, (i + 1) / DETAIL_BARS)));
     let peak = 0;
     for (let b = from; b < to && b < freqData.length; b++) if (freqData[b] > peak) peak = freqData[b];
-    const raw = Math.pow(peak / 255, 0.8);
+    const raw = Math.pow(peak / 255, 1.05);
     if (raw > frameMax) frameMax = raw;
     if (i < 8) lowSum += raw;
-    // 倾斜补偿：高频能量天然低；再在低频前段做一点"高耸条"的峰形
-    const tilt = 0.7 + 0.62 * (i / DETAIL_BARS);
-    const spike = 1 + 0.45 * Math.exp(-Math.pow((i - 3) / 3.2, 2));
+    // 倾斜补偿：高频能量天然低；低频前段再抬一点，让低频尖峰立得起来
+    const tilt = 0.88 + 0.3 * (i / DETAIL_BARS);
+    const spike = 1 + 0.2 * Math.exp(-Math.pow((i - 3) / 3.2, 2));
     vizRaw[i] = raw * tilt * spike;
   }
-  // 自动增益：跟着"最近的峰值"走，安静段落也有动态，爆音段不会一根顶天
-  normRef = Math.max(frameMax, normRef * 0.994, 0.18);
-  const gain = 1 / normRef;
-  // 鼓点泵浦：低频能量高于慢速参考值就整排抬一下，快起慢落
+  /* 自动增益只用来"救安静段落"，不做满量程归一。
+     ★ 之前是 gain = 1/normRef，等于每帧都把最响的那根柱拉到满格 —— 用户反馈
+       "可视化一直顶满"就是它。现在留 0.78 的参考余量并把增益封顶到 1.5：
+     正常音量的歌 gain 恒为 1，只有整体很轻时才抬一点，且最高也到不了顶。 */
+  normRef = Math.max(frameMax, normRef * 0.996, 0.2);
+  const gain = Math.min(1.5, Math.max(1, 0.78 / normRef));
+  // 鼓点泵浦：低频能量高于慢速参考就整排抬一下，快起慢落（幅度收敛，免得整体冲顶）
   const low = lowSum / 8;
   lowRef += (low - lowRef) * 0.02;
-  if (low > lowRef * 1.22 && low > 0.06) pump = Math.min(1.85, pump + 0.32);
-  else pump += (1 - pump) * 0.14;
+  if (low > lowRef * 1.2 && low > 0.06) pump = Math.min(1.32, pump + 0.2);
+  else pump += (1 - pump) * 0.16;
   for (let i = 0; i < DETAIL_BARS; i++) {
-    const target = Math.min(1, vizRaw[i] * gain * pump);
+    const target = Math.min(0.97, vizRaw[i] * gain * pump);
     const cur = levels[i];
     levels[i] = target > cur ? cur + (target - cur) * 0.55 : cur + (target - cur) * 0.12;
     vizPeaks[i] = Math.max(levels[i], vizPeaks[i] - 0.008);

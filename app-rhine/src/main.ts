@@ -198,6 +198,9 @@ const audio = new TerminalAudio();
 audio.configure(prefs);
 let audioPreview = false, audioPreviewRequest = 0;
 let scene: ArchiveScene;
+/* scene 是模块末尾才 new 出来的，而 updateSelection() 在模块加载期就会被调用一次；
+   用它挡一下，避免在三维场景就绪前访问 scene。 */
+let sceneReady = false;
 let viewer: ModelViewer | undefined;
 const accessLog: { id: string; time: string }[] = [];
 let columnMemory: (number | undefined)[] = archiveColumns.map((_, lane) => columnFiles(lane)[0]);
@@ -348,6 +351,7 @@ function updateSelection(navigation?: ArchiveNavigation) {
   const r = records[selected];
   const { lane } = fileLocation(selected);
   const files = columnFiles(lane);
+  syncCover();
   selectionTitle.update({ text: r.title, animated: !prefs.reduced && mode === "archive" });
   clearanceTitle.update({ text: r.clearance, animated: !prefs.reduced && mode === "archive" });
   categoryTitle.update({ text: r.category, animated: !prefs.reduced && mode === "archive" });
@@ -429,6 +433,17 @@ function renderDetail() {
   content.setAttribute("tabindex", "-1");
   documentDecryption.reset(content, prefs.reduced || scene.decryptionFrame.phase === "clear");
   mountSongDetail(content);
+}
+/** 把当前选中曲目的封面与信息交给三维场景，印到左边那块文档模型的正面标签板上。 */
+function syncCover() {
+  if (!sceneReady) return;
+  const song = getSongs()[selected];
+  scene.setCover(song?.cover ?? null, {
+    no: String(selected + 1).padStart(3, "0"),
+    title: song?.title ?? "尚无曲目",
+    artist: song?.artist ?? "音乐库为空",
+    album: song?.album ?? "把音乐文件拖进窗口，或按播放条上的 ＋ 导入",
+  });
 }
 function notify(message: string) {
   clearTimeout(toastTimer);
@@ -843,7 +858,9 @@ async function start() {
       document.fonts.load("400 20px MiSans"),
       document.fonts.load("700 20px MiSans"),
     ]);
+    sceneReady = true;
     scene.select(selected);
+    syncCover();
     scene.onSelect = (i, cell) => {
       if (mode === "boot") return;
       select(i, cell ? { cell } : undefined);

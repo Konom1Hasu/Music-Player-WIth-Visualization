@@ -108,6 +108,13 @@ export class ArchiveScene {
   private labelCanvas = document.createElement("canvas");
   private labelTexture?: THREE.CanvasTexture;
   private labelMark = new Image();
+  /* 曲目封面标签：印在正面那块大标签板上（封面方块 + 编号 / 曲名 / 艺术家 / 专辑） */
+  private coverCanvas = document.createElement("canvas");
+  private coverTexture?: THREE.CanvasTexture;
+  private coverImage?: HTMLImageElement;
+  private coverMeta = { no: "000", title: "尚无曲目", artist: "音乐库为空", album: "" };
+  /* 画布上"封面方块"区域的平均色（低分辨率抽样），用于自检封面是否真的画上去了 */
+  private coverSample: number[] = [0, 0, 0];
   private reduced = false;
   private quality = normalizeQuality(undefined);
   private appliedQuality = "";
@@ -330,6 +337,28 @@ export class ArchiveScene {
     }
     this.labelCanvas.width = 1024;
     this.labelCanvas.height = 440;
+    /* 封面标签板：加在 label 之前，保证 label 仍然是最后一个子节点
+       （select() 里换选时按"最后一个子节点"复制标签，顺序不能变）。
+       正面标签板 z 约 0.246，这里放 0.252。 */
+    this.coverCanvas.width = 1536;
+    this.coverCanvas.height = 1216;
+    this.coverTexture = new THREE.CanvasTexture(this.coverCanvas);
+    this.coverTexture.colorSpace = THREE.SRGBColorSpace;
+    this.coverTexture.anisotropy =
+      this.renderer.capabilities.getMaxAnisotropy();
+    const coverPlate = new THREE.Mesh(
+      new THREE.PlaneGeometry(3.62, 2.87),
+      new THREE.MeshBasicMaterial({
+        map: this.coverTexture,
+        toneMapped: false,
+        transparent: true,
+        depthWrite: false,
+      }),
+    );
+    coverPlate.name = "cover-plate";
+    coverPlate.position.set(0.05, 1.86, 0.252);
+    this.model.add(coverPlate);
+    this.drawCover();
     this.labelTexture = new THREE.CanvasTexture(this.labelCanvas);
     this.labelTexture.colorSpace = THREE.SRGBColorSpace;
     this.labelTexture.anisotropy =
@@ -550,6 +579,23 @@ export class ArchiveScene {
         transparent: true,
         depthWrite: false,
       });
+      /* 收回中的那张卡片要留住它自己的封面：给它的封面标签板也复制一份画布，
+         否则克隆体共用同一张纹理，换曲时旧卡片上的封面会跟着变。 */
+      const coverPlate = group.getObjectByName("cover-plate") as THREE.Mesh | undefined;
+      if (coverPlate) {
+        const coverCopy = document.createElement("canvas");
+        coverCopy.width = this.coverCanvas.width;
+        coverCopy.height = this.coverCanvas.height;
+        coverCopy.getContext("2d")!.drawImage(this.coverCanvas, 0, 0);
+        const coverMap = new THREE.CanvasTexture(coverCopy);
+        coverMap.colorSpace = THREE.SRGBColorSpace;
+        coverPlate.material = new THREE.MeshBasicMaterial({
+          map: coverMap,
+          toneMapped: false,
+          transparent: true,
+          depthWrite: false,
+        });
+      }
       this.appearance.apply(group, ease(this.lift.value / 0.4));
       this.appearance.setClarity(group, this.decryption.clarity);
       this.scene.add(group);
@@ -591,6 +637,133 @@ export class ArchiveScene {
   private emitPulse(cell: ArchiveCell) {
     this.pulses.push({ ...cell, time: this.clock });
     this.pulses = this.pulses.slice(-6);
+  }
+  /** 把当前曲目的封面与信息印到正面标签板上（cover 为 data URL 或 null）。 */
+  setCover(cover: string | null, meta: { no: string; title: string; artist: string; album: string }) {
+    this.coverMeta = meta;
+    if (!cover) {
+      this.coverImage = undefined;
+      this.drawCover();
+      return;
+    }
+    if (this.coverImage && this.coverImage.src === cover) return;
+    const img = new Image();
+    img.onload = () => {
+      this.coverImage = img;
+      this.drawCover();
+    };
+    img.onerror = () => {
+      this.coverImage = undefined;
+      this.drawCover();
+    };
+    img.src = cover;
+  }
+  /** 按字符宽度折行，最多 lines 行，超出补省略号。 */
+  private wrapText(
+    c: CanvasRenderingContext2D,
+    text: string,
+    x: number,
+    y: number,
+    maxWidth: number,
+    lineHeight: number,
+    lines = 2,
+  ) {
+    const chars = [...(text || "")];
+    let line = "";
+    let row = 0;
+    for (let i = 0; i < chars.length; i++) {
+      const next = line + chars[i];
+      if (c.measureText(next).width > maxWidth && line) {
+        c.fillText(row === lines - 1 ? line.slice(0, -1) + "…" : line, x, y + row * lineHeight);
+        row++;
+        if (row >= lines) return;
+        line = chars[i];
+      } else line = next;
+    }
+    if (line) c.fillText(line, x, y + row * lineHeight);
+  }
+  private drawCover() {
+    const c = this.coverCanvas.getContext("2d");
+    if (!c) return;
+    const W = this.coverCanvas.width;
+    const H = this.coverCanvas.height;
+    const g = this.coverMeta;
+    c.clearRect(0, 0, W, H);
+    c.fillStyle = "#e6e2d9";
+    c.fillRect(0, 0, W, H);
+    c.fillStyle = "#171713";
+    c.fillRect(34, 34, W - 68, 6);
+    c.fillRect(34, H - 40, W - 68, 6);
+    c.font = "bold 54px MiSans";
+    c.fillText("RHINE LAB, LLC.", 46, 120);
+    c.fillStyle = "#878476";
+    c.font = "30px MiSans";
+    c.fillText("MUSIC ARCHIVE ／ 曲目标签", 48, 164);
+    const box = { x: 46, y: 214, s: 690 };
+    c.fillStyle = "#cdc7bb";
+    c.fillRect(box.x - 6, box.y - 6, box.s + 12, box.s + 12);
+    if (this.coverImage) {
+      const img = this.coverImage;
+      const scale = Math.max(box.s / img.width, box.s / img.height);
+      const dw = img.width * scale;
+      const dh = img.height * scale;
+      c.save();
+      c.beginPath();
+      c.rect(box.x, box.y, box.s, box.s);
+      c.clip();
+      c.drawImage(img, box.x + (box.s - dw) / 2, box.y + (box.s - dh) / 2, dw, dh);
+      c.restore();
+    } else {
+      c.fillStyle = "#9a9487";
+      c.font = "bold 200px MiSans";
+      c.textAlign = "center";
+      c.fillText("♪", box.x + box.s / 2, box.y + box.s / 2 + 70);
+      c.textAlign = "left";
+    }
+    const tx = box.x + box.s + 56;
+    const tw = W - tx - 46;
+    c.fillStyle = "#878476";
+    c.font = "30px MiSans";
+    c.fillText("TRACK", tx, 258);
+    c.fillStyle = "#171713";
+    c.font = "bold 104px MiSans";
+    c.fillText("NO." + g.no, tx, 358);
+    c.font = "bold 58px MiSans";
+    this.wrapText(c, g.title, tx, 456, tw, 68, 2);
+    c.fillStyle = "#5a584e";
+    c.font = "40px MiSans";
+    this.wrapText(c, g.artist, tx, 626, tw, 50, 1);
+    c.fillStyle = "#878476";
+    c.font = "32px MiSans";
+    this.wrapText(c, g.album, tx, 692, tw, 42, 2);
+    if (this.labelMark.complete && this.labelMark.naturalWidth) {
+      c.drawImage(this.labelMark, tx, 850, 200, 94);
+    }
+    this.coverSample = this.sampleCoverBox(c, box);
+    if (this.coverTexture) this.coverTexture.needsUpdate = true;
+  }
+  /** 取封面方块的平均色（16×16 抽样），既能自检，也不会每帧扫 190 万像素。 */
+  private sampleCoverBox(c: CanvasRenderingContext2D, box: { x: number; y: number; s: number }) {
+    try {
+      const data = c.getImageData(box.x, box.y, box.s, box.s).data;
+      const step = Math.max(1, Math.floor(box.s / 16));
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let n = 0;
+      for (let y = 0; y < box.s; y += step) {
+        for (let x = 0; x < box.s; x += step) {
+          const i = (y * box.s + x) * 4;
+          r += data[i];
+          g += data[i + 1];
+          b += data[i + 2];
+          n++;
+        }
+      }
+      return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
+    } catch {
+      return [0, 0, 0];
+    }
   }
   private drawLabel(index: number) {
     if (!this.labelTexture) return;
@@ -1213,6 +1386,18 @@ export class ArchiveScene {
       topRight: project(2.5, 3.7, 0),
       labelTopLeft: project(-1.855, 3.27, 0.255),
       labelBottomLeft: project(-1.855, 2.81, 0.255),
+      // 封面标签板的四角（用于验证"封面确实印在模型正面上"）
+      coverTopLeft: project(-1.76, 3.295, 0.252),
+      coverBottomRight: project(1.86, 0.425, 0.252),
+      /* 封面链路自检：图片是否载入、画布是否真的画上了封面（抽样平均色）、
+         以及标签板是否挂在当前模型上。 */
+      cover: {
+        plate: Boolean(this.model.getObjectByName("cover-plate")),
+        imageLoaded: Boolean(this.coverImage),
+        sample: this.coverSample,
+        no: this.coverMeta.no,
+        title: this.coverMeta.title,
+      },
       modelPosition: this.model.position
         .toArray()
         .map((v) => Math.round(v * 10000) / 10000),
