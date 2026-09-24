@@ -2202,7 +2202,6 @@ body.rhine-night #player-playlist {
   padding: 11px 22px;
   background: var(--p-panel);
   border-top: 1px solid var(--p-hair);
-  backdrop-filter: blur(7px);
   z-index: 7;
   opacity: 1;
   transition: opacity 0.5s;
@@ -2371,7 +2370,6 @@ body.rhine-night #player-bar #p-play:hover {
   overflow-x: hidden;
   background: var(--p-panel);
   border: 1px solid var(--p-hair);
-  backdrop-filter: blur(7px);
   scrollbar-width: thin;
   scrollbar-color: #bbb4a6 transparent;
   z-index: 8;
@@ -2479,15 +2477,15 @@ body.rhine-night #player-bar #p-play:hover {
   color: var(--p-muted);
 }
 
-/* 详情区：曲目信息 + 实时频谱（沿用 .detail-content 的 636px 栏位） */
+/* 详情区：曲目信息 + 大尺寸实时频谱（页签已去掉，整块竖向空间都留给可视化） */
 #detail-content.song-mode .song-head {
   display: flex;
   gap: 26px;
-  margin-top: 24px;
+  margin-top: 18px;
 }
 #detail-content.song-mode .song-cover {
-  width: 130px;
-  height: 130px;
+  width: 118px;
+  height: 118px;
   flex: none;
   background: #ddd9d1;
   border: 1px solid #c1b8a7;
@@ -2504,15 +2502,15 @@ body.rhine-night #player-bar #p-play:hover {
   flex: 1;
 }
 #detail-content.song-mode h2 {
-  font-size: 36px;
+  font-size: 34px;
   line-height: 1.14;
   letter-spacing: -1px;
-  margin: 0 0 12px;
+  margin: 0 0 10px;
   max-width: 100%;
   overflow-wrap: anywhere;
 }
 #detail-content.song-mode .detail-title-cn {
-  font-size: 19px;
+  font-size: 18px;
   gap: 18px;
 }
 #detail-content.song-mode .detail-title-cn span {
@@ -2520,19 +2518,33 @@ body.rhine-night #player-bar #p-play:hover {
   letter-spacing: 1.1px;
   color: #807b70;
 }
+#detail-content.song-mode .detail-rule {
+  margin-top: 20px;
+}
 #detail-content.song-mode .metadata {
-  margin: 22px 0 0;
-  gap: 16px 42px;
+  margin: 16px 0 0;
+  gap: 14px 42px;
 }
 #detail-content.song-mode .song-viz {
-  margin-top: 24px;
+  margin-top: 16px;
 }
 #detail-content.song-mode .song-viz canvas {
   display: block;
   width: 636px;
-  height: 72px;
+  height: 174px;
   margin-top: 10px;
   border-bottom: 1px solid #bdb8ad;
+}
+.song-viz-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+.song-viz-note {
+  font-size: 9px;
+  letter-spacing: 0.9px;
+  color: #9a9487;
 }
 .song-viz-axis {
   display: flex;
@@ -2542,59 +2554,28 @@ body.rhine-night #player-bar #p-play:hover {
   letter-spacing: 0.9px;
   color: #807b70;
 }
-#detail-content.song-mode .tab-panel {
-  height: 122px;
-}
-.song-lyrics {
-  margin: 0;
-  padding: 0;
-}
-.song-lyrics .lyric-line {
-  display: flex;
-  gap: 14px;
-  font-size: 14px;
-  line-height: 1.6;
-  padding: 3px 0;
-  color: #5a584e;
-  cursor: pointer;
-}
-.song-lyrics .lyric-line b {
-  flex: none;
-  width: 42px;
-  font-weight: 400;
-  font-size: 9px;
-  letter-spacing: 0.7px;
-  color: #807b70;
-  font-variant-numeric: tabular-nums;
+/* 当前歌词：单行字幕，跟着进度整行替换 */
+.song-lyric-line {
+  margin-top: 10px;
+  min-height: 22px;
+  font-size: 15px;
   line-height: 22px;
+  letter-spacing: 0.4px;
+  color: #9a9487;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.song-lyrics .lyric-line:hover {
-  color: #191c16;
-}
-.song-lyrics .lyric-line.cur {
-  color: #191c16;
+.song-lyric-line.on {
+  color: #252820;
   font-weight: 600;
 }
-.song-lyrics .lyric-line.cur b {
-  color: #9b7247;
+body.rhine-night .song-lyric-line.on {
+  color: #f0eee5;
 }
-.song-lyrics-empty {
-  font-size: 13px;
-  color: #807b70;
+#detail-content.song-mode .detail-actions {
+  margin-top: 18px;
 }
-.song-record {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  font-size: 13px;
-  line-height: 1.7;
-  color: #5a584e;
-  border-bottom: 1px solid #d6d0c4;
-  padding: 7px 0;
-}
-.song-record b {
-  font-weight: 400;
-  font-size: 9px;
-  letter-spacing: 0.7px;
-  color: #807b70;
+#detail-content.song-mode .detail-footnote {
+  margin-top: 16px;
 }

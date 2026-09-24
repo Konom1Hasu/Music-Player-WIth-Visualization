@@ -712,9 +712,21 @@ let analyserNode: AnalyserNode | null = null;
 let freqData: Uint8Array<ArrayBuffer> | null = null;
 let vizDenied = false;
 let vizRaf = 0;
-const DETAIL_BARS = 127;
-const levels = new Float32Array(DETAIL_BARS);
-const vizPeaks = new Float32Array(DETAIL_BARS);
+let vizLast = 0;
+let vizTickPhase = 0;
+const DETAIL_BARS = 96;
+const vizRaw = new Float32Array(DETAIL_BARS); // 本帧原始能量
+const levels = new Float32Array(DETAIL_BARS); // 平滑后的显示值
+const vizPeaks = new Float32Array(DETAIL_BARS); // 峰值保持线
+/* 静态底板（网格线 / 基线 / 刻度）画一次缓存起来，每帧只 blit，不重复描 */
+let vizBg: HTMLCanvasElement | null = null;
+let vizBgKey = "";
+let vizGrad: CanvasGradient | null = null;
+let vizGradKey = "";
+/* 动态观感：自动增益 + 鼓点泵浦 */
+let normRef = 0.35;
+let lowRef = 0.05;
+let pump = 1;
 
 async function ensureAnalyser(): Promise<AnalyserNode | null> {
   if (analyserNode || vizDenied) return analyserNode;
@@ -755,19 +767,38 @@ function readLevels() {
   const minBin = Math.max(1, Math.floor(42 / binHz));
   const maxBin = Math.max(minBin + DETAIL_BARS, Math.min(freqData.length - 1, Math.ceil(16000 / binHz)));
   const ratio = maxBin / minBin;
+  let frameMax = 0;
+  let lowSum = 0;
   for (let i = 0; i < DETAIL_BARS; i++) {
     const from = Math.max(0, Math.floor(minBin * Math.pow(ratio, i / DETAIL_BARS)));
     const to = Math.max(from + 1, Math.floor(minBin * Math.pow(ratio, (i + 1) / DETAIL_BARS)));
     let peak = 0;
     for (let b = from; b < to && b < freqData.length; b++) if (freqData[b] > peak) peak = freqData[b];
-    const tilt = 0.66 + 0.72 * (i / DETAIL_BARS); // 高频能量天然低，做一点倾斜补偿
-    const target = Math.min(1, Math.pow(peak / 255, 0.86) * tilt * 1.5);
+    const raw = Math.pow(peak / 255, 0.8);
+    if (raw > frameMax) frameMax = raw;
+    if (i < 8) lowSum += raw;
+    // 倾斜补偿：高频能量天然低；再在低频前段做一点"高耸条"的峰形
+    const tilt = 0.7 + 0.62 * (i / DETAIL_BARS);
+    const spike = 1 + 0.45 * Math.exp(-Math.pow((i - 3) / 3.2, 2));
+    vizRaw[i] = raw * tilt * spike;
+  }
+  // 自动增益：跟着"最近的峰值"走，安静段落也有动态，爆音段不会一根顶天
+  normRef = Math.max(frameMax, normRef * 0.994, 0.18);
+  const gain = 1 / normRef;
+  // 鼓点泵浦：低频能量高于慢速参考值就整排抬一下，快起慢落
+  const low = lowSum / 8;
+  lowRef += (low - lowRef) * 0.02;
+  if (low > lowRef * 1.22 && low > 0.06) pump = Math.min(1.85, pump + 0.32);
+  else pump += (1 - pump) * 0.14;
+  for (let i = 0; i < DETAIL_BARS; i++) {
+    const target = Math.min(1, vizRaw[i] * gain * pump);
     const cur = levels[i];
-    levels[i] = target > cur ? cur + (target - cur) * 0.58 : cur + (target - cur) * 0.13;
-    vizPeaks[i] = Math.max(levels[i], vizPeaks[i] - 0.011);
+    levels[i] = target > cur ? cur + (target - cur) * 0.55 : cur + (target - cur) * 0.12;
+    vizPeaks[i] = Math.max(levels[i], vizPeaks[i] - 0.008);
   }
   return true;
 }
+/** 播放条的 52 格刻度：15fps 更新，且只在高度真的变了才写 DOM（避免每帧触发布局） */
 function paintTicks() {
   if (!specEl) return;
   const kids = specEl.children;
@@ -778,49 +809,97 @@ function paintTicks() {
     const to = Math.max(from + 1, Math.floor((i + 1) * step));
     for (let b = from; b < to && b < DETAIL_BARS; b++) sum += levels[b];
     const v = Math.min(1, sum / (to - from));
+    const px = Math.max(2, Math.round(2 + v * 24));
     const el = kids[i] as HTMLElement;
-    el.style.height = Math.max(2, Math.round(2 + v * 24)) + "px";
-    el.style.opacity = String(0.34 + v * 0.66);
+    if (el.style.height !== px + "px") {
+      el.style.height = px + "px";
+      el.style.opacity = String(0.34 + v * 0.66);
+    }
   }
+}
+function detailColors() {
+  const night = document.body.classList.contains("rhine-night");
+  return {
+    night,
+    ink: night ? "#f0eee5" : "#252820",
+    ghost: night ? "#4b4a3b" : "#b8b3a8",
+    grid: night ? "#3a4032" : "#cfcabf",
+    accent: night ? "#c08b52" : "#9b7247",
+  };
+}
+function ensureVizBg(cv: HTMLCanvasElement, c: ReturnType<typeof detailColors>) {
+  const key = cv.width + "x" + cv.height + (c.night ? "n" : "d");
+  if (vizBg && vizBgKey === key) return;
+  const bg = document.createElement("canvas");
+  bg.width = cv.width;
+  bg.height = cv.height;
+  const g = bg.getContext("2d");
+  if (!g) return;
+  const W = bg.width;
+  const H = bg.height;
+  g.fillStyle = c.ghost;
+  g.fillRect(0, H - 4, W, 4); // 静默基线（与终端 .file-ticks 同一种刻度）
+  g.fillStyle = c.grid;
+  for (const r of [0.25, 0.5, 0.75]) g.fillRect(0, Math.round(H * r), W, 1); // 参考网格
+  vizBg = bg;
+  vizBgKey = key;
+}
+function ensureVizGrad(ctx: CanvasRenderingContext2D, H: number, c: ReturnType<typeof detailColors>) {
+  const key = H + (c.night ? "n" : "d");
+  if (vizGrad && vizGradKey === key) return;
+  const grad = ctx.createLinearGradient(0, H, 0, H * 0.08);
+  grad.addColorStop(0, c.night ? "#6f7757" : "#6d6a5f");
+  grad.addColorStop(0.45, c.ink);
+  grad.addColorStop(1, c.accent);
+  vizGrad = grad;
+  vizGradKey = key;
 }
 function paintDetail() {
   const cv = document.querySelector<HTMLCanvasElement>("#p-detail-spectrum");
   if (!cv) return;
   const ctx = cv.getContext("2d");
   if (!ctx) return;
+  const c = detailColors();
   const W = cv.width;
   const H = cv.height;
-  const night = document.body.classList.contains("rhine-night");
-  const ink = night ? "#f0eee5" : "#252820";
-  const ghost = night ? "#4b4a3b" : "#b6b1a6";
-  const accent = night ? "#c08b52" : "#9b7247";
-  ctx.clearRect(0, 0, W, H);
+  ensureVizBg(cv, c);
+  ensureVizGrad(ctx, H, c);
+  if (vizBg) ctx.drawImage(vizBg, 0, 0);
+  else ctx.clearRect(0, 0, W, H);
   const pitch = W / DETAIL_BARS;
-  const barW = Math.max(2, Math.round(pitch * 0.6));
+  const barW = Math.max(3, Math.round(pitch * 0.62));
+  const base = H - 4;
+  ctx.fillStyle = vizGrad ?? c.ink;
   for (let i = 0; i < DETAIL_BARS; i++) {
-    const x = i * pitch;
-    ctx.fillStyle = ghost;
-    ctx.fillRect(x, H - 3, barW, 3); // 静默基线，和终端的刻度条一致
     const v = levels[i];
-    if (v > 0.01) {
-      const h = Math.max(3, Math.round(v * (H - 6)));
-      ctx.fillStyle = ink;
-      ctx.fillRect(x, H - 3 - h, barW, h);
-    }
+    if (v <= 0.012) continue;
+    const h = Math.max(3, Math.round(v * (base - 6)));
+    ctx.fillRect(i * pitch, base - h, barW, h);
+  }
+  ctx.fillStyle = c.accent;
+  for (let i = 0; i < DETAIL_BARS; i++) {
     const p = vizPeaks[i];
-    if (p > 0.05) {
-      ctx.fillStyle = accent;
-      ctx.fillRect(x, Math.max(0, H - 4 - Math.round(p * (H - 6))), barW, 2);
-    }
+    if (p <= 0.05) continue;
+    ctx.fillRect(i * pitch, Math.max(0, base - 3 - Math.round(p * (base - 6))), barW, 3);
   }
 }
-function vizFrame() {
+function vizFrame(ts: number) {
   vizRaf = 0;
+  // 帧预算：频谱 30fps、播放条刻度 15fps —— 视觉上够顺，省下的算力留给三维场景
+  if (ts - vizLast < 33) {
+    vizRaf = requestAnimationFrame(vizFrame);
+    return;
+  }
+  vizLast = ts;
   const live = readLevels();
   paintDetail();
-  paintTicks();
+  if (++vizTickPhase % 2 === 0) paintTicks();
   const busy = live && (!audio.paused || levels.some((v) => v > 0.012));
   if (busy) vizRaf = requestAnimationFrame(vizFrame);
+}
+function vizStop() {
+  if (vizRaf) cancelAnimationFrame(vizRaf);
+  vizRaf = 0;
 }
 async function startViz() {
   const node = await ensureAnalyser();
@@ -828,6 +907,12 @@ async function startViz() {
   if (actx && actx.state !== "running") await actx.resume().catch(() => {});
   if (!vizRaf) vizRaf = requestAnimationFrame(vizFrame);
 }
+/* 窗口最小化 / 隐藏时停掉频谱循环：Electron 里关掉了背景节流，
+   不主动停就等于一直在算没人看的帧。 */
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) vizStop();
+  else if (!audio.paused) void startViz();
+});
 
 /* ---------- 歌词 ---------- */
 function lrcLines(s: Song | null): { t: number; txt: string }[] {
@@ -847,22 +932,23 @@ function lrcLines(s: Song | null): { t: number; txt: string }[] {
   lrcCache = { id: s.id, lines };
   return lines;
 }
-/** 歌词页签里高亮当前行（详情区里的歌词是终端"文档"的一部分）。 */
+/** 详情区只有一行"当前歌词"字幕：跟着播放进度整行替换，不做滚动列表。 */
 function stepLyrics() {
-  const box = document.querySelector<HTMLElement>(".song-lyrics");
-  if (!box) return;
-  const lines = lrcLines(currentSong());
-  if (!lines.length) return;
+  const el = document.querySelector<HTMLElement>("#p-lyric-line");
+  if (!el) return;
+  const s = currentSong();
+  const lines = lrcLines(s);
+  if (!lines.length) {
+    el.textContent = s && s.lrc ? "" : "♪ 无歌词";
+    el.classList.remove("on");
+    return;
+  }
   const cur = audio.currentTime || 0;
   let idx = 0;
   for (let i = 0; i < lines.length; i++) if (lines[i].t <= cur) idx = i;
-  const kids = box.querySelectorAll<HTMLElement>(".lyric-line");
-  kids.forEach((el, i) => el.classList.toggle("cur", i === idx));
-  const active = kids[idx];
-  if (active && box.scrollHeight > box.clientHeight + 4) {
-    const top = active.offsetTop - box.clientHeight / 2 + active.offsetHeight / 2;
-    box.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
-  }
+  const text = lines[idx].txt;
+  if (el.textContent !== text) el.textContent = text;
+  el.classList.add("on");
 }
 
 /* ---------- 列表与播放条 ---------- */
@@ -1024,53 +1110,17 @@ export function songDetailMarkup(index: number): string {
   <div class="detail-rule"></div>
   <dl class="metadata">${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${k.startsWith("PLAYED") ? "<i></i>" : ""}${esc(v)}</dd></div>`).join("")}</dl>
   <div class="song-viz">
-    <div class="panel-label">SPECTRUM / 实时频谱</div>
-    <canvas id="p-detail-spectrum" width="${636 * 2}" height="${72 * 2}" aria-hidden="true"></canvas>
+    <div class="song-viz-head"><span class="panel-label">SPECTRUM / 实时频谱</span><span class="song-viz-note">40Hz – 16kHz · 对数分频 · 96 段</span></div>
+    <canvas id="p-detail-spectrum" width="${636 * 2}" height="${174 * 2}" aria-hidden="true"></canvas>
     <div class="song-viz-axis"><span>LOW 40Hz</span><span>MID 1kHz</span><span>HIGH 16kHz</span></div>
+    <div class="song-lyric-line" id="p-lyric-line"></div>
   </div>
-  <div class="detail-tabs" role="tablist"><button id="tab-overview" class="active" role="tab" aria-controls="tab-panel" aria-selected="true" data-tab="overview">01 <span>曲目</span></button><button id="tab-notes" role="tab" aria-controls="tab-panel" aria-selected="false" data-tab="notes">02 <span>歌词</span></button><button id="tab-history" role="tab" aria-controls="tab-panel" aria-selected="false" data-tab="history">03 <span>播放记录</span></button><i class="tab-indicator" aria-hidden="true"></i></div>
-  <div id="tab-panel" class="tab-panel" role="tabpanel">${songTabMarkup("overview", index)}</div>
   <div class="detail-actions">${actions}<button class="export-button" data-action="play-now">${audio.paused ? "PLAY" : "PAUSE"} <span>${audio.paused ? "▶" : "■"}</span></button></div>
   <div class="detail-footnote"><span>${esc(artist)} · ${esc(album)}</span><span>${empty ? "000" : String(index + 1).padStart(3, "0")} / ${total}</span></div>`;
 }
-export function songTabMarkup(tab: string, index: number): string {
-  const s = songs[index] ?? null;
-  if (!s) {
-    return `<div class="panel-label">OVERVIEW / 曲目摘要</div><p class="song-lyrics-empty">音乐库为空。点击播放条上的 ＋ 导入音频文件，或把音乐文件夹直接拖进窗口 —— 导入后这里会显示封面、曲目信息与实时频谱。</p>`;
-  }
-  if (tab === "notes") {
-    const lines = lrcLines(s);
-    if (!lines.length)
-      return `<div class="panel-label">LYRICS / 歌词</div><p class="song-lyrics-empty">这首歌还没有歌词。把同名 .lrc 文件放在音乐旁边，重新导入即可自动匹配。</p>`;
-    return `<div class="panel-label">LYRICS / 歌词 <span style="color:#807b70">·  点击任意一行跳转</span></div><div class="song-lyrics">${lines
-      .map((l) => `<div class="lyric-line" data-t="${l.t}"><b>${mmss(l.t)}</b>${esc(l.txt)}</div>`)
-      .join("")}</div>`;
-  }
-  if (tab === "history") {
-    const rows: [string, string][] = [
-      ["PLAY COUNT / 播放次数", `${s.plays || 0} 次`],
-      ["LAST POSITION / 上次进度", s.pos > 3 ? mmss(s.pos) : "从头开始"],
-      ["FAVORITE / 收藏", s.fav ? "已收藏" : "未收藏"],
-      ["SOURCE / 来源", sourceLabel(s)],
-    ];
-    return (
-      `<div class="panel-label">PLAYBACK LOG / 播放记录</div>` +
-      rows.map(([k, v]) => `<div class="song-record"><b>${k}</b><span>${esc(v)}</span></div>`).join("")
-    );
-  }
-  return `<div class="panel-label">OVERVIEW / 曲目摘要</div><p>${esc(s.artist)} 的《${esc(s.title)}》，收录于《${esc(s.album)}》。${
-    s.duration ? "全长 " + mmss(s.duration) + "。" : ""
-  }当前档案阵列共 ${songs.length} 首曲目，第 ${index + 1} 首正在被读取。</p>`;
-}
-/** 详情区渲染完成后调用：接管频谱画布与歌词点击。 */
+/** 详情区渲染完成后调用：接管频谱画布并点亮当前歌词行。 */
 export function mountSongDetail(root: ParentNode) {
-  const box = (root as HTMLElement).querySelector?.(".song-lyrics") as HTMLElement | null;
-  box?.addEventListener("click", (e) => {
-    const line = (e.target as HTMLElement).closest<HTMLElement>(".lyric-line");
-    if (!line) return;
-    const t = Number(line.getAttribute("data-t"));
-    if (Number.isFinite(t)) audio.currentTime = t;
-  });
+  stepLyrics();
   if (vizRaf) return;
   const live = analyserNode && !audio.paused;
   paintDetail();

@@ -31,7 +31,6 @@ import {
   hasSongs,
   songAt,
   songDetailMarkup,
-  songTabMarkup,
   mountSongDetail,
   toggleFavAt,
   importFiles,
@@ -99,7 +98,6 @@ let mode: Mode = "boot",
 let modal: "search" | "saved" | "settings" | null = null,
   searchQuery = "",
   filter = categories[0];
-let activeTab = "overview";
 const reviewParams = new URLSearchParams(location.search);
 let frozenTime =
   reviewParams.get("freeze") === "1"
@@ -278,10 +276,7 @@ window.addEventListener("rhine-track", (event) => {
   updateSelection();
   if (mode === "detail") renderDetail();
 });
-/* 歌词是导入后异步补全的：只把歌词页签重绘一次 */
-window.addEventListener("rhine-lyrics", () => {
-  if (mode === "detail" && activeTab === "notes") setTab("notes", false);
-});
+/* 歌词由 player.ts 自己维护：详情区只有一行"当前歌词"字幕，不需要终端重绘 */
 
 function setMode(next: Mode) {
   const previousMode = mode;
@@ -331,7 +326,6 @@ function select(index: number, navigation?: ArchiveNavigation) {
   selected = (index + records.length) % records.length;
   columnMemory[fileLocation(selected).lane] = selected;
   if (mode === "detail") setMode("archive");
-  activeTab = "overview";
   scene?.select(selected, navigation);
   updateSelection(navigation);
   const columnMove = navigation && "axis" in navigation && navigation.axis === "lane";
@@ -426,37 +420,15 @@ function openFile() {
 function renderDetail() {
   tabTransition.cancel();
   $("#object-id").textContent = "NO." + String(selected + 1).padStart(3, "0");
-  // 右侧这一栏就是曲目面板：封面 / 曲目信息 / 实时频谱 / 歌词 / 播放记录。
-  // 空库时用同一套版式的占位态，界面上不再出现"科室 / 编目范围 / 相关人物"这类档案词条。
+  // 右侧这一栏就是曲目面板：封面 / 曲目信息 / 大尺寸实时频谱 / 当前歌词字幕。
+  // 页签（曲目·歌词·播放记录）已按用户要求删掉，那一块竖向空间全部让给可视化。
+  // 空库时用同一套版式的占位态，界面上不出现"科室 / 编目范围 / 相关人物"这类档案词条。
   const content = $("#detail-content");
   content.classList.add("song-mode");
   content.innerHTML = songDetailMarkup(selected);
   content.setAttribute("tabindex", "-1");
   documentDecryption.reset(content, prefs.reduced || scene.decryptionFrame.phase === "clear");
-  setTab(activeTab, false);
   mountSongDetail(content);
-}
-function setTab(tab: string, sound = true) {
-  if (sound && tab === activeTab) return;
-  activeTab = tab;
-  document.querySelectorAll("[data-tab]").forEach((b) => {
-    const active = (b as HTMLElement).dataset.tab === tab;
-    b.classList.toggle("active", active);
-    b.setAttribute("aria-selected", String(active));
-    b.setAttribute("tabindex", active ? "0" : "-1");
-  });
-  const tabButton = $<HTMLButtonElement>(`[data-tab="${tab}"]`);
-  const indicator = $(".tab-indicator");
-  indicator.style.transition = sound ? "" : "none";
-  indicator.style.transform = `translateX(${tabButton.offsetLeft}px) scaleX(${tabButton.offsetWidth})`;
-  $("#tab-panel").setAttribute("aria-labelledby", tabButton.id);
-  $("#tab-panel").innerHTML = songTabMarkup(tab, selected);
-  $("#tab-panel").scrollTop = 0;
-  documentDecryption.refresh();
-  if (sound) {
-    tabTransition.reveal($("#tab-panel"), prefs.reduced);
-    audio.play("ui-tick");
-  }
 }
 function notify(message: string) {
   clearTimeout(toastTimer);
@@ -633,10 +605,6 @@ document.addEventListener("click", (e) => {
     renderResults();
     return;
   }
-  if (el.dataset.tab) {
-    setTab(el.dataset.tab);
-    return;
-  }
   const action = el.dataset.action;
   if (action === "sound-preview") audio.play("confirm");
   if (action === "skip") {
@@ -734,18 +702,6 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   if (typing || modal || !ready) return;
-  if (
-    (e.target as HTMLElement).dataset.tab &&
-    ["ArrowLeft", "ArrowRight"].includes(e.key)
-  ) {
-    e.preventDefault();
-    const tabs = ["overview", "notes", "history"];
-    setTab(
-      tabs[(tabs.indexOf(activeTab) + (e.key === "ArrowRight" ? 1 : 2)) % 3],
-    );
-    $<HTMLButtonElement>(`[data-tab="${activeTab}"]`).focus();
-    return;
-  }
   if (e.key === "/") {
     e.preventDefault();
     if (mode === "boot") setMode("archive");
