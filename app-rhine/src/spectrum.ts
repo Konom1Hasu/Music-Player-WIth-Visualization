@@ -61,6 +61,8 @@ export class Spectrum {
   private bandBoost: Float32Array;
   private bars = new Float32Array(BAR_N);
   private peaks = new Float32Array(BAR_N);
+  /* 按量化级分桶用的容器（每帧复用，避免每帧新建数组） */
+  private buckets: number[][] = Array.from({ length: VIZ_LEVELS }, () => []);
   private jitterPhase = 0;
   private kickEnergy = 0;
   private kickRef = 0;
@@ -236,16 +238,32 @@ export class Spectrum {
   private drawBars(ctx: CanvasRenderingContext2D, w: number, h: number) {
     const gap = w / BAR_N;
     const bw = Math.max(1, gap * 0.7);
-    ctx.fillStyle = this.makeGrad(ctx, h);
+    const grad = this.makeGrad(ctx, h);
+    /* 柱高本来就是 14 级量化过的，所以按"级"分桶画：globalAlpha 每帧只改 14 次
+       （原实现是每根柱改一次，120 次状态切换），帧率能实打实抬上去。 */
+    const buckets: number[][] = this.buckets;
+    for (let k = 0; k < VIZ_LEVELS; k++) buckets[k].length = 0;
     for (let i = 0; i < BAR_N; i++) {
-      const v = this.bars[i];
+      const level = Math.max(0, Math.min(VIZ_LEVELS - 1, Math.round(this.bars[i] * (VIZ_LEVELS - 1))));
+      buckets[level].push(i);
+    }
+    ctx.fillStyle = grad;
+    for (let level = 0; level < VIZ_LEVELS; level++) {
+      const list = buckets[level];
+      if (!list.length) continue;
+      const v = level / (VIZ_LEVELS - 1);
       const bh = Math.max(2, v * (h - 8));
-      const x = i * gap + (gap - bw) / 2;
       ctx.globalAlpha = 0.45 + 0.55 * v;
-      ctx.fillRect(x, h - bh, bw, bh);
+      for (let n = 0; n < list.length; n++) {
+        const x = list[n] * gap + (gap - bw) / 2;
+        ctx.fillRect(x, h - bh, bw, bh);
+      }
+    }
+    // 峰值线：一条 fillStyle 画完（都在同一高度带里，按行合并）
+    ctx.globalAlpha = 0.85;
+    for (let i = 0; i < BAR_N; i++) {
       const ph = Math.max(2, this.peaks[i] * (h - 8));
-      ctx.globalAlpha = 0.85;
-      ctx.fillRect(x, h - ph - 3, bw, 2);
+      ctx.fillRect(i * gap + (gap - bw) / 2, h - ph - 3, bw, 2);
     }
     ctx.globalAlpha = 1;
   }

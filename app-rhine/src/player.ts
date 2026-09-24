@@ -352,10 +352,34 @@ export function playAt(i: number) {
   if (!songs.length) return;
   i = ((i % songs.length) + songs.length) % songs.length;
   const s = songs[i];
+  /* 点的就是当前这首：不要重新加载（重新赋 audio.src 会回到 0 秒），
+     暂停中就接着放、正在放就保持 —— 这就是"点歌不要重新播放"。 */
+  if (s.id === currentId) {
+    if (audio.paused) audio.play().catch(() => {});
+    return;
+  }
   selectSong(s.id);
   s.plays = (s.plays || 0) + 1;
   persist(s);
   audio.play().catch(() => {});
+}
+/* 「下一首播放」：把曲目排到当前这首后面（不动曲库顺序，只在队列里记 id） */
+let nextQueue: string[] = [];
+export function queueNext(id: string) {
+  const s = songs.find((x) => x.id === id);
+  if (!s) return;
+  const cur = currentSong();
+  if (cur && cur.id === id) {
+    toast("这首正在播放");
+    return;
+  }
+  nextQueue = nextQueue.filter((x) => x !== id);
+  nextQueue.unshift(id);
+  renderList();
+  toast(`下一首播放：《${s.title}》`);
+}
+export function queuedIds(): string[] {
+  return nextQueue.slice();
 }
 export function togglePlay() {
   if (!currentId) {
@@ -366,6 +390,12 @@ export function togglePlay() {
   else audio.pause();
 }
 export function playNext() {
+  // 「下一首播放」队列优先
+  while (nextQueue.length) {
+    const id = nextQueue.shift() as string;
+    const at = songs.findIndex((x) => x.id === id);
+    if (at >= 0) return playAt(at);
+  }
   const i = currentIndex();
   if (mode === "shuffle") {
     if (songs.length < 2) return playAt(0);
@@ -955,16 +985,17 @@ function stepLyrics() {
 function renderList() {
   if (!listEl) return;
   const s = currentSong();
+  const queued = new Set(nextQueue);
   listEl.innerHTML =
-    `<div class="p-head"><b>ARCHIVE ARRAY ／ 播放列表</b><span>${String(songs.length).padStart(2, "0")} TRACKS</span><button class="p-theme" title="昼 / 夜配色">◐</button></div>` +
+    `<div class="p-head"><b>ARCHIVE ARRAY ／ 播放列表</b><span>${String(songs.length).padStart(2, "0")} TRACKS${nextQueue.length ? " · 队列 " + nextQueue.length : ""}</span><button class="p-theme" title="深色 / 浅色主题">◐</button></div>` +
     (songs.length
       ? songs
           .map(
             (x, i) =>
-              `<div class="p-row${x.id === currentId ? " active" : ""}" data-i="${i}"><span class="p-idx">${String(i + 1).padStart(2, "0")}</span><span class="p-meta"><b>${esc(x.title)}</b><small>${esc(x.artist)}${x.album ? " · " + esc(x.album) : ""}${x.fav ? " ／ ♥" : ""}</small></span><button class="p-fav${x.fav ? " on" : ""}" data-fav="${x.id}" title="收藏">${x.fav ? "♥" : "♡"}</button><button class="p-del" data-del="${x.id}" title="移除">✕</button></div>`,
+              `<div class="p-row${x.id === currentId ? " active" : ""}${queued.has(x.id) ? " queued" : ""}" data-i="${i}"><span class="p-idx">${String(i + 1).padStart(2, "0")}</span><span class="p-meta"><b>${esc(x.title)}</b><small>${esc(x.artist)}${x.album ? " · " + esc(x.album) : ""}${x.fav ? " ／ ♥" : ""}${queued.has(x.id) ? " ／ 下一首" : ""}</small></span><button class="p-queue" data-queue="${x.id}" title="下一首播放">↳</button><button class="p-fav${x.fav ? " on" : ""}" data-fav="${x.id}" title="收藏">${x.fav ? "♥" : "♡"}</button><button class="p-del" data-del="${x.id}" title="移除">✕</button></div>`,
           )
           .join("")
-      : `<div class="p-empty">尚无曲目。点击 ＋ 导入音乐文件，右键 ＋ 导入整个文件夹。</div>`);
+      : `<div class="p-empty">尚无曲目。点击 ＋ 导入音乐文件，右键 ＋ 导入整个文件夹，也可以把文件直接拖进窗口。</div>`);
   if (s && listEl.classList.contains("open")) {
     const idx = songs.findIndex((x) => x.id === s.id);
     listEl.querySelector(`[data-i="${idx}"]`)?.scrollIntoView({ block: "nearest" });
@@ -1087,7 +1118,12 @@ function buildUI() {
     }
     const fav = t.getAttribute("data-fav");
     const del = t.getAttribute("data-del");
+    const queue = t.getAttribute("data-queue");
     const row = t.closest("[data-i]") as HTMLElement | null;
+    if (queue) {
+      queueNext(queue);
+      return;
+    }
     if (fav) {
       toggleFav(fav);
       return;
@@ -1163,7 +1199,7 @@ export function songDetailMarkup(index: number): string {
   <dl class="metadata">${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${k.startsWith("PLAYED") ? "<i></i>" : ""}${esc(v)}</dd></div>`).join("")}</dl>
   <div class="song-viz">
     <div class="song-viz-head"><span class="panel-label">SPECTRUM / 实时频谱</span><span class="song-viz-note">40Hz – 16kHz · 对数分频 · 96 段</span></div>
-    <canvas id="p-detail-spectrum" width="${636 * 2}" height="${477 * 2}" aria-hidden="true"></canvas>
+    <canvas id="p-detail-spectrum" width="${Math.round(636 * 1.5)}" height="${Math.round(477 * 1.5)}" aria-hidden="true"></canvas>
     <div class="song-viz-axis"><span>LOW 40Hz</span><span>MID 1kHz</span><span>HIGH 16kHz</span></div>
     <div class="song-lyric-line" id="p-lyric-line"></div>
   </div>
@@ -1270,13 +1306,15 @@ function savePosition() {
   }
 }
 
-/* ---------- 昼 / 夜配色（参考图 A 暖白纸面 ↔ 图 B 青石板） ---------- */
+/* ---------- 深色主题（整机，不只是播放条） ---------- */
 export function toggleNight(force?: boolean) {
-  const night =
-    force === undefined ? !document.body.classList.contains("rhine-night") : force;
-  document.body.classList.toggle("rhine-night", night);
+  const dark =
+    force === undefined ? !document.body.classList.contains("theme-dark") : force;
+  document.body.classList.toggle("theme-dark", dark);
+  // 播放条 / 播放列表的暗色令牌挂在同一个类上（见 style.css），保证整机一致
+  document.body.classList.toggle("rhine-night", dark);
   try {
-    localStorage.setItem("rhine-night", night ? "1" : "0");
+    localStorage.setItem("rhine-night", dark ? "1" : "0");
   } catch {
     /* ignore */
   }
@@ -1291,7 +1329,10 @@ export async function initPlayer() {
     /* ignore */
   }
   try {
-    if (localStorage.getItem("rhine-night") === "1") document.body.classList.add("rhine-night");
+    if (localStorage.getItem("rhine-night") === "1") {
+      document.body.classList.add("theme-dark");
+      document.body.classList.add("rhine-night");
+    }
   } catch {
     /* ignore */
   }

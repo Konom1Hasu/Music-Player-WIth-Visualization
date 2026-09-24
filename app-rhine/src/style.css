@@ -2618,6 +2618,136 @@ body.rhine-night #player-bar #p-play:hover {
 body.rhine-night .song-lyric-line.on {
   color: #f0eee5;
 }
+
+/* ============================================================
+   深色主题（body.theme-dark）
+   终端自己的样式表里颜色是写死的，所以这里按"面"逐类覆盖：
+   背景 / 面板 / 细线 / 文字三档 / 强调色，以及三维场景的氛围层。
+   播放条与播放列表读的是 --p-* 令牌，跟着 body.rhine-night 一起切（player.ts 里同一个开关）。
+   ============================================================ */
+body.theme-dark #viewport,
+body.theme-dark #stage,
+body.theme-dark .archive-atmosphere {
+  background: #171a15;
+}
+body.theme-dark .boot-background {
+  background: radial-gradient(ellipse at 51% 48%, #1d2019 0%, #15180f 76%, #101208 100%);
+}
+body.theme-dark .brand,
+body.theme-dark .brand *,
+body.theme-dark .system-nav,
+body.theme-dark .system-nav button,
+body.theme-dark .file-title,
+body.theme-dark .object-caption > span,
+body.theme-dark .detail-content h2,
+body.theme-dark #detail-content h2,
+body.theme-dark .terminal-modal h2,
+body.theme-dark .archive-counter,
+body.theme-dark .column-navigation strong {
+  color: #f0eee5;
+}
+body.theme-dark .eyebrow,
+body.theme-dark .tiny-label,
+body.theme-dark .detail-kicker,
+body.theme-dark .panel-label,
+body.theme-dark .metadata dt,
+body.theme-dark .song-viz-note,
+body.theme-dark .song-viz-axis,
+body.theme-dark .archive-hint,
+body.theme-dark .system-footer,
+body.theme-dark .powered,
+body.theme-dark .hover-label,
+body.theme-dark .detail-footnote,
+body.theme-dark .object-caption > div,
+body.theme-dark .object-caption > small,
+body.theme-dark .column-navigation > div > span {
+  color: #9a9487;
+}
+body.theme-dark .file-summary,
+body.theme-dark .detail-title-cn,
+body.theme-dark .metadata dd,
+body.theme-dark .tab-panel p,
+body.theme-dark .log-row,
+body.theme-dark .result-row,
+body.theme-dark .settings-list,
+body.theme-dark .search-field input,
+body.theme-dark .song-lyric-line {
+  color: #bcbfb1;
+}
+body.theme-dark .detail-rule,
+body.theme-dark .callout-rule {
+  background: #565b4a;
+}
+body.theme-dark .detail-tabs,
+body.theme-dark .metadata,
+body.theme-dark .archive-counter > div,
+body.theme-dark .search-field,
+body.theme-dark .result-header {
+  border-color: #3a3d33;
+}
+body.theme-dark .terminal-modal {
+  background: rgba(28, 31, 24, 0.97);
+  border-color: #3a3d33;
+  color: #e8e5e1;
+}
+body.theme-dark .modal-backdrop {
+  background: rgba(10, 12, 8, 0.6);
+}
+body.theme-dark .result-row:hover,
+body.theme-dark .category-filters button.active,
+body.theme-dark .settings-list label:hover {
+  background: #262a21;
+}
+body.theme-dark .key,
+body.theme-dark .system-nav button,
+body.theme-dark .column-navigation button,
+body.theme-dark .archive-navigation button {
+  border-color: #4b4a3b;
+  color: #cfcabf;
+}
+body.theme-dark .file-ticks button:before {
+  background: #565b4a;
+}
+body.theme-dark .file-ticks button.selected:before,
+body.theme-dark .file-ticks button[aria-pressed="true"]:before {
+  background: #c5a974;
+}
+body.theme-dark .read-file,
+body.theme-dark .back-button,
+body.theme-dark .export-button {
+  color: #e8e5e1;
+}
+body.theme-dark .solid-button {
+  background: #e8e5e1;
+  color: #1d1f1a;
+}
+body.theme-dark .solid-button > span {
+  color: #5a584e;
+}
+body.theme-dark .song-cover {
+  background: #2a2e24;
+  border-color: #4b4a3b;
+}
+/* 播放列表里「下一首播放」的按钮与排队标记 */
+.p-row .p-queue {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  background: none;
+  font-size: 13px;
+  color: var(--p-faint);
+  flex: none;
+}
+.p-row .p-queue:hover {
+  background: none;
+  color: var(--p-accent);
+}
+.p-row.queued {
+  box-shadow: inset 2px 0 0 var(--p-accent);
+}
+.p-row.queued .p-queue {
+  color: var(--p-accent);
+}
 #detail-content.song-mode .detail-actions {
   margin-top: 18px;
 }
