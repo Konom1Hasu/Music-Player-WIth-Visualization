@@ -1038,7 +1038,7 @@ ipcMain.handle('bili-scan', async (_e, presetDir) => {
   let dir = presetDir;
   if (!dir) {
     const r = await dialog.showOpenDialog(mainWin, {
-      title: '选择 B 站缓存文件夹',
+      title: '选择 B 站缓存文件夹（含 entry.json / audio.m4s）',
       buttonLabel: '扫描这个文件夹',
       properties: ['openDirectory']
     });

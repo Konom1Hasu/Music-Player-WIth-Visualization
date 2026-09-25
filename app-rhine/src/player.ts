@@ -787,7 +787,10 @@ export async function importBili() {
     toast("B站缓存导入需在桌面版使用");
     return;
   }
-  toast("正在扫描 B 站缓存…");
+  /* ★ 提示必须写"请选择"：这一步会弹系统的文件夹选择框（主进程的 bili-scan），
+     并不会自己去猜缓存目录。从前写的是"正在扫描 B 站缓存…"，
+     用户会以为程序已经自己找到了，然后莫名其妙冒出个选文件夹的框。 */
+  toast("请选择 B 站缓存文件夹（含 entry.json 或 audio.m4s）");
   let res: any;
   try {
     res = await desktop.scanBiliCache();
@@ -795,14 +798,17 @@ export async function importBili() {
     toast("扫描失败");
     return;
   }
-  if (!res || res.canceled) return;
+  if (!res || res.canceled) {
+    toast("已取消");
+    return;
+  }
   if (res.error) {
     toast("扫描出错：" + res.error);
     return;
   }
   const items = res.items || [];
   if (!items.length) {
-    toast("没有找到 B 站缓存");
+    toast("这个文件夹里没有识别到 B 站缓存（需要 entry.json 或 audio.m4s）");
     return;
   }
   let added = 0;
@@ -1262,6 +1268,7 @@ function buildUI() {
         <button id="p-rate" title="播放速度">1×</button>
         <button id="p-fav" title="收藏当前曲目">♡</button>
         <button id="p-import" title="导入音乐（右键 ＝ 导入整个文件夹）">＋</button>
+        <button id="p-bili" title="导入 B 站缓存（选择本机缓存文件夹，自动识别其中的音频）" aria-label="导入 B 站缓存"><svg viewBox="0 0 24 24" width="14" height="14" style="fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round"><rect x="3" y="7.4" width="18" height="12.4" rx="2.6"/><path d="M8 3.6 12 7l4-3.4"/></svg></button>
         <button id="p-list" title="播放列表 ／ 档案阵列">☰</button>
       </div>
     </div>
@@ -1292,6 +1299,13 @@ function buildUI() {
   bar.querySelector("#p-import")!.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     importFolder();
+  });
+  /* B 站缓存：后端一直在（app\bili.js 负责真正的"识别"——按 mp4 盒子的 stsd
+     判断哪个 .m4s 是音频轨，再补齐标题 / UP 主 / 封面），但**整合进终端时把入口丢了**：
+     importBili() 一直没人调用，界面上也没有按钮，旧界面的 #biliBtn 没搬过来。
+     这里补回播放条上的入口，紧挨着导入按钮。 */
+  bar.querySelector("#p-bili")!.addEventListener("click", () => {
+    void importBili();
   });
   bar.querySelector("#p-mode")!.addEventListener("click", cycleMode);
   bar.querySelector("#p-prev")!.addEventListener("click", playPrev);
