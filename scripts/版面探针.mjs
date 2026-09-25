@@ -26,7 +26,11 @@ function rect(sel) {
   if (!el) return null;
   const r = el.getBoundingClientRect();
   const k = 1920 / 1600;                       // 基准换算：把屏幕像素换成 1920×1080 基准
-  const s = Math.min(innerWidth / 1920, innerHeight / 1080);
+  /* ★ 缩放要读界面真正用的那个值（#viewport 上的 --scale）。
+     以前这里是照着 fit() 重算 Math.min(...)，但 fit() 改成"允许横向过扫描"之后
+     重算就和实际不符，归一化出来的坐标会整体偏小。 */
+  const s = Number(getComputedStyle(document.querySelector('#viewport')).getPropertyValue('--scale')) ||
+    Math.min(innerWidth / 1920, innerHeight / 1080);
   const stage = document.querySelector('#stage').getBoundingClientRect();
   return {
     x: Math.round((r.left - stage.left) / s), y: Math.round((r.top - stage.top) / s),
@@ -36,7 +40,7 @@ function rect(sel) {
 }
 function report(tag) {
   const st = document.querySelector('#stage');
-  L.push(tag + '：stage 模式 = ' + st.dataset.mode + '，缩放 = ' + (Math.min(innerWidth / 1920, innerHeight / 1080)).toFixed(4) + '，视口 = ' + innerWidth + 'x' + innerHeight);
+  L.push(tag + '：stage 模式 = ' + st.dataset.mode + '，缩放 = ' + (Number(getComputedStyle(document.querySelector('#viewport')).getPropertyValue('--scale')) || Math.min(innerWidth / 1920, innerHeight / 1080)).toFixed(4) + '，视口 = ' + innerWidth + 'x' + innerHeight);
   const items = [
     ['播放条 #player-bar', '#player-bar'],
     ['  ↳ 播放列表 #player-playlist', '#player-playlist'],

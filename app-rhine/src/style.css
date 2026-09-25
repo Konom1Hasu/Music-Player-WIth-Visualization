@@ -428,6 +428,10 @@ button {
   left: 970px;
   top: 487px;
   width: 950px;
+  /* 这个面板一直顶到 stage 右边缘（970 + 950 = 1920）。窗口比 16:9 更高时
+     fit() 会横向过扫描裁掉一点，靠这条内边距把右侧文字让进来；
+     16:9 时 --edge-crop 是 0，参考版式不动。 */
+  padding-right: var(--edge-crop, 0px);
 }
 .eyebrow {
   font-size: 12px;
@@ -2395,7 +2399,10 @@ body.rhine-night #player-playlist {
 #player-bar {
   position: absolute;
   left: 59px;
-  bottom: 80px;
+  /* ★ 底边距 80 → 40：用户要"界面上下拉开一点，底部太空"。
+     80 是 2.1.1 按当时的版面定的；缩放到满高之后（fit() 允许横向过扫描），
+     再把播放条往窗口底边推 40，底部那一大块空白就收掉了。 */
+  bottom: 40px;
   width: 880px;
   height: 134px;
   display: flex;
@@ -2595,7 +2602,7 @@ body.rhine-night #player-bar #p-play:hover {
 #player-playlist {
   position: absolute;
   left: 59px;
-  bottom: 238px;
+  bottom: 198px;
   width: 880px;
   max-height: 560px;
   overflow-y: auto;
@@ -2638,6 +2645,59 @@ body.rhine-night #player-bar #p-play:hover {
   height: 26px;
   font-size: 11px;
   flex: none;
+}
+/* 表头 + 搜索框一起吸顶；重画只碰 #p-rows，所以搜索框不会丢焦点 */
+.p-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--p-panel);
+  border-bottom: 1px solid var(--p-hair);
+}
+.p-sticky .p-head {
+  position: static;
+  border-bottom: 1px solid var(--p-hair-soft);
+}
+.p-search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 18px 10px;
+}
+.p-search-row input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  color: inherit;
+  background: var(--p-fill);
+  border: 1px solid var(--p-hair);
+  border-radius: 0;
+  outline: none;
+  appearance: none;
+}
+.p-search-row input::placeholder {
+  color: var(--p-faint);
+  letter-spacing: 1.1px;
+}
+.p-search-row input:focus {
+  border-color: var(--p-strong);
+}
+/* 自带的那个小 ✕ 在各平台上长得不一样，统一用自己的按钮 */
+.p-search-row input::-webkit-search-cancel-button {
+  display: none;
+}
+.p-search-row #p-search-clear {
+  width: 28px;
+  height: 28px;
+  font-size: 10px;
+  flex: none;
+}
+body.rhine-night .p-search-row input {
+  background: rgba(255, 255, 255, 0.04);
 }
 .p-row {
   display: flex;

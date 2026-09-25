@@ -246,9 +246,26 @@ function savePrefs() {
   hoverCode.update({ animated: !prefs.reduced && mode === "archive" });
   $("#stage").classList.toggle("reduce-motion", prefs.reduced);
 }
+/* 等比适应窗口，但允许一点横向"过扫描"，把上下那两条空带收窄。
+   contain（Math.min）在比 16:9 更高的窗口上会在上下各留一条空带（默认 1380×920 就是各 72px），
+   用户看到的就是"顶部和底端太空、界面没有上下拉开"。改成：
+     · 纵向按高度装得下 —— 上下永不裁切，空带归零；
+     · 横向最多裁掉 SAFE_CROP=40 基准像素/侧（≈4% 宽）：播放条左边距是 59，
+       左右两侧的文字与面板也都在 40 以外，所以不会裁到有用内容；
+     · 再留一个 1.2 倍上限，窄窗口里不至于放大过头。
+   实测（默认窗口 1380×920）：旧 scale 0.7188 → 上下各空 72px；
+   新 scale 0.75 → 空带各 55px，横向各裁 30 屏幕像素（= 40 基准像素）。 */
+const SAFE_CROP = 40;
+const MAX_OVERSCAN = 1.2;
 function fit() {
-  const scale = Math.min(innerWidth / 1920, innerHeight / 1080);
+  const contain = Math.min(innerWidth / 1920, innerHeight / 1080);
+  const scale = Math.min(innerHeight / 1080, innerWidth / (1920 - SAFE_CROP * 2), contain * MAX_OVERSCAN);
+  /* 实际裁掉多少（换算成 1920 基准像素），交给 CSS：
+     贴右边缘的面板（.archive-callout 从 970 一直到 1920）会按这个值补一条右内边距，
+     免得它右侧的文字被裁掉。16:9 的窗口上这个值是 0，参考版式一点不动。 */
+  const crop = Math.max(0, Math.round((1920 * scale - innerWidth) / 2 / scale));
   $("#stage").style.transform = `translate(-50%, -50%) scale(${scale})`;
+  $("#stage").style.setProperty("--edge-crop", crop + "px");
   $("#viewport").style.setProperty("--scale", String(scale));
   scene?.resize();
   viewer?.resize();

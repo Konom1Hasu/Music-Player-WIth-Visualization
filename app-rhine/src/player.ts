@@ -155,8 +155,12 @@ const idb = (() => {
     },
   };
 })();
+/* 落库：曲目记录里**不带位置**。位置只有 localStorage 的一条全局播放头（见 savePlayhead），
+   所以这里一律把 pos 抹成 0 再写 —— 否则内存里那一首恢复用的 pos 会跟着
+   "收藏 / 改信息 / 补时长"这些无关的落库一起写回去，变成"这首歌又记住了上次位置"。
+   用副本写，不改动内存里的对象。 */
 const persist = (s: Song) => {
-  idb.put(s).catch(() => {});
+  idb.put(s.pos ? { ...s, pos: 0 } : s).catch(() => {});
 };
 
 /* ---------- 工具 ---------- */
@@ -356,9 +360,14 @@ function syncRecords() {
 /* ---------- 播放控制 ---------- */
 /* ============================ 用户偏好（播放行为） ============================
    都在"系统设置 → 播放行为"里可改，存 localStorage：
-     rememberPos：是否记住每首歌的播放进度（默认开）。
-       关掉之后**完全不写**进度 —— 曲目里的 pos、localStorage 里的播放头都不落，
-       启动也不再续播（用户反馈"还是存在某些歌曲会记录进度"，就是这个开关）；
+
+   ★ 位置只保留**一条**：localStorage 的"全局播放头"（最后一次在听的那首 + 位置）。
+     曲目记录（IndexedDB 里的 Song.pos）从这一版起一律是 0 ——
+     用户明确要求"每首歌都不该记住自己的上次位置，切走再切回来从头放"。
+     以前是每首歌各自攒 pos（timeupdate / pause / 切歌 / 关窗四条写路径），
+     于是每首都有各自的续播点；现在这四条路径全部只更新那一条播放头。
+
+     rememberPos：是否记这条播放头（默认开）。关掉后**完全不写**进度，启动也不续播；
      resumeLast：启动时是否自动把播放条恢复到上次那首与上次进度（默认开，随 rememberPos 走）；
      openOnPlay：起播时是否自动打开该曲目的档案详情（默认开）。
        关掉就只播不跳转，停在档案阵列里。 */
@@ -420,7 +429,7 @@ export function setPlaybackPref(key: keyof PlaybackPrefs, value: boolean) {
    样式复用 .settings-list label（与 REDUCED MOTION 同一行式），不新增 CSS。 */
 export function playbackSettingsMarkup(): string {
   const rows: [keyof PlaybackPrefs, string, string][] = [
-    ["rememberPos", "REMEMBER PLAYBACK POSITION", "记住每首歌的播放进度；关掉后不写任何进度，启动也从零开始"],
+    ["rememberPos", "REMEMBER LAST POSITION", "只记\"最后一次在听的那首 + 位置\"这一条，用于下次启动接着听；关掉后不写任何进度。任何一首歌都不会单独记住自己的上次位置，切走再切回一律从头播"],
     ["resumeLast", "RESUME LAST TRACK", "启动时把播放条恢复到上次在听的那一首与位置"],
     ["openOnPlay", "OPEN ARCHIVE ON PLAY", "起播时自动打开这首歌的档案详情"],
   ];
@@ -547,11 +556,15 @@ function loadSongAudio(s: Song, autoplay = false) {
   diagLoad(s);
 }
 function selectSong(id: string, autoplay = false) {
-  // 离开这首之前把最后的位置落一次（下次播放它时用来续上）；关了"记住进度"就不落
+  /* ★ 离开这一首时**不落位置**了：以前这里会把 audio.currentTime 写进 leaving.pos 再落库，
+     于是每首歌都攒下自己的"上次听到哪"。现在只有全局播放头那一条，切歌就等于把它换成新的一首。
+     内存里也一并清掉 —— 启动恢复时会把位置摆在那一首的 s.pos 上，不清的话
+     来回切几次它还会拿着那个旧位置去续播。 */
   const leaving = songs.find((x) => x.id === currentId);
-  if (leaving && rememberPos() && audio.currentTime > 3) {
-    leaving.pos = audio.currentTime;
-    persist(leaving);
+  if (leaving && leaving.id !== id) {
+    leaving.pos = 0;
+    pendingSeek = 0;
+    posSavedAt = 0;
   }
   currentId = id;
   const s = songs.find((x) => x.id === id);
@@ -1352,6 +1365,26 @@ function stepLyrics() {
    每次都重写 300 多行曲目的 innerHTML 会把主线程整块占住（用户反馈卡顿的来源之一）。
    签名里带当前曲目、队列、收藏与曲目数，任一变化才重建。 */
 let listSig = "";
+/* 播放列表搜索：只过滤显示，不动曲库顺序 —— 行上的 data-i 始终是 songs 里的真实下标，
+   所以过滤状态下点行、删除、收藏、下一首播放都照旧作用于正确的曲目。 */
+let listQuery = "";
+let rowsEl: HTMLElement | null = null;
+let countEl: HTMLElement | null = null;
+let searchEl: HTMLInputElement | null = null;
+/** 当前搜索词命中的曲目下标（空词 = 全部）。曲名 / 艺术家 / 专辑都参与匹配。 */
+function matchedIndexes(): number[] {
+  const q = listQuery.trim().toLowerCase();
+  const out: number[] = [];
+  for (let i = 0; i < songs.length; i++) {
+    if (!q) {
+      out.push(i);
+      continue;
+    }
+    const s = songs[i];
+    if ((s.title + "\u0001" + s.artist + "\u0001" + s.album).toLowerCase().includes(q)) out.push(i);
+  }
+  return out;
+}
 function listSignature() {
   let sig = songs.length + "|" + currentId + "|" + nextQueue.join(",");
   /* 签名里必须带上曲目文本：删掉一首、或者改了某一首的标题 / 艺术家 / 专辑之后，
@@ -1362,25 +1395,34 @@ function listSignature() {
   return sig;
 }
 function renderList() {
-  if (!listEl) return;
-  const sig = listSignature();
+  if (!listEl || !rowsEl) return;
+  /* 搜索词也进签名：词一变就必须重画（数量、收藏、文字都没变时旧逻辑会直接 return） */
+  const sig = listSignature() + "\u0003" + listQuery;
   if (sig === listSig) return;
   listSig = sig;
   const s = currentSong();
   const queued = new Set(nextQueue);
-  listEl.innerHTML =
-    `<div class="p-head"><b>ARCHIVE ARRAY ／ 播放列表</b><span>${String(songs.length).padStart(2, "0")} TRACKS${nextQueue.length ? " · 队列 " + nextQueue.length : ""}</span><button class="p-theme" title="深色 / 浅色主题">◐</button></div>` +
-    (songs.length
-      ? songs
-          .map(
-            (x, i) =>
-              `<div class="p-row${x.id === currentId ? " active" : ""}${queued.has(x.id) ? " queued" : ""}" data-i="${i}"><span class="p-idx">${String(i + 1).padStart(2, "0")}</span><span class="p-meta"><b>${esc(x.title)}</b><small>${esc(x.artist)}${x.album ? " · " + esc(x.album) : ""}${x.fav ? " ／ ♥" : ""}${queued.has(x.id) ? " ／ 下一首" : ""}</small></span><button class="p-queue" data-queue="${x.id}" title="下一首播放">↳</button><button class="p-fav${x.fav ? " on" : ""}" data-fav="${x.id}" title="收藏">${x.fav ? "♥" : "♡"}</button><button class="p-del" data-del="${x.id}" title="移除">✕</button></div>`,
-          )
+  const ids = matchedIndexes();
+  const q = listQuery.trim();
+  /* 表头右侧：平时显示总数，搜索时显示"命中 / 总数" */
+  if (countEl)
+    countEl.textContent =
+      (q ? `${ids.length} / ${songs.length} 首匹配` : `${String(songs.length).padStart(2, "0")} TRACKS`) +
+      (nextQueue.length ? ` · 队列 ${nextQueue.length}` : "");
+  rowsEl.innerHTML = songs.length
+    ? ids.length
+      ? ids
+          .map((i) => {
+            const x = songs[i];
+            return `<div class="p-row${x.id === currentId ? " active" : ""}${queued.has(x.id) ? " queued" : ""}" data-i="${i}"><span class="p-idx">${String(i + 1).padStart(2, "0")}</span><span class="p-meta"><b>${esc(x.title)}</b><small>${esc(x.artist)}${x.album ? " · " + esc(x.album) : ""}${x.fav ? " ／ ♥" : ""}${queued.has(x.id) ? " ／ 下一首" : ""}</small></span><button class="p-queue" data-queue="${x.id}" title="下一首播放">↳</button><button class="p-fav${x.fav ? " on" : ""}" data-fav="${x.id}" title="收藏">${x.fav ? "♥" : "♡"}</button><button class="p-del" data-del="${x.id}" title="移除">✕</button></div>`;
+          })
           .join("")
-      : `<div class="p-empty">尚无曲目。点击 ＋ 导入音乐文件，右键 ＋ 导入整个文件夹，也可以把文件直接拖进窗口。</div>`);
+      : `<div class="p-empty">没有匹配「${esc(q)}」的曲目。<br/>换个关键词，或点搜索框右边的 ✕ 清除。</div>`
+    : `<div class="p-empty">尚无曲目。点击 ＋ 导入音乐文件，右键 ＋ 导入整个文件夹，也可以把文件直接拖进窗口。</div>`;
   if (s && listEl.classList.contains("open")) {
     const idx = songs.findIndex((x) => x.id === s.id);
-    listEl.querySelector(`[data-i="${idx}"]`)?.scrollIntoView({ block: "nearest" });
+    // 正在播放的这一首被过滤掉了就不跳（否则会滚到一个不存在的位置）
+    if (idx >= 0 && ids.includes(idx)) rowsEl.querySelector(`[data-i="${idx}"]`)?.scrollIntoView({ block: "nearest" });
   }
 }
 function buildUI() {
@@ -1423,7 +1465,48 @@ function buildUI() {
 
   listEl = document.createElement("div");
   listEl.id = "player-playlist";
+  /* 表头 + 搜索框放在一个 sticky 壳里，滚动时都留在顶上；
+     曲目行单独放 #p-rows —— 重画只碰 #p-rows，搜索框不会因为重画丢焦点 / 丢输入。 */
+  listEl.innerHTML =
+    `<div class="p-sticky"><div class="p-head"><b>ARCHIVE ARRAY ／ 播放列表</b><span id="p-count"></span><button class="p-theme" title="深色 / 浅色主题">◐</button></div>` +
+    `<div class="p-search-row"><input id="p-search" type="search" placeholder="搜索曲名 / 艺术家 / 专辑" autocomplete="off" spellcheck="false" aria-label="搜索歌曲"/><button id="p-search-clear" title="清除搜索（ESC）" aria-label="清除搜索">✕</button></div></div>` +
+    `<div id="p-rows"></div>`;
   root.appendChild(listEl);
+  rowsEl = listEl.querySelector("#p-rows");
+  countEl = listEl.querySelector("#p-count");
+  searchEl = listEl.querySelector("#p-search");
+  searchEl?.addEventListener("input", () => {
+    listQuery = searchEl!.value;
+    renderList();
+  });
+  /* 搜索框里的键自己消化掉：ESC 清词（再按一次收抽屉），回车播放第一条命中的曲目。
+     stopPropagation 是必须的 —— 终端那一层也监听 keydown，不拦住的话
+     ESC 会去关详情、回车会去"读取档案"。 */
+  searchEl?.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      if (searchEl!.value) {
+        searchEl!.value = "";
+        listQuery = "";
+        renderList();
+      } else {
+        closePlaylist();
+      }
+      return;
+    }
+    if (e.key === "Enter") {
+      e.stopPropagation();
+      const ids = matchedIndexes();
+      if (ids.length) playAt(ids[0]);
+    }
+  });
+  listEl.querySelector("#p-search-clear")?.addEventListener("click", () => {
+    if (!searchEl) return;
+    searchEl.value = "";
+    listQuery = "";
+    renderList();
+    searchEl.focus();
+  });
 
   bar.querySelector("#p-import")!.addEventListener("click", () => {
     importFiles();
@@ -1977,22 +2060,11 @@ audio.addEventListener("timeupdate", () => {
   const td = document.querySelector("#p-time-dur");
   if (tc) tc.textContent = fmt(cur);
   if (td) td.textContent = fmt(dur);
-  /* 位置只为"下次接着放"而存：内存里逐帧更新，落库有两条保护 ——
-     （a）每 4 秒一次的兜底落库（用户反馈"点歌还是从头开始"就是把进度丢在了崩溃/强杀上），
-     （b）暂停 / 切歌 / 关窗时各落一次，与原来一致。
-     ★ 这三条路径全部要先过 rememberPos()：之前只有"读"的那一侧（loadSongAudio）加了这道闸，
-       写的一侧一个都没加 —— 于是关了"记住进度"之后，曲目里的 pos、IndexedDB、
-       localStorage 播放头照旧每 4 秒写一次，下次启动照样"接着上次听"。
-       用户看到的现象就是"还是存在某些歌曲会记录进度"。 */
+  /* ★ 进度只保留**一条**：localStorage 里的"全局播放头"（最后一次在听的那首 + 位置）。
+     用户明确要求：**每首曲目都不该记住自己的上次位置** —— 切走再切回来一律从头放。
+     所以这里不再往 s.pos 写、也不再为进度落库，位置只由下面的 savePlayhead() 覆盖写一条。 */
   const s = currentSong();
   if (s && dur) {
-    if (rememberPos()) {
-      s.pos = cur;
-      if (cur - posSavedAt >= 4) {
-        posSavedAt = cur;
-        persist(s);
-      }
-    }
     // 播放条上那行"上次听到这里"的提示，一旦真的开始播就撤掉
     markRestored(false);
   }
@@ -2039,12 +2111,7 @@ audio.addEventListener("playing", () => {
   void startViz();
 });
 audio.addEventListener("pause", () => {
-  const s = currentSong();
-  if (s && rememberPos()) {
-    s.pos = audio.currentTime || 0;
-    (s as any)._savedAt = Date.now();
-    persist(s);
-  }
+  /* 暂停时同样不往这一首上写位置，只更新那一条全局播放头 */
   savePlayhead();
   renderNow();
 });
@@ -2074,17 +2141,12 @@ window.addEventListener("drop", (e) => {
   e.preventDefault();
   if (dt.files && dt.files.length) void addFiles(dt.files);
 });
-/* 关窗/切到后台时把当前位置落一次，保证下次播放能续上 */
+/* 关窗/切到后台时把"全局播放头"落一次，保证下次启动能接着上次那首听 */
 window.addEventListener("pagehide", savePosition);
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) savePosition();
 });
 function savePosition() {
-  const s = currentSong();
-  if (s && rememberPos() && audio.currentTime > 3) {
-    s.pos = audio.currentTime;
-    persist(s);
-  }
   savePlayhead();
 }
 
@@ -2100,8 +2162,9 @@ function savePosition() {
 const LS_PLAYHEAD = "rhine-playhead";
 function savePlayhead() {
   /* 关了"记住进度"就一个字都不落，并且把之前已经存下的播放头清掉 ——
-     否则下次启动还是会被 restorePlayhead 捡起来显示"上次听到这里"，
-     那正是用户说的"某些歌曲还是在记录进度"。 */
+     否则下次启动还是会被 restorePlayhead 捡起来显示"上次听到这里"。
+     ★ 位置直接取 audio.currentTime，不再从 s.pos 取：曲目记录里已经不保存位置了
+     （只有"正在放的那一首"这一刻的实时位置会被写进这条播放头）。 */
   if (!rememberPos()) {
     try {
       localStorage.removeItem(LS_PLAYHEAD);
@@ -2112,8 +2175,9 @@ function savePlayhead() {
   }
   const s = currentSong();
   if (!s) return;
+  const live = s.id === loadedId ? audio.currentTime || 0 : 0;
   try {
-    localStorage.setItem(LS_PLAYHEAD, JSON.stringify({ id: s.id, pos: Math.max(0, s.pos || 0) }));
+    localStorage.setItem(LS_PLAYHEAD, JSON.stringify({ id: s.id, pos: Math.max(0, live) }));
   } catch {
     /* ignore */
   }
@@ -2243,10 +2307,10 @@ function applyLibrary(saved: Song[]) {
     orderSeq = songs.reduce((m, s) => Math.max(m, s.order || 0), 0) + 1;
     currentId = null;
     loadedId = null;
-    /* ★ 读了库先看偏好：关了"记住进度"就把读回来的进度在内存里清零。
-       不清的话这些旧值会跟着后面任何一次 persist()（点歌 / 收藏 / 改信息）原样写回库，
-       再进一次"怎么还有进度"的错觉。只清内存、不额外写库 —— 下次自然落库时写的就是 0。 */
-    if (!rememberPos()) for (const s of songs) s.pos = 0;
+    /* ★ 读回来的 pos 一律清零：曲目记录从这一版起不再保存"上次位置"，
+       只有启动时那一条全局播放头（restorePlayhead）会把位置摆到播放条上。
+       旧版本写进库里的那些值就此作废，不会再让某首歌"从中间开始放"。 */
+    for (const s of songs) s.pos = 0;
   }
   if (VIZ_TEST) (window as any).__libraryLoaded = songs.length;
   /* 曲库到位后，先按"上次在听的那首 + 上次的位置"把播放条恢复出来，
