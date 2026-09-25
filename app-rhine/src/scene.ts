@@ -870,7 +870,6 @@ export class ArchiveScene {
       this.dragging = false;
       if (
         Math.hypot(e.clientX - startX, e.clientY - startY) > 6 ||
-        this.detail > 0.2 ||
         this.reveal < 0.8 ||
         !this.loaded
       )
@@ -885,15 +884,26 @@ export class ArchiveScene {
         [this.instances[0], this.model],
         true,
       )[0];
-      if (hit)
-        this.onSelect?.(
-          hit.instanceId !== undefined
-            ? fileAtCell(this.cells[hit.instanceId])
-            : fileAtSlot(this.selectedSlot),
-          hit.instanceId !== undefined
-            ? { ...this.cells[hit.instanceId] }
-            : { ...this.selectedCell },
-        );
+      if (!hit) return;
+      const slot =
+        hit.instanceId !== undefined
+          ? fileAtCell(this.cells[hit.instanceId])
+          : fileAtSlot(this.selectedSlot);
+      if (!Number.isFinite(slot)) return;
+      /* ★ 详情展开期间不再整轮挡掉点击。原来这里带一句 `this.detail > 0.2` 就 return，
+         于是"先在播放列表里点歌（详情跟着打开）、再去点别的档案"整轮没有反应 ——
+         用户反馈的切换失灵。终端那边的 select() 本来就写了"详情里选中 → 退回阵列"，
+         这里把这条路上最后一道闸去掉，行为才自洽。
+         点在正在特写的那一张上不算"切换"：那多半是想拖拽看它，保持原样。
+         ★ 比的是**曲目序号**：fileAtCell / fileAtSlot 返回的都是曲目序号，
+         selectedSlot 是阵列槽位（lane*32+row），两者不是一回事。 */
+      if (this.detail > 0.2 && slot === fileAtSlot(this.selectedSlot)) return;
+      this.onSelect?.(
+        slot,
+        hit.instanceId !== undefined
+          ? { ...this.cells[hit.instanceId] }
+          : { ...this.selectedCell },
+      );
     });
     canvas.addEventListener("pointercancel", () => (this.dragging = false));
     canvas.addEventListener("pointerleave", () => {

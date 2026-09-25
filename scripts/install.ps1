@@ -15,7 +15,10 @@
     安装目录，默认 %LOCALAPPDATA%\Programs\音乐播放器。
 
 .PARAMETER Launch
-    安装完成后立即启动程序。
+    安装完成后立即启动程序（根目录的 安装.bat 默认就带这个参数）。
+
+.PARAMETER NoLaunch
+    安装完成不启动。安装.bat 传了 -Launch，所以要用双击的方式装而不启动，就加这个。
 
 .PARAMETER NoBuild
     跳过构建步骤，直接使用已有的 dist 产物。
@@ -33,6 +36,7 @@
 param(
     [string]$InstallDir,
     [switch]$Launch,
+    [switch]$NoLaunch,
     [switch]$NoBuild,
     [switch]$NoShortcuts
 )
@@ -188,7 +192,8 @@ if (-not $NoShortcuts) {
 Write-Host "  卸载方式 : 运行安装目录下的 卸载.bat，或直接删除该文件夹"
 Write-Host ''
 
-if ($Launch) {
+if ($Launch -and -not $NoLaunch) {
     Write-Step '启动程序'
     Start-Process -FilePath $targetExe -WorkingDirectory $InstallDir
+    Write-Ok '已启动（本窗口可以关掉）'
 }

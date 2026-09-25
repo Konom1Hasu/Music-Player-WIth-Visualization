@@ -77,6 +77,12 @@ function notify() {
       /* ignore */
     }
   });
+  /* ★ 曲库本身变了（导入 / 移除 / 批量修标签）之后必须重画播放条与播放列表。
+     原来这里只通知"档案数据变了"（终端会重排阵列），播放器自己的界面要等下一次
+     播放 / 暂停 / 换曲才重建 —— 用户看到的就是"在列表里点了 ✕，这首歌还在那儿"，
+     于是认为删除功能坏了（其实库里已经删掉了，只是那一行 DOM 没重建）。
+     顺带修掉同样的一个老毛病：往已有曲库里导入新歌，列表也不会当场多出这几行。 */
+  renderNow();
 }
 export function getSongs(): Song[] {
   return songs;
@@ -343,6 +349,83 @@ function syncRecords() {
 }
 
 /* ---------- 播放控制 ---------- */
+/* ============================ 用户偏好（播放行为） ============================
+   都在"系统设置 → 播放行为"里可改，存 localStorage：
+     rememberPos：是否记住每首歌的播放进度（默认开）。
+       关掉之后**完全不写**进度 —— 曲目里的 pos、localStorage 里的播放头都不落，
+       启动也不再续播（用户反馈"还是存在某些歌曲会记录进度"，就是这个开关）；
+     resumeLast：启动时是否自动把播放条恢复到上次那首与上次进度（默认开，随 rememberPos 走）；
+     openOnPlay：起播时是否自动打开该曲目的档案详情（默认开）。
+       关掉就只播不跳转，停在档案阵列里。 */
+export interface PlaybackPrefs {
+  rememberPos: boolean;
+  resumeLast: boolean;
+  openOnPlay: boolean;
+}
+const LS_PLAY_PREFS = "rhine-play-prefs";
+export const playbackPrefs: PlaybackPrefs = (() => {
+  const d: PlaybackPrefs = { rememberPos: true, resumeLast: true, openOnPlay: true };
+  try {
+    const raw = localStorage.getItem(LS_PLAY_PREFS);
+    if (raw) {
+      const o = JSON.parse(raw) as Partial<PlaybackPrefs>;
+      if (typeof o.rememberPos === "boolean") d.rememberPos = o.rememberPos;
+      if (typeof o.resumeLast === "boolean") d.resumeLast = o.resumeLast;
+      if (typeof o.openOnPlay === "boolean") d.openOnPlay = o.openOnPlay;
+    }
+  } catch {
+    /* ignore */
+  }
+  return d;
+})();
+function savePlaybackPrefs() {
+  try {
+    localStorage.setItem(LS_PLAY_PREFS, JSON.stringify(playbackPrefs));
+  } catch {
+    /* ignore */
+  }
+}
+/** 记住进度：关掉之后所有写 pos / 写播放头的地方都要先过这一关 */
+const rememberPos = () => playbackPrefs.rememberPos;
+/** 改偏好：关掉"记住进度"（或"启动恢复"）时顺手把已经存下来的进度清掉（否则下次还会接着上次） */
+export function setPlaybackPref(key: keyof PlaybackPrefs, value: boolean) {
+  playbackPrefs[key] = value;
+  savePlaybackPrefs();
+  if (key === "rememberPos" || (key === "resumeLast" && !value)) {
+    if (!playbackPrefs.rememberPos || !playbackPrefs.resumeLast) {
+      for (const s of songs) if (s.pos) {
+        s.pos = 0;
+        persist(s);
+      }
+      try {
+        localStorage.removeItem(LS_PLAYHEAD);
+      } catch {
+        /* ignore */
+      }
+      // 正在等着的续播点也一起作废，否则本次会话里还会往上次的位置跳一下
+      pendingSeek = 0;
+      posSavedAt = 0;
+      markRestored(false);
+    }
+  }
+  renderNow();
+}
+/* 系统设置 → 播放行为。三个开关的实现都在这一侧，标记也放在一起，
+   免得 main.ts 的模板里再抄一份文案与 data 属性名。
+   样式复用 .settings-list label（与 REDUCED MOTION 同一行式），不新增 CSS。 */
+export function playbackSettingsMarkup(): string {
+  const rows: [keyof PlaybackPrefs, string, string][] = [
+    ["rememberPos", "REMEMBER PLAYBACK POSITION", "记住每首歌的播放进度；关掉后不写任何进度，启动也从零开始"],
+    ["resumeLast", "RESUME LAST TRACK", "启动时把播放条恢复到上次在听的那一首与位置"],
+    ["openOnPlay", "OPEN ARCHIVE ON PLAY", "起播时自动打开这首歌的档案详情"],
+  ];
+  return rows
+    .map(
+      ([key, title, desc]) =>
+        `<label><div><strong>${title}</strong><span>${desc}</span></div><input type="checkbox" data-playpref="${key}"${playbackPrefs[key] ? " checked" : ""}/><i class="toggle"></i></label>`,
+    )
+    .join("");
+}
 /** 只把音频装进 <audio> 元素（不碰界面状态）。启动时的"恢复上次曲目"不走这里。 */
 function loadSongAudio(s: Song) {
   if (currentUrl) {
@@ -355,8 +438,8 @@ function loadSongAudio(s: Song) {
     audio.src = currentUrl;
   }
   loadedId = s.id;
-  pendingSeek = s.pos > 3 ? s.pos : 0;
-  posSavedAt = s.pos > 3 ? s.pos : 0;
+  pendingSeek = rememberPos() && s.pos > 3 ? s.pos : 0;
+  posSavedAt = rememberPos() && s.pos > 3 ? s.pos : 0;
   if (DIAG)
     (window as any).__lastLoad = {
       id: s.id,
@@ -367,9 +450,9 @@ function loadSongAudio(s: Song) {
     };
 }
 function selectSong(id: string) {
-  // 离开这首之前把最后的位置落一次（下次播放它时用来续上）
+  // 离开这首之前把最后的位置落一次（下次播放它时用来续上）；关了"记住进度"就不落
   const leaving = songs.find((x) => x.id === currentId);
-  if (leaving && audio.currentTime > 3) {
+  if (leaving && rememberPos() && audio.currentTime > 3) {
     leaving.pos = audio.currentTime;
     persist(leaving);
   }
@@ -385,6 +468,21 @@ function selectSong(id: string) {
     window.dispatchEvent(new CustomEvent("rhine-track", { detail: index }));
   }
 }
+/** 收起播放列表抽屉（它和播放条共用同一个宽度，是压在三维档案阵列上的浮层）。 */
+function closePlaylist() {
+  listEl?.classList.remove("open");
+}
+/* 起播之后把终端切到"这首歌的档案"（系统设置 → 播放行为 · openOnPlay，默认开）。
+   ★ 两个入口必须一致：在播放列表里点一行、和在档案上点播放，结果都要"档案被打开"。
+   ★ 打开档案前先收起播放列表抽屉：那是 880×560 的浮层，正好盖住左侧的三维档案阵列，
+     不收起的话"先在列表里点歌、再去点别的档案"会被它整块吃掉 —— 用户反馈的"切换失灵"。
+   （事件只在 player 这一侧派发，终端收到后自己决定进不进详情：开屏、弹窗、编辑态、
+     360° 查看器占着画面时不抢。） */
+function followWithArchive(index: number) {
+  if (index < 0 || !playbackPrefs.openOnPlay) return;
+  closePlaylist();
+  window.dispatchEvent(new CustomEvent("rhine-open-track", { detail: index }));
+}
 export function playAt(i: number) {
   if (!songs.length) return;
   i = ((i % songs.length) + songs.length) % songs.length;
@@ -392,9 +490,13 @@ export function playAt(i: number) {
   /* 点的就是当前这首、而且**真的装进 audio 元素**了：不要重新加载（重新赋 audio.src
      会回到 0 秒），暂停中就接着放、正在放就保持 —— 这就是"点歌不要重新播放"。
      判据用 currentId === loadedId：启动时"记得上次播放的那首"只填了界面，
-     还没装进 audio，那时候点它必须真的去加载。 */
+     还没装进 audio，那时候点它必须真的去加载。
+     ★ 但"把画面跟到这首"照旧要做（原来这里直接 return）：先在列表里点歌、再去点别的档案
+     把选中态挪走之后，再点回列表里这一首，档案阵列就再也切不回它了。 */
   if (s.id === currentId && s.id === loadedId) {
     if (audio.paused) audio.play().catch(() => {});
+    window.dispatchEvent(new CustomEvent("rhine-track", { detail: i }));
+    followWithArchive(i);
     return;
   }
   selectSong(s.id);
@@ -402,6 +504,7 @@ export function playAt(i: number) {
   s.plays = (s.plays || 0) + 1;
   persist(s);
   audio.play().catch(() => {});
+  followWithArchive(i);
 }
 /* 诊断开关：?viztest=1 / ?diag=1 时把播放内核挂到 window 上，自动化核对"点歌续播"用 */
 if (VIZ_TEST || DIAG) (window as any).__playAt = playAt;
@@ -484,6 +587,9 @@ export function removeSong(id: string) {
   const wasCurrent = id === currentId;
   songs.splice(i, 1);
   idb.del(id).catch(() => {});
+  /* 「下一首播放」队列里可能还留着这一首的 id：不清掉的话，列表头的"队列 N"会永远多算一个，
+     而且按下一首时会先空转一次（playNext 里虽然会跳过已不存在的 id，但那一下是白等的）。 */
+  nextQueue = nextQueue.filter((x) => x !== id);
   if (wasCurrent) {
     if (songs.length) {
       currentId = null;
@@ -491,10 +597,12 @@ export function removeSong(id: string) {
       audio.currentTime = 0;
     } else {
       currentId = null;
+      loadedId = null;
       audio.pause();
       audio.removeAttribute("src");
     }
   }
+  /* notify() 现在会把播放列表一起重画（见上面的注释），所以删完这一行立刻消失。 */
   notify();
 }
 
@@ -1108,7 +1216,11 @@ function stepLyrics() {
 let listSig = "";
 function listSignature() {
   let sig = songs.length + "|" + currentId + "|" + nextQueue.join(",");
-  for (let i = 0; i < songs.length; i++) sig += (songs[i].fav ? "1" : "0");
+  /* 签名里必须带上曲目文本：删掉一首、或者改了某一首的标题 / 艺术家 / 专辑之后，
+     只比"数量 + 收藏"是看不出差别的 —— 那种情况下列表会继续显示旧的文字。
+     （renderNow 每次都会算一遍，所以这里只做最便宜的字符串拼接。） */
+  for (let i = 0; i < songs.length; i++)
+    sig += (songs[i].fav ? "1" : "0") + "\u0001" + songs[i].title + "\u0002" + songs[i].artist + "\u0002" + songs[i].album;
   return sig;
 }
 function renderList() {
@@ -1266,6 +1378,16 @@ function buildUI() {
     }
     if (row) playAt(Number(row.getAttribute("data-i")));
   });
+  /* 抽屉点外面就收起。它是压在左侧三维档案阵列上的浮层（880×560），
+     一直开着的话，点在阵列卡片上的那一下会被它整块吃掉、什么都不会发生 ——
+     用户看到的就是"先点列表播放、再点其他档案切换失灵"。
+     点 ☰ 自己不算"外面"，否则它会先把抽屉关掉、紧接着又被 toggle 打开。 */
+  document.addEventListener("pointerdown", (e) => {
+    if (!listEl?.classList.contains("open")) return;
+    const t = e.target;
+    if (!(t instanceof Element) || t.closest("#player-playlist") || t.closest("#p-list")) return;
+    closePlaylist();
+  });
   renderNow();
   paintTicks();
 }
@@ -1335,8 +1457,299 @@ export function songDetailMarkup(index: number): string {
     <div class="song-viz-axis"><span>LOW 40Hz</span><span>MID 1kHz</span><span>HIGH 16kHz</span></div>
     <div class="song-lyric-line" id="p-lyric-line"></div>
   </div>
-  <div class="detail-actions">${empty ? actions : ""}<button class="export-button" data-action="play-now">${audio.paused ? "PLAY" : "PAUSE"} <span>${audio.paused ? "▶" : "■"}</span></button></div>
+  <div class="detail-actions">${empty ? actions : ""}<button class="solid-button" data-action="edit-track">✎ EDIT INFO<span>修改歌曲信息</span></button><button class="export-button" data-action="play-now">${audio.paused ? "PLAY" : "PAUSE"} <span>${audio.paused ? "▶" : "■"}</span></button></div>
   <div class="detail-footnote"><span>${esc(artist)} · ${esc(album)}</span><span>${empty ? "000" : String(index + 1).padStart(3, "0")} / ${total}</span></div>`;
+}
+
+/* ============================ 歌曲信息编辑 / 封面读取 ============================
+   这一块是"手工修曲库"的入口，补的是从旧版独立播放器迁过来时丢掉的两件事：
+   ① 歌曲信息可改（标题 / 艺术家 / 专辑，落库并立刻反映到档案阵列、播放条与三维封面板）；
+   ② 封面读取（从音频文件里重新抠内嵌封面 / 找同目录 cover 图 / 自己选一张本地图片）。
+   改完不必重开：封面会通过 rhine-cover 事件同步给终端与三维场景。 */
+let editIndex = -1;
+let editDraft = { title: "", artist: "", album: "" };
+const EDIT_STATUS_ID = "p-edit-status";
+function editStatus(msg: string, kind: "ok" | "warn" = "ok") {
+  const el = document.getElementById(EDIT_STATUS_ID);
+  if (!el) {
+    toast(msg);
+    return;
+  }
+  el.textContent = msg;
+  el.dataset.kind = kind;
+}
+/** 编辑态的详情区：左侧封面 + 字段，右侧一列行动作；下方保留频谱 */
+export function songEditMarkup(index: number): string {
+  const s = songs[index];
+  if (!s) return songDetailMarkup(index);
+  editIndex = index;
+  editDraft = { title: s.title || "", artist: s.artist || "", album: s.album || "" };
+  const hasPath = Boolean(s.filePath && !s.srcUrl);
+  const coverSrc = s.cover || "";
+  return `
+  <div class="detail-kicker"><span>EDIT TRACK ${esc(s.id.slice(-3).toUpperCase())}</span><span class="song-mode-kicker">INFO / 歌曲信息</span></div>
+  <div class="edit-grid">
+    <div class="edit-cover">
+      <div class="edit-cover-box" id="p-edit-cover" title="把图片拖进来，或点下面的按钮选一张">
+        ${coverSrc ? `<img src="${coverSrc}" alt="${esc(s.title)} 封面" id="p-edit-cover-img"/>` : `<span class="edit-cover-empty">NO COVER<br/>无封面</span>`}
+      </div>
+      <div class="edit-cover-actions">
+        <button class="edit-mini" data-action="edit-cover-file">读取本地图片</button>
+        <button class="edit-mini" data-action="edit-cover-embed"${hasPath ? "" : ` disabled title="这一首没有本地文件路径，读不到内嵌封面"`}>重新读取内嵌封面</button>
+        <button class="edit-mini" data-action="edit-cover-none">恢复默认封面</button>
+      </div>
+      <div class="edit-note">支持把图片直接拖到上面的方框里</div>
+    </div>
+    <div class="edit-fields">
+      <label class="edit-field"><span>标题 / TITLE</span><input type="text" id="p-edit-title" maxlength="120" autocomplete="off" spellcheck="false" value="${esc(editDraft.title)}"/></label>
+      <label class="edit-field"><span>艺术家 / ARTIST</span><input type="text" id="p-edit-artist" maxlength="120" autocomplete="off" spellcheck="false" value="${esc(editDraft.artist)}"/></label>
+      <label class="edit-field"><span>专辑 / ALBUM</span><input type="text" id="p-edit-album" maxlength="120" autocomplete="off" spellcheck="false" value="${esc(editDraft.album)}"/></label>
+      <div class="edit-hint">
+        <button class="edit-mini" data-action="edit-reread">重新识别元数据</button>
+        <span>从音频文件里再读一次标题 / 艺术家 / 专辑 / 内嵌封面（会覆盖上面的输入）</span>
+      </div>
+      <div class="edit-status" id="${EDIT_STATUS_ID}" data-kind="ok">改完点右下角 SAVE 保存；ESC 取消。</div>
+    </div>
+  </div>
+  <div class="song-viz">
+    <div class="song-viz-head"><span class="panel-label">SPECTRUM / 实时频谱</span><span class="song-viz-note">编辑时仍在播放 · 频谱照常</span></div>
+    <canvas id="p-detail-spectrum" width="${Math.round(636 * 1.2)}" height="${Math.round(300 * 1.2)}" aria-hidden="true"></canvas>
+  </div>
+  <div class="detail-actions">
+    <button class="solid-button" data-action="edit-cancel">✕ DISCARD<span>放弃修改</span></button>
+    <button class="export-button" data-action="edit-save">SAVE <span>✓</span></button>
+  </div>
+  <div class="detail-footnote"><span>${esc(editDraft.artist)} · ${esc(editDraft.album)}</span><span>${String(index + 1).padStart(3, "0")} / ${String(songs.length).padStart(3, "0")}</span></div>`;
+}
+/** 编辑态渲染完成后调用：接管字段、封面按钮与频谱画布 */
+export function mountSongEdit(root: ParentNode) {
+  const host = root as HTMLElement;
+  const q = <T extends HTMLElement>(sel: string) => host.querySelector(sel) as T | null;
+  const readFields = () => {
+    editDraft.title = (q<HTMLInputElement>("#p-edit-title")?.value ?? "").trim();
+    editDraft.artist = (q<HTMLInputElement>("#p-edit-artist")?.value ?? "").trim();
+    editDraft.album = (q<HTMLInputElement>("#p-edit-album")?.value ?? "").trim();
+    return editDraft;
+  };
+  for (const id of ["#p-edit-title", "#p-edit-artist", "#p-edit-album"]) {
+    q<HTMLInputElement>(id)?.addEventListener("input", readFields);
+  }
+  const pickCover = q<HTMLElement>("[data-action='edit-cover-file']");
+  pickCover?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    pickCoverImage();
+  });
+  q<HTMLElement>("[data-action='edit-cover-embed']")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void reloadEmbeddedCover();
+  });
+  q<HTMLElement>("[data-action='edit-cover-none']")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const s = songs[editIndex];
+    if (!s) return;
+    s.cover = defaultCover(s.title, s.artist);
+    persist(s);
+    paintEditCover(s.cover);
+    markCoverChanged();
+    editStatus("已恢复默认封面（点 SAVE 才会写进曲库… 这一项已即时生效）");
+  });
+  q<HTMLElement>("[data-action='edit-reread']")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void rereadMetadata();
+  });
+  /* 把图片拖到封面上 = 读取本地图片 */
+  const box = q<HTMLElement>("#p-edit-cover");
+  if (box) {
+    const stop = (ev: Event) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+    };
+    box.addEventListener("dragover", (ev) => {
+      stop(ev);
+      box.classList.add("drop");
+    });
+    box.addEventListener("dragleave", () => box.classList.remove("drop"));
+    box.addEventListener("drop", (ev) => {
+      stop(ev);
+      box.classList.remove("drop");
+      const f = (ev as DragEvent).dataTransfer?.files?.[0];
+      if (f) void useCoverImage(f);
+    });
+    // 点封面方框本身也走"选图片"（比去点小按钮顺手）
+    box.addEventListener("click", (e) => {
+      e.stopPropagation();
+      pickCoverImage();
+    });
+  }
+  // 频谱照常：编辑时音乐还在放，画布不能黑着
+  const cv = host.querySelector("#p-detail-spectrum") as HTMLCanvasElement | null;
+  if (cv) {
+    spectrum = new Spectrum(cv, actx?.sampleRate ?? 48000);
+    spectrum.setPalette(spectrumPalette());
+    spectrum.setMode("mix");
+    if (VIZ_TEST || DIAG) (window as any).__rhineViz = vizDiag;
+  }
+  if (!vizRaf) {
+    const live = (analyserNode && !audio.paused) || VIZ_TEST;
+    if (live || spectrum) vizRaf = requestAnimationFrame(vizFrame);
+  }
+}
+/** 选一张本地图片当封面（隐藏的 file input，选中后自动清理） */
+function pickCoverImage() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/*";
+  input.style.display = "none";
+  input.addEventListener("change", () => {
+    const f = input.files?.[0];
+    input.remove();
+    if (f) void useCoverImage(f);
+  });
+  document.body.appendChild(input);
+  input.click();
+}
+/** 把用户给的图片压到 512×512 JPEG 存进曲库（和导入时的处理保持一致，避免库里塞大图） */
+async function useCoverImage(file: File) {
+  const s = songs[editIndex];
+  if (!s) return;
+  if (!/^image\//i.test(file.type) && !/\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(file.name)) {
+    editStatus("这不是图片文件（支持 PNG / JPG / WebP / GIF / BMP）", "warn");
+    return;
+  }
+  const raw = await new Promise<string | null>((res) => {
+    const fr = new FileReader();
+    fr.onload = () => res(String(fr.result || ""));
+    fr.onerror = () => res(null);
+    fr.readAsDataURL(file);
+  });
+  const dataUrl = raw ? await coverToDataUrl(raw) : null;
+  if (!dataUrl) {
+    editStatus("这张图片读不出来，换一张试试", "warn");
+    return;
+  }
+  s.cover = dataUrl;
+  persist(s);
+  paintEditCover(dataUrl);
+  markCoverChanged();
+  editStatus(`封面已设为「${file.name}」（约 ${Math.round(dataUrl.length / 1024)}KB，已写进曲库）`);
+}
+/** 从音频文件重新抠内嵌封面 / 同目录封面图 */
+async function reloadEmbeddedCover() {
+  const s = songs[editIndex];
+  if (!s) return;
+  if (s.srcUrl) {
+    editStatus("这一首是 B 站缓存导入的，源文件是 m4s，读不到内嵌封面 —— 可以自己选一张图片当封面", "warn");
+    return;
+  }
+  editStatus("正在从音频文件里读封面…");
+  let got: string | null = null;
+  if (desktop?.readCover && s.filePath) {
+    try {
+      const rc = await desktop.readCover({ path: s.filePath });
+      if (rc && rc.dataUrl) got = rc.dataUrl;
+      if (rc && rc.error) editStatus("内嵌封面读取失败：" + rc.error, "warn");
+    } catch (e) {
+      editStatus("内嵌封面读取失败：" + String((e as any)?.message || e), "warn");
+    }
+  }
+  if (!got && s.file) {
+    try {
+      const meta = await readTags(s.file);
+      if (meta.cover) got = meta.cover;
+      if (meta.title && !editDraft.title) editDraft.title = meta.title;
+      if (meta.artist && !editDraft.artist) editDraft.artist = meta.artist;
+      if (meta.album && !editDraft.album) editDraft.album = meta.album;
+      stampEditFields();
+    } catch {
+      /* ignore */
+    }
+  }
+  if (!got) {
+    editStatus("这个文件里没有内嵌封面，同目录也没有 cover / folder 图片", "warn");
+    return;
+  }
+  const dataUrl = await coverToDataUrl(got);
+  if (!dataUrl || dataUrl === s.cover) {
+    editStatus("读到的封面和现在这张一样", "warn");
+    return;
+  }
+  s.cover = dataUrl;
+  persist(s);
+  paintEditCover(dataUrl);
+  markCoverChanged();
+  editStatus("封面已按音频文件里的内嵌封面 / 同目录图片更新");
+}
+/** 整条重新识别：标题 / 艺术家 / 专辑 / 封面都从文件里重读一遍，填进表单（点 SAVE 才落库） */
+async function rereadMetadata() {
+  const s = songs[editIndex];
+  if (!s) return;
+  if (!s.file) {
+    editStatus("这一首没有原始文件（已入库的旧曲目），读不到标签 —— 可以手工填", "warn");
+    return;
+  }
+  editStatus("正在重新识别…");
+  try {
+    const meta = await readTags(s.file);
+    const fb = niceName(s.file.name);
+    editDraft.title = meta.title || fb.title || editDraft.title;
+    editDraft.artist = meta.artist || fb.artist || editDraft.artist;
+    editDraft.album = meta.album || editDraft.album;
+    stampEditFields();
+    if (meta.cover) {
+      const dataUrl = await coverToDataUrl(meta.cover);
+      if (dataUrl) {
+        s.cover = dataUrl;
+        persist(s);
+        paintEditCover(dataUrl);
+        markCoverChanged();
+      }
+    }
+    editStatus("重新识别完成：标题 / 艺术家 / 专辑已填好，点 SAVE 保存");
+  } catch (e) {
+    editStatus("重新识别失败：" + String((e as any)?.message || e), "warn");
+  }
+}
+function stampEditFields() {
+  const set = (id: string, v: string) => {
+    const el = document.getElementById(id) as HTMLInputElement | null;
+    if (el && el.value !== v) el.value = v;
+  };
+  set("p-edit-title", editDraft.title);
+  set("p-edit-artist", editDraft.artist);
+  set("p-edit-album", editDraft.album);
+}
+function paintEditCover(src: string) {
+  const box = document.getElementById("p-edit-cover");
+  if (!box) return;
+  let img = box.querySelector("img") as HTMLImageElement | null;
+  if (!img) {
+    box.querySelector(".edit-cover-empty")?.remove();
+    img = document.createElement("img");
+    img.id = "p-edit-cover-img";
+    box.appendChild(img);
+  }
+  img.src = src;
+}
+/** 封面变了：让终端与三维场景跟着换（main.ts 监听 rhine-cover） */
+function markCoverChanged() {
+  window.dispatchEvent(new CustomEvent("rhine-cover", { detail: { index: editIndex } }));
+}
+/** 保存编辑里的三个文本字段 */
+export function applySongEdit(): { ok: boolean; message: string } {
+  const s = songs[editIndex];
+  if (!s) return { ok: false, message: "没有正在编辑的曲目" };
+  const t = (editDraft.title || "").trim();
+  const a = (editDraft.artist || "").trim();
+  const b = (editDraft.album || "").trim();
+  if (!t && !a && !b) return { ok: false, message: "标题、艺术家、专辑不能全空" };
+  s.title = t || "未命名曲目";
+  s.artist = a || "未知艺术家";
+  s.album = b || "未知专辑";
+  persist(s);
+  const changed = [];
+  if (s.id === currentId) changed.push("播放条");
+  changed.push("档案阵列", "详情面板");
+  return { ok: true, message: `已保存《${s.title}》（${changed.join(" / ")}已同步）` };
 }
 /** 详情区渲染完成后调用：接管频谱画布并点亮当前歌词行。 */
 export function mountSongDetail(root: ParentNode) {
@@ -1381,13 +1794,19 @@ audio.addEventListener("timeupdate", () => {
   if (td) td.textContent = fmt(dur);
   /* 位置只为"下次接着放"而存：内存里逐帧更新，落库有两条保护 ——
      （a）每 4 秒一次的兜底落库（用户反馈"点歌还是从头开始"就是把进度丢在了崩溃/强杀上），
-     （b）暂停 / 切歌 / 关窗时各落一次，与原来一致。 */
+     （b）暂停 / 切歌 / 关窗时各落一次，与原来一致。
+     ★ 这三条路径全部要先过 rememberPos()：之前只有"读"的那一侧（loadSongAudio）加了这道闸，
+       写的一侧一个都没加 —— 于是关了"记住进度"之后，曲目里的 pos、IndexedDB、
+       localStorage 播放头照旧每 4 秒写一次，下次启动照样"接着上次听"。
+       用户看到的现象就是"还是存在某些歌曲会记录进度"。 */
   const s = currentSong();
   if (s && dur) {
-    s.pos = cur;
-    if (cur - posSavedAt >= 4) {
-      posSavedAt = cur;
-      persist(s);
+    if (rememberPos()) {
+      s.pos = cur;
+      if (cur - posSavedAt >= 4) {
+        posSavedAt = cur;
+        persist(s);
+      }
     }
     // 播放条上那行"上次听到这里"的提示，一旦真的开始播就撤掉
     markRestored(false);
@@ -1422,7 +1841,7 @@ audio.addEventListener("loadedmetadata", () => {
 });
 /* 播放真正开始后再补一次续播：个别容器在 loadedmetadata 阶段还寻址不了 */
 audio.addEventListener("playing", () => {
-  if (pendingSeek > 3 && audio.currentTime < 1 && audio.duration > pendingSeek + 5) {
+  if (rememberPos() && pendingSeek > 3 && audio.currentTime < 1 && audio.duration > pendingSeek + 5) {
     try {
       audio.currentTime = pendingSeek;
     } catch {
@@ -1436,7 +1855,7 @@ audio.addEventListener("playing", () => {
 });
 audio.addEventListener("pause", () => {
   const s = currentSong();
-  if (s) {
+  if (s && rememberPos()) {
     s.pos = audio.currentTime || 0;
     (s as any)._savedAt = Date.now();
     persist(s);
@@ -1477,7 +1896,7 @@ document.addEventListener("visibilitychange", () => {
 });
 function savePosition() {
   const s = currentSong();
-  if (s && audio.currentTime > 3) {
+  if (s && rememberPos() && audio.currentTime > 3) {
     s.pos = audio.currentTime;
     persist(s);
   }
@@ -1495,6 +1914,17 @@ function savePosition() {
      · 再用 `loadedId = null` 标明"还没装进 audio"，点播放时就真的会去加载。 */
 const LS_PLAYHEAD = "rhine-playhead";
 function savePlayhead() {
+  /* 关了"记住进度"就一个字都不落，并且把之前已经存下的播放头清掉 ——
+     否则下次启动还是会被 restorePlayhead 捡起来显示"上次听到这里"，
+     那正是用户说的"某些歌曲还是在记录进度"。 */
+  if (!rememberPos()) {
+    try {
+      localStorage.removeItem(LS_PLAYHEAD);
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
   const s = currentSong();
   if (!s) return;
   try {
@@ -1504,6 +1934,9 @@ function savePlayhead() {
   }
 }
 function restorePlayhead() {
+  /* 两个偏好都要求才恢复：rememberPos 管"记不记"，resumeLast 管"启动要不要接上"。
+     任一为假都不该在启动时把播放条摆到上次那首的位置上（这就是"还在记录进度"的观感来源）。 */
+  if (!rememberPos() || !playbackPrefs.resumeLast) return;
   let saved: { id?: string; pos?: number } | null = null;
   try {
     saved = JSON.parse(localStorage.getItem(LS_PLAYHEAD) || "null");
@@ -1625,6 +2058,10 @@ function applyLibrary(saved: Song[]) {
     orderSeq = songs.reduce((m, s) => Math.max(m, s.order || 0), 0) + 1;
     currentId = null;
     loadedId = null;
+    /* ★ 读了库先看偏好：关了"记住进度"就把读回来的进度在内存里清零。
+       不清的话这些旧值会跟着后面任何一次 persist()（点歌 / 收藏 / 改信息）原样写回库，
+       再进一次"怎么还有进度"的错觉。只清内存、不额外写库 —— 下次自然落库时写的就是 0。 */
+    if (!rememberPos()) for (const s of songs) s.pos = 0;
   }
   if (VIZ_TEST) (window as any).__libraryLoaded = songs.length;
   /* 曲库到位后，先按"上次在听的那首 + 上次的位置"把播放条恢复出来，

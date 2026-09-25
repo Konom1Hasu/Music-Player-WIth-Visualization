@@ -1,0 +1,131 @@
+# ============================================================================
+#  自动构建并发布「一键安装包」
+#
+#  触发方式
+#    · 推一个 v* 标签（scripts\release.ps1 会做这件事）→ 构建 + 传到 Release
+#    · 手动 workflow_dispatch → 只构建，产物作为 Actions artifact 下载
+#
+#  产物
+#    dist\安装包\音乐播放器-Setup-<版本>.exe
+#      单文件、按用户安装、不需要管理员权限。用户下载后双击即可。
+#
+#  与仓库既有流程的关系
+#    · 构建仍然只有一条路：scripts\build-portable.ps1 产出便携目录，
+#      installer\music-player.iss 再把它包成安装包 —— CI 不另起一套打包逻辑。
+#    · 标签必须与 app\package.json 的版本号一致（release.ps1 先升版本再打标签），
+#      不一致直接失败，避免发出"标签写 2.1.2、实际装 2.1.1"的包。
+# ============================================================================
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-installer:
+    name: 构建 Windows 一键安装包
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 取源码
+        uses: actions/checkout@v4
+
+      # 界面（app-rhine）用 Vite 构建，所以需要 Node；
+      # 应用本身（app/）是纯 JS，不需要打包步骤。
+      - name: 准备 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: app-rhine/package-lock.json
+
+      - name: 安装界面依赖
+        working-directory: app-rhine
+        run: npm ci
+
+      - name: 标签与 package.json 版本号一致性
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $pkg = Get-Content 'app/package.json' -Raw | ConvertFrom-Json
+          $tag = '${{ github.ref_name }}'
+          if ($tag -ne "v$($pkg.version)") {
+            throw "标签 $tag 与 app/package.json 的版本 v$($pkg.version) 不一致：先跑 scripts\release.ps1 升版本再打标签"
+          }
+          Write-Host "标签 $tag 与 package.json 一致"
+
+      - name: 文档一致性检查
+        run: node scripts\文档一致性验证.js
+
+      - name: 离线回归验证（数据管控 / 设置持久化 / ID3 编码）
+        shell: pwsh
+        run: |
+          node scripts\数据管控验证.js
+          node scripts\设置持久化验证.js
+          node scripts\ID3编码验证.js
+
+      - name: 安装 Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: 构建便携版并打包成 Setup.exe
+        shell: pwsh
+        run: .\scripts\build-installer.ps1
+
+      - name: 收集产物信息
+        id: info
+        shell: pwsh
+        run: |
+          $pkg = Get-Content 'app/package.json' -Raw | ConvertFrom-Json
+          $setup = Get-ChildItem 'dist\安装包\*.exe' | Select-Object -First 1
+          if (-not $setup) { throw '没有生成 Setup.exe' }
+          $sha = (Get-FileHash $setup.FullName -Algorithm SHA256).Hash
+          "version=$($pkg.version)"      >> $env:GITHUB_OUTPUT
+          "setup_name=$($setup.Name)"    >> $env:GITHUB_OUTPUT
+          "setup_sha256=$sha"            >> $env:GITHUB_OUTPUT
+          Write-Host "产物：$($setup.Name)（$([math]::Round($setup.Length/1MB,1)) MB）"
+          Write-Host "SHA256：$sha"
+
+      - name: 上传 Actions 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: 音乐播放器-Setup-${{ steps.info.outputs.version }}
+          path: dist/安装包/*.exe
+          if-no-files-found: error
+
+      - name: 发布到 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag  = '${{ github.ref_name }}'
+          $ver  = '${{ steps.info.outputs.version }}'
+          $name = '${{ steps.info.outputs.setup_name }}'
+          $sha  = '${{ steps.info.outputs.setup_sha256 }}'
+          $file = (Get-ChildItem 'dist\安装包\*.exe' | Select-Object -First 1).FullName
+          # 用数组拼说明文字，不用 here-string：YAML 的块缩进不允许终止符回到行首
+          $notes = @(
+            "下载下面的 **$name**，双击即可安装。",
+            "",
+            "- 单文件安装包，**按用户安装**（装到 ``%LOCALAPPDATA%\Programs\音乐播放器``），不弹 UAC、不需要管理员",
+            "- 自动创建桌面与开始菜单快捷方式，装完可直接勾选启动",
+            "- 卸载走「应用和功能」或开始菜单里的「卸载 音乐播放器」；**曲库与设置不会被删除**",
+            "- 不想安装也可以用便携版：把 ``dist\音乐播放器-win32-x64\`` 整个文件夹拷走，双击其中的 exe",
+            "",
+            "版本 $ver · SHA256（$name）：``$sha``"
+          ) -join [Environment]::NewLine
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag 已存在，覆盖上传"
+            gh release upload $tag $file --clobber
+          } else {
+            gh release create $tag $file --title "音乐播放器 $tag" --notes $notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw "上传 Release 失败（退出码 $LASTEXITCODE）" }
+          Write-Host "已发布：$tag"

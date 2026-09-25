@@ -137,34 +137,72 @@ node scripts\数据管控验证.js app     # 16 项断言，含"从源码摘出�
 
 ## 快速开始
 
-### 从源码获取
+### 下载安装包（最终用户，推荐）
+
+到 **[Releases](https://github.com/Konom1Hasu/Music-Player-WIth-Visualization/releases)** 下载
+`音乐播放器-Setup-x.y.z.exe`，**双击就能装**：
+
+```
+欢迎  →  选择目录（默认装到 %LOCALAPPDATA%\Programs\音乐播放器）
+      →  附加任务（☑ 创建桌面快捷方式，默认勾选、可取消）
+      →  安装  →  完成（可勾"立即运行"）
+```
+
+- 单文件安装包，**按用户安装**，不弹 UAC、不需要管理员
+- 桌面快捷方式是**可选项**（不想要就取消勾选）；开始菜单项一定会建
+- 卸载走「应用和功能」，或开始菜单里的「卸载 音乐播放器」；**曲库与设置不会被删除**
+- 装新版本会覆盖到同一目录（不会并存两份）
+
+安装包由 GitHub Actions 在打标签时自动构建并上传（见
+[docs/构建与安装.md §3.7](docs/构建与安装.md#37-自动构建与发布github-actions)），
+不需要自己构建。
+
+### 从源码一键安装到本机（开发）
+
+1. 拿到仓库（`git clone`，或直接解压压缩包）
+2. **双击根目录的 `安装.bat`**
+
+双击之后它会自己完成：构建（需要时）→ 安装到本机 → 创建桌面 / 开始菜单快捷方式 →
+**直接打开播放器**；成功时窗口自动关掉，不用再按键，也不用另外去点快捷方式。
+
+> 不用先"构建"再"安装"，也**不需要装 Node.js** —— 没有 Node 依赖时会跳过界面重建、
+> 沿用仓库里已有的界面产物。更多选项（自定义目录 / 装完不启动 / 只复制文件）见
+> [docs/构建与安装.md §5](docs/构建与安装.md#5-安装到本机)。
+
+### 免安装（便携版）
+
+1. 下载或构建 `dist\音乐播放器-win32-x64\` 整个文件夹
+2. 双击 `音乐播放器.exe`
+
+> 便携版**不需要安装**，整个文件夹可以放在 U 盘里带走。删除文件夹即完成卸载。
+
+### 自己打安装包 / 从源码构建
 
 ```powershell
 git clone https://github.com/Konom1Hasu/Music-Player-WIth-Visualization.git
 cd Music-Player-WIth-Visualization
 
-# 准备 Electron 运行时 + 同步源码（约 250 MB，首次需联网下载一次）
+# 1. 准备 Electron 运行时 + 同步源码（约 250 MB，首次需联网下载一次）
 .\scripts\build-portable.ps1
 
-# 运行
+# 2. 直接运行便携版
 .\dist\音乐播放器-win32-x64\音乐播放器.exe
+
+# 或者：打成单文件一键安装包（需要 Inno Setup 6）
+#    winget install -e --id JRSoftware.InnoSetup
+.\scripts\build-installer.ps1        # 也可以双击 打包安装包.bat
+# 产物：dist\安装包\音乐播放器-Setup-<版本>.exe
+```
+
+改了界面源码（`app-rhine/`）之后要让它进包，得先装依赖再构建：
+
+```powershell
+cd app-rhine; npm install; cd ..
+.\scripts\build-portable.ps1
 ```
 
 > 仓库出于体积考虑**不包含** Electron 运行时（约 222 MB，其中 `音乐播放器.exe` 单文件 172 MB，
 > 超过 GitHub 的 100 MB 单文件上限）。首次构建会自动下载并解压，之后完全离线复用。
-
-### 直接使用（免安装）
-
-1. 下载或构建 `dist\音乐播放器-win32-x64\` 整个文件夹
-2. 双击 `音乐播放器.exe`
-3. 把音乐文件或文件夹拖进窗口即可
-
-> 便携版**不需要安装**，整个文件夹可以放在 U 盘里带走。删除文件夹即完成卸载。
-
-### 一键安装到本机
-
-双击根目录的 `安装.bat`（或运行 `scripts\install.ps1`），会把程序安装到
-`%LOCALAPPDATA%\Programs\音乐播放器`，并在桌面与开始菜单创建快捷方式。
 
 ---
 
@@ -257,11 +295,17 @@ cd Music-Player-WIth-Visualization
 │   ├── verification/           # 它自己的验证文档
 │   ├── AGENTS.md               # 它自己的协作规范（保留，供上游对齐）
 │   └── DESIGN.md               # 它自己的视觉与动效基准（权威配色/时间轴依据）
+├── installer/                  # 一键安装包的定义（Inno Setup）
+│   └── music-player.iss        #    按用户安装 / 快捷方式 / 卸载；由 CI 或本地脚本编译
+├── .github/
+│   └── workflows/
+│       └── release.yml         # 推 v* 标签即自动构建 Setup.exe 并上传 Release
 ├── versions/                   # 历史版本快照（可视化回滚用）
 │   ├── README.md               # 版本对照表 + 回滚说明
 │   └── *.html                  # 12 个关键节点的逐字节快照
 ├── scripts/
 │   ├── build-portable.ps1      # 构建便携版（同步 app/ 并准备 Electron 运行时）
+│   ├── build-installer.ps1     # 把便携版打成单文件一键安装包（Inno Setup）
 │   ├── install.ps1             # 安装到本机 + 创建快捷方式 + 生成卸载脚本
 │   ├── use-version.ps1         # 回滚 app/index.html 到某个历史版本
 │   ├── push-to-github.ps1      # 一条命令完成提交推送 + 推标签（自动适配受限网络）
@@ -269,6 +313,8 @@ cd Music-Player-WIth-Visualization
 │   ├── release.ps1             # 发布：升版本号 → 查文档 → 验证 → 构建 → 打标签 → 推送
 │   ├── glb-inspect.js          # 读 GLB：场景树 / 材质 / 包围盒（核对 Blender 导出件）
 │   ├── 生成观测探针.mjs         # 生成观测探针页（预置曲目 + 回传实测值，核对续播与频谱指标）
+│   ├── 曲目编辑探针.mjs         # 核对详情区的曲目信息编辑与封面读取（表单字段 / 落库 / 同步）
+│   ├── 删除歌曲探针.mjs         # 核对播放列表点 ✕ 移除：列表行、IndexedDB 与播放条是否同步
 │   ├── 频谱离线观测.mjs         # 不启动浏览器直接跑频谱流水线，量柱高（无头环境测不到柱高时用它）
 │   ├── 版面探针.mjs             # 注入量版面脚本：把播放条/页脚等几何换算回基准坐标并算重叠
 │   ├── 观测服务.js              # 观测用静态服务：托管构建产物 + 收集页面回传的实测值
@@ -296,8 +342,9 @@ cd Music-Player-WIth-Visualization
 ├── 设计参考-图A-档案纸面.png     # 设计参考：浅色「纸张 / 档案」
 ├── 设计参考-图B-仪器夜间.png     # 设计参考：深色「仪器 / 夜间」
 ├── 屏幕截图 2026-09-24 101909.png # 1.4.0 的问题现场：详情区把歌曲塞进档案字段
-├── 构建.bat                    # 双击构建
-├── 安装.bat                    # 双击安装
+├── 构建.bat                    # 双击构建便携版
+├── 打包安装包.bat               # 双击打一键安装包（Setup.exe）
+├── 安装.bat                    # 双击安装到本机（构建 + 安装 + 启动）
 ├── 推送.bat                    # 双击推送到 GitHub
 ├── .gitignore
 ├── LICENSE
@@ -345,24 +392,22 @@ cd Music-Player-WIth-Visualization
 
 ## 安装
 
-```powershell
-.\scripts\install.ps1
-```
+**双击根目录的 `安装.bat`** 就够了（等价于 `.\scripts\install.ps1 -Launch`）：
 
-行为：
-
-1. 调用构建脚本确保产物存在
-2. 复制到 `%LOCALAPPDATA%\Programs\音乐播放器`（已存在则先清空）
+1. 调用构建脚本确保产物存在（没有 Node 依赖时沿用已有界面产物）
+2. 装到 `%LOCALAPPDATA%\Programs\音乐播放器`（已存在则先清空；程序在运行会先结束进程）
 3. 创建桌面快捷方式与开始菜单快捷方式
 4. 在同目录写入 `卸载.ps1` / `卸载.bat`
-5. 可选 `-Launch` 参数，安装完直接启动
+5. 启动程序（成功后窗口自动关闭，无需再按键）
 
 ```powershell
-# 安装并立即启动
-.\scripts\install.ps1 -Launch
+.\scripts\install.ps1              # 只安装，不启动
+.\scripts\install.ps1 -Launch      # 安装并启动（= 双击 安装.bat）
+.\安装.bat -NoLaunch               # 双击安装，但装完不启动
+.\scripts\install.ps1 -InstallDir 'D:\Apps\音乐播放器' -Launch   # 自定义目录
 ```
 
-卸载：运行安装目录下的 `卸载.bat`，或直接删除该文件夹。
+卸载：运行安装目录下的 `卸载.bat`，或直接删除该文件夹（不写注册表）。
 
 ---
 

@@ -281,6 +281,35 @@ else {
     Write-Ok '构建完成'
 }
 
+# ---------------------------------------------------------------- 6b. 一键安装包
+# 有 Inno Setup 就顺手编译一次 Setup.exe：
+#   · 能在这里就发现 .iss 的问题，比等推完标签、CI 失败再回来查便宜得多；
+#   · 没装编译器就跳过 —— 推标签后由 .github\workflows\release.yml 编译并挂到 Release。
+$installerScript = Join-Path $PSScriptRoot 'build-installer.ps1'
+$isccHere = @(
+    (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
+    (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'),
+    (Join-Path $env:ProgramData 'chocolatey\bin\ISCC.exe')
+) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+
+if ((Test-Path $installerScript) -and $NoBuild) {
+    Write-Step '一键安装包'
+    Write-Dim '已指定 -NoBuild，跳过安装包编译（CI 会在打标签后编译）'
+}
+elseif ((Test-Path $installerScript) -and $isccHere) {
+    Write-Step '编译一键安装包（Setup.exe）'
+    Write-Dim "编译器：$isccHere"
+    & $installerScript -NoBuild
+    if ($LASTEXITCODE -ne 0) { throw '安装包编译失败：先修 installer\music-player.iss，再重新发布。' }
+    Write-Ok '安装包编译通过'
+}
+elseif (Test-Path $installerScript) {
+    Write-Step '一键安装包'
+    Write-Warn2 '本机没有 Inno Setup（ISCC.exe），跳过：推标签后由 CI 编译再挂到 Release'
+    Write-Dim '想本地也出一份：winget install -e --id JRSoftware.InnoSetup'
+}
+
 # ---------------------------------------------------------------- 7. 提交 + 标签
 Write-Step '提交并打标签'
 

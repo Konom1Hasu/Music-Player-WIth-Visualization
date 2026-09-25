@@ -159,33 +159,48 @@ $DistDir  = Join-Path $RhineDir 'dist'
 $UiDir    = Join-Path $AppDir 'ui'
 
 if (Test-Path (Join-Path $RhineDir 'package.json')) {
-    Write-Step '构建界面产物：app-rhine（vite build）'
+    # ★ "只想装上用"的人不该被迫先装 Node + npm install。
+    #   没有 node_modules 就跳过界面重建、沿用 app\ui 里已有的构建产物；
+    #   只有连产物都没有时才当成错误。要拿到界面源码的最新改动，
+    #   按下面的提示补一次 npm install 再重建即可。
+    $rebuildUi = $true
     if (-not (Test-Path (Join-Path $RhineDir 'node_modules'))) {
-        throw "app-rhine\node_modules 不存在，先在该目录执行 npm install"
-    }
-    Push-Location $RhineDir
-    try {
-        # ★ EAP 必须在调用前后放宽，退出码自己判：
-        #   vite / npm 会把进度与告警写到 stderr，而本脚本开头是 $ErrorActionPreference='Stop'，
-        #   PowerShell 5.1 会把原生命令的 stderr 当成**终止性错误**直接中断 ——
-        #   表现为"vite build 一闪就失败，像是编译不过"，其实构建可能刚刚开始。
-        # （发布流程里 release.ps1 用 `| Out-Null` 调本脚本，更容易踩到这一点。）
-        $oldEap = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try { & npm.cmd run build } finally { $ErrorActionPreference = $oldEap }
-        if ($LASTEXITCODE -ne 0) {
-            throw "vite build 失败（退出码 $LASTEXITCODE）：若报 spawn EPERM，说明当前环境不允许起子进程，请在普通终端重跑"
+        if (Test-Path (Join-Path $UiDir 'index.html')) {
+            Write-Warn2 'app-rhine\node_modules 不存在：跳过界面重建，沿用 app\ui 里已有的构建产物'
+            Write-Warn2 '（本次界面源码的改动不会进包；需要的话先 cd app-rhine; npm install 再重建）'
+            $rebuildUi = $false
+        }
+        else {
+            throw "app-rhine\node_modules 不存在，app\ui 里也没有构建产物：先执行 cd app-rhine; npm install"
         }
     }
-    finally { Pop-Location }
-    if (-not (Test-Path (Join-Path $DistDir 'index.html'))) { throw "构建后找不到 $DistDir\index.html" }
 
-    Write-Step "同步界面产物：app-rhine\dist -> app\ui"
-    if (Test-Path $UiDir) { Remove-Item $UiDir -Recurse -Force }
-    New-Item -ItemType Directory -Force -Path $UiDir | Out-Null
-    Copy-Item (Join-Path $DistDir '*') $UiDir -Recurse -Force
-    # 观测探针页（_probe*.html）只用于自动化核对，不进发布包
-    Get-ChildItem $UiDir -Filter '_probe*.html' -File | Remove-Item -Force
+    if ($rebuildUi) {
+        Write-Step '构建界面产物：app-rhine（vite build）'
+        Push-Location $RhineDir
+        try {
+            # ★ EAP 必须在调用前后放宽，退出码自己判：
+            #   vite / npm 会把进度与告警写到 stderr，而本脚本开头是 $ErrorActionPreference='Stop'，
+            #   PowerShell 5.1 会把原生命令的 stderr 当成**终止性错误**直接中断 ——
+            #   表现为"vite build 一闪就失败，像是编译不过"，其实构建可能刚刚开始。
+            # （发布流程里 release.ps1 用 `| Out-Null` 调本脚本，更容易踩到这一点。）
+            $oldEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try { & npm.cmd run build } finally { $ErrorActionPreference = $oldEap }
+            if ($LASTEXITCODE -ne 0) {
+                throw "vite build 失败（退出码 $LASTEXITCODE）：若报 spawn EPERM，说明当前环境不允许起子进程，请在普通终端重跑"
+            }
+        }
+        finally { Pop-Location }
+        if (-not (Test-Path (Join-Path $DistDir 'index.html'))) { throw "构建后找不到 $DistDir\index.html" }
+
+        Write-Step "同步界面产物：app-rhine\dist -> app\ui"
+        if (Test-Path $UiDir) { Remove-Item $UiDir -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path $UiDir | Out-Null
+        Copy-Item (Join-Path $DistDir '*') $UiDir -Recurse -Force
+        # 观测探针页（_probe*.html）只用于自动化核对，不进发布包
+        Get-ChildItem $UiDir -Filter '_probe*.html' -File | Remove-Item -Force
+    }
 
     $uiJs  = @(Get-ChildItem (Join-Path $UiDir 'assets') -Filter 'index-*.js'  -File)
     $uiCss = @(Get-ChildItem (Join-Path $UiDir 'assets') -Filter 'index-*.css' -File)
@@ -211,6 +226,21 @@ Copy-Item (Join-Path $AppDir '*') $TargetApp -Recurse -Force
 
 $copied = Get-ChildItem $TargetApp -Recurse -File
 Write-Ok "已复制 $($copied.Count) 个文件"
+
+# 许可文本跟着分发件走：本程序 MIT，界面底座 RhineLabUI 也是 MIT，
+# MIT 要求"分发时随附版权与许可声明"。安装包的向导里刻意没有许可页（少点一次），
+# 所以这份声明必须落在装完之后用户能看到的目录里。
+$licenseSrc = Join-Path $Root 'LICENSE'
+if (Test-Path $licenseSrc) {
+    Copy-Item $licenseSrc (Join-Path $TargetApp 'LICENSE.txt') -Force
+    Write-Ok '附带 LICENSE.txt（MIT 声明）'
+}
+else { Write-Warn2 '仓库根目录没有 LICENSE，分发件里会缺许可声明' }
+
+# 界面底座的来源署名（上游 RhineLabUI，MIT）—— 界面产物里已有 fonts/NOTICE.txt 等，
+# 这里再补一份仓库级的来源说明，避免只留一个 LICENSE 看不出是给谁的。
+$noticeSrc = Join-Path $Root 'app\ui\fonts\NOTICE.txt'
+if (Test-Path $noticeSrc) { Write-Ok '界面字体 NOTICE 已在 app\ui\fonts\ 内' }
 
 # 校验关键文件哈希一致
 foreach ($f in $required) {

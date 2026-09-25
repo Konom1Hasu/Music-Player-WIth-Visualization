@@ -31,6 +31,12 @@ import {
   songAt,
   songDetailMarkup,
   mountSongDetail,
+  songEditMarkup,
+  mountSongEdit,
+  applySongEdit,
+  playbackSettingsMarkup,
+  setPlaybackPref,
+  type PlaybackPrefs,
   toggleFavAt,
   importFiles,
 } from "./player";
@@ -69,7 +75,7 @@ $("#stage").innerHTML = `
     <div class="archive-counter"><span class="tiny-label">TRACK / SELECT</span><div><span id="selected-number">01</span><i>/</i><span class="count-total">12</span></div></div>
     <div class="archive-navigation"><button data-action="prev" aria-label="上一个曲目">↑</button><div id="file-ticks" class="file-ticks"></div><button data-action="next" aria-label="下一个曲目">↓</button></div>
     <div class="column-navigation"><button data-action="column-prev" aria-label="上一组">←</button><div><span id="column-number">GROUP <span id="column-index">03</span> / 05</span><strong id="column-name">音乐档案</strong></div><button data-action="column-next" aria-label="下一组">→</button></div>
-    <div class="archive-hint"><kbd>←</kbd> <kbd>→</kbd> 切换分组 <span>／</span> <kbd>↑</kbd> <kbd>↓</kbd> 前后曲目 <span>／</span> <kbd>ENTER</kbd> 播放</div>
+    <div class="archive-hint"><kbd>←</kbd> <kbd>→</kbd> 切换分组 <span>／</span> <kbd>↑</kbd> <kbd>↓</kbd> 前后曲目 <span>／</span> <kbd>ENTER</kbd> 读取</div>
   </section>
   <section id="detail-ui" class="detail-ui" aria-label="档案内容" hidden>
     <button class="back-button" data-action="back">← <span>TRACK OVERVIEW</span><small>ESC</small></button>
@@ -123,6 +129,10 @@ const detailTransition = new SurfaceTransition($("#detail-ui"), undefined, 180, 
 const tabTransition = new ContentTransition();
 let modalTransition: SurfaceTransition | undefined;
 let modalClosing = false;
+/* 收尾兜底的计时器与"关完之后要做什么"：关弹窗必须一定会收尾，
+   所以把待执行的回调存下来，由 finishModalClose 统一执行（见那里的注释）。 */
+let modalCloseTimer: number | undefined;
+let pendingModalClose: (() => void) | undefined;
 let modalSiblings: { node: HTMLElement; inert: boolean }[] = [];
 let pendingDetailFocus = false;
 let bookmarkFeedback: Animation | undefined;
@@ -267,6 +277,22 @@ function refreshArchive() {
 onLibraryChange(refreshArchive);
 rebuildTicks();
 
+/* 把终端的选中态挪到第 index 份档案：刻度、文字与**三维阵列**一起走。
+   换歌（rhine-track）与"起播即打开档案"（rhine-open-track）都走这里，
+   免得两处各写一份、还漏掉阵列那一步。 */
+function focusArchive(index: number) {
+  selected = index;
+  columnMemory[fileLocation(selected).lane] = selected;
+  rebuildTicks();
+  /* ★ 三维阵列必须一起走 —— 这一步以前漏了：换歌只刷了刻度与文字，
+     左边那张卡片原地不动，于是"换歌"没有换来档案的升降与波浪动画
+     （用户反馈的"没有做到换歌的同时切换档案的动画"）。
+     scene.select() 负责抬起新卡片 / 归位旧卡片 / 发出波浪与脉冲；
+     不传方向时它取"最近的那一份"，正是"从当前这张换成那一张"的最短一条路。 */
+  scene?.select(selected);
+  updateSelection();
+}
+
 /* 正在播放的曲目变化：三维档案阵列与右侧详情一起跟过去，保持一致 */
 window.addEventListener("rhine-track", (event) => {
   const index = Number((event as CustomEvent).detail);
@@ -275,13 +301,30 @@ window.addEventListener("rhine-track", (event) => {
      直接往下走会去读 records[i].title 而抛 TypeError，整个启动流程就断在这里。 */
   if (!Number.isFinite(index) || !getSongs().length || !records[index]) return;
   if (index === selected) return;
-  selected = index;
-  columnMemory[fileLocation(selected).lane] = selected;
-  rebuildTicks();
-  updateSelection();
+  focusArchive(index);
   if (mode === "detail") renderDetail();
 });
 /* 歌词由 player.ts 自己维护：详情区只有一行"当前歌词"字幕，不需要终端重绘 */
+
+/* 起播时把"这首歌的档案"打开（播放器里的 openOnPlay，默认开）。
+   ★ 用户要求：点开某首歌就要打开它的档案，无论入口是列表里点一行、
+     还是按档案上的播放 —— 播放器两个入口都派发同一件事，这里统一处理。 */
+window.addEventListener("rhine-open-track", (event) => {
+  const index = Number((event as CustomEvent).detail);
+  /* 和 rhine-track 同样的保护：曲库刚读完、档案记录还没重建的那一瞬间不能读 records[i]。
+     开屏 / 弹窗 / 编辑态 / 360° 查看器各自占着画面，也不去抢。 */
+  if (!Number.isFinite(index) || !getSongs().length || !records[index]) return;
+  if (!ready || mode === "boot" || modal || modalClosing || editing || viewer?.isOpen) return;
+  const changed = index !== selected;
+  if (changed) focusArchive(index);
+  if (mode === "detail") {
+    /* 已经在详情里就只把内容换成这一首（换歌时才有必要重绘，避免白放一次解密动画） */
+    if (changed) renderDetail();
+    return;
+  }
+  setMode("detail");
+  audio.play("open");
+});
 
 function setMode(next: Mode) {
   const previousMode = mode;
@@ -431,11 +474,53 @@ function renderDetail() {
   // 空库时用同一套版式的占位态，界面上不出现"科室 / 编目范围 / 相关人物"这类档案词条。
   const content = $("#detail-content");
   content.classList.add("song-mode");
+  if (editing) {
+    /* 编辑态：不重放解密动画（否则每敲一次都盖一层），只换内容挂事件 */
+    content.classList.add("edit-mode");
+    content.innerHTML = songEditMarkup(selected);
+    content.setAttribute("tabindex", "-1");
+    mountSongEdit(content);
+    return;
+  }
+  content.classList.remove("edit-mode");
   content.innerHTML = songDetailMarkup(selected);
   content.setAttribute("tabindex", "-1");
   documentDecryption.reset(content, prefs.reduced || scene.decryptionFrame.phase === "clear");
   mountSongDetail(content);
 }
+/* ---------- 歌曲信息编辑：进入 / 保存 / 放弃 ----------
+   编辑态只是一个开关，真正的表单由 player.ts 出（它才拿得到曲库里的那一条）。
+   保存后要顺手把"档案阵列 + 三维封面板 + 播放条"一起刷新，否则改了标题只有详情区变。 */
+let editing = false;
+function startEditing() {
+  if (editing || !hasSongs()) return;
+  editing = true;
+  renderDetail();
+  audio.play("page-open");
+  requestAnimationFrame(() => {
+    document.querySelector<HTMLInputElement>("#p-edit-title")?.focus({ preventScroll: true });
+  });
+}
+function stopEditing(save: boolean) {
+  if (!editing) return;
+  editing = false;
+  if (save) {
+    const r = applySongEdit();
+    notify(r.message);
+    audio.play(r.ok ? "confirm" : "back");
+  } else {
+    audio.play("back");
+  }
+  refreshArchive();
+  syncCover();
+  renderDetail();
+}
+/** 封面变了：三维模型正面那块标签板与详情区都换掉 */
+window.addEventListener("rhine-cover", () => {
+  refreshArchive();
+  syncCover();
+  if (mode === "detail" && !editing) renderDetail();
+});
 /** 把当前选中曲目的封面与信息交给三维场景，印到左边那块文档模型的正面标签板上。 */
 function syncCover() {
   if (!sceneReady) return;
@@ -471,25 +556,46 @@ function openModal(kind: NonNullable<typeof modal>) {
   renderModal();
 }
 function closeModal(afterClose?: () => void) {
+  if (afterClose) {
+    const previous = pendingModalClose;
+    pendingModalClose = previous ? () => (previous(), afterClose()) : afterClose;
+  }
   if (!modal) {
-    afterClose?.();
+    const run = pendingModalClose;
+    pendingModalClose = undefined;
+    run?.();
     return;
   }
-  if (modalClosing) return;
-  modalClosing = true;
-  audio.play("page-close");
-  modalTransition!.hide(prefs.reduced, () => {
-    modal = null;
-    modalClosing = false;
-    $("#modal-root").replaceChildren();
-    modalTransition = undefined;
-    modalSiblings.forEach(({ node, inert }) => (node.inert = inert));
-    modalSiblings = [];
-    $("#archive-ui").inert = mode !== "archive";
-    $("#detail-ui").inert = mode !== "detail";
-    previousFocus?.focus({ preventScroll: true });
-    afterClose?.();
-  });
+  if (!modalClosing) {
+    modalClosing = true;
+    audio.play("page-close");
+    modalTransition!.hide(prefs.reduced, finishModalClose);
+  }
+  /* ★ 兜底：退场动画没跑完（被下一次 renderModal 的 dispose() 顶掉、
+     动画时间轴停住、或干脆没起来）也要收尾。少了这一步，modalClosing 会永远
+     停在 true —— 之后 keydown 里那句 `if (modalClosing) return;` 会把所有按键
+     整轮吞掉，弹窗节点也一直留着把整机 inert 住，用户看到的就是
+     "回车失灵、档案 / 播放条全点不动"，只能重开程序。 */
+  window.clearTimeout(modalCloseTimer);
+  modalCloseTimer = window.setTimeout(finishModalClose, 620);
+}
+/** 收尾（幂等）：恢复被弹窗按住的节点、清掉节点、执行关完之后的动作。 */
+function finishModalClose() {
+  window.clearTimeout(modalCloseTimer);
+  modalCloseTimer = undefined;
+  if (!modalClosing) return;
+  modalClosing = false;
+  modal = null;
+  $("#modal-root").replaceChildren();
+  modalTransition = undefined;
+  modalSiblings.forEach(({ node, inert }) => (node.inert = inert));
+  modalSiblings = [];
+  $("#archive-ui").inert = mode !== "archive";
+  $("#detail-ui").inert = mode !== "detail";
+  previousFocus?.focus({ preventScroll: true });
+  const run = pendingModalClose;
+  pendingModalClose = undefined;
+  run?.();
 }
 function renderModal() {
   if (!modal) return;
@@ -550,7 +656,7 @@ function updateQualitySummary() {
   summary.textContent = `实际渲染 ${canvas.width} × ${canvas.height} · ${prefs.rendering.antialias === "smaa" ? "SMAA" : "原始抗锯齿"} · 纹理 ${metrics.anisotropy ?? 1}×${metrics.limited ? " · 已达到缓冲上限" : ""}`;
 }
 function settingsMarkup() {
-  return `<h2>SYSTEM SETTINGS<small>终端偏好设置</small></h2><p class="settings-intro"><span class="operator-name">${getOperator()}</span> <span>·</span> SESSION AUTHORIZED</p><div class="settings-list"><label class="operator-field" for="operator-input"><div><strong>OPERATOR ID</strong><span>开屏「ID CONFIRMED」与页脚显示的身份标识</span></div><input type="text" id="operator-input" maxlength="40" value="${escapeHtml(getOperator())}" autocomplete="off" spellcheck="false"/></label>${audioSettingsMarkup(prefs)}<label><div><strong>REDUCED MOTION</strong><span>减少镜头移动和过渡动效</span></div><input type="checkbox" data-pref="reduced" ${prefs.reduced ? "checked" : ""}/><i class="toggle"></i></label></div>${qualityMarkup(prefs.rendering)}<div class="settings-shortcuts"><span>KEYBOARD CONTROLS</span><p><kbd>←</kbd><kbd>→</kbd> 切列 <kbd>↑</kbd><kbd>↓</kbd> 选档 <kbd>ENTER</kbd> 读取 <kbd>/</kbd> 检索 <kbd>ESC</kbd> 返回</p></div><div class="settings-bottom"><button data-action="fullscreen">FULLSCREEN <span>↗</span></button><button data-action="restart">REINITIALIZE SYSTEM <span>↻</span></button></div><div class="modal-bottom"><span>ANALYSIS OS / 1.0 · 使用 MiSans 字体（小米） <a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">字体许可</a></span><span>POWERED BY RHINE LAB</span></div>`;
+  return `<h2>SYSTEM SETTINGS<small>终端偏好设置</small></h2><p class="settings-intro"><span class="operator-name">${getOperator()}</span> <span>·</span> SESSION AUTHORIZED</p><div class="settings-list"><label class="operator-field" for="operator-input"><div><strong>OPERATOR ID</strong><span>开屏「ID CONFIRMED」与页脚显示的身份标识</span></div><input type="text" id="operator-input" maxlength="40" value="${escapeHtml(getOperator())}" autocomplete="off" spellcheck="false"/></label>${audioSettingsMarkup(prefs)}<label><div><strong>REDUCED MOTION</strong><span>减少镜头移动和过渡动效</span></div><input type="checkbox" data-pref="reduced" ${prefs.reduced ? "checked" : ""}/><i class="toggle"></i></label>${playbackSettingsMarkup()}</div>${qualityMarkup(prefs.rendering)}<div class="settings-shortcuts"><span>KEYBOARD CONTROLS</span><p><kbd>←</kbd><kbd>→</kbd> 切列 <kbd>↑</kbd><kbd>↓</kbd> 选档 <kbd>ENTER</kbd> 读取 <kbd>/</kbd> 检索 <kbd>ESC</kbd> 返回</p></div><div class="settings-bottom"><button data-action="fullscreen">FULLSCREEN <span>↗</span></button><button data-action="restart">REINITIALIZE SYSTEM <span>↻</span></button></div><div class="modal-bottom"><span>ANALYSIS OS / 1.0 · 使用 MiSans 字体（小米） <a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">字体许可</a></span><span>POWERED BY RHINE LAB</span></div>`;
 }
 
 document.addEventListener("input", (e) => {
@@ -578,6 +684,13 @@ document.addEventListener("input", (e) => {
 });
 document.addEventListener("change", (e) => {
   const el = e.target as HTMLInputElement;
+  /* 播放行为三项（记住进度 / 启动恢复 / 起播开档案）由播放器自己收口：
+     关掉"记住进度"时它还要把已经存下来的进度清一遍，不是简单写个偏好就完事。 */
+  if (el.dataset.playpref) {
+    setPlaybackPref(el.dataset.playpref as keyof PlaybackPrefs, el.checked);
+    audio.play("confirm");
+    return;
+  }
   if (el.id === "quality-preset" && Object.hasOwn(qualityPresets, el.value)) {
     prefs.rendering = { ...qualityPresets[el.value as QualityPreset] };
     savePrefs();
@@ -671,6 +784,9 @@ document.addEventListener("click", (e) => {
   }
   if (action === "import-music") importFiles();
   if (action === "play-now") togglePlay();
+  if (action === "edit-track") startEditing();
+  if (action === "edit-save") stopEditing(true);
+  if (action === "edit-cancel") stopEditing(false);
   if (action === "reset-search") {
     modal = "search";
     searchQuery = "";
@@ -688,15 +804,35 @@ document.addEventListener("click", (e) => {
         .catch(() => notify("请使用浏览器的全屏快捷键 F11"));
   }
 });
+/* 「正在打字」的判定：只有真的会吃掉字符的控件才算 —— 输入框（不含 range / checkbox
+   这类没有文本的 input）、文本域、下拉框、可编辑区。
+   ★ 旧写法是 `e.target instanceof HTMLInputElement`，于是进度条与音量条
+     （都是 input[type=range]）也被当成"正在打字"：拖过一次进度条之后焦点就停在它上面，
+     之后快捷键（回车、方向键、/）整轮失效 —— 用户反馈的"回车键有时候会失灵"就是这么来的。 */
+const TEXTUAL_INPUT = new Set([
+  "", "text", "search", "url", "tel", "email", "password", "number",
+  "date", "datetime-local", "month", "week", "time",
+]);
+function isTypingTarget(target: EventTarget | null): boolean {
+  const el = target instanceof Element ? target : null;
+  const field = el?.closest(
+    "input, textarea, select, [contenteditable=''], [contenteditable='true']",
+  ) as HTMLElement | null;
+  if (!field) return false;
+  if (field instanceof HTMLInputElement) return TEXTUAL_INPUT.has(field.type);
+  return true;
+}
 document.addEventListener("keydown", (e) => {
   if (viewer?.isOpen) return;
   if (modalClosing) {
     e.preventDefault();
     return;
   }
-  const typing = e.target instanceof HTMLInputElement;
+  const typing = isTypingTarget(e.target);
   if (e.key === "Escape") {
     if (modal) closeModal();
+    /* 编辑态优先：ESC 收起编辑面板回到曲目详情，而不是退出详情 */
+    else if (editing && mode === "detail") stopEditing(false);
     else if (mode === "detail" || (mode === "boot" && ready)) { const sound = mode === "detail" ? "back" : "ui-tick"; setMode("archive"); audio.play(sound); }
     return;
   }
@@ -736,18 +872,31 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     stepFile(e.key === "ArrowUp" ? -1 : 1);
   }
-  if (
-    e.key === "Enter" &&
-    (document.activeElement === document.body ||
-      document.activeElement?.id === "detail-content" ||
-      ["prev", "next", "column-prev", "column-next"].includes(
-        (document.activeElement as HTMLElement)?.dataset.action ?? "",
-      ) ||
-      (document.activeElement as HTMLElement)?.dataset.select)
-  ) {
+  /* ★ 回车 = 当前这一层的主操作，不再依赖一份"焦点必须在哪儿"的白名单。
+     旧写法只认 body / 详情面板 / 上一首下一首 / 档案刻度四种焦点，
+     焦点一在别处（最典型的就是刚拖过进度条，activeElement 停在 input[type=range] 上）
+     回车就整轮没有反应 —— "回车键有时候会失灵"指的就是它。
+     现在：
+       · 焦点在别的按钮 / 链接上 → 回车就是"按下这个按钮"，交给浏览器原生 click
+         （播放条上的 ☰ / ▶、档案上的 PLAY TRACK、返回键都保持各自的原意）；
+       · 其余一律按上下文执行：开屏 → 进入系统；档案阵列 → 读取档案进详情；
+         详情 → 播放 / 暂停这一首（档案栏下面那行提示写的就是「ENTER 播放」，
+         详情区的主按钮也是 PLAY；而"回车只读档案、不自动播放"说的是阵列那一层，没变）。 */
+  if (e.key === "Enter" && !editing) {
+    const active = document.activeElement as HTMLElement | null;
+    const navAction = ["prev", "next", "column-prev", "column-next"].includes(
+      active?.dataset.action ?? "",
+    );
+    const onArchiveNav = Boolean(active?.dataset.select) || navAction;
+    const onOtherControl =
+      !onArchiveNav &&
+      e.target instanceof Element &&
+      Boolean(e.target.closest("button, a[href], [role='button']"));
+    if (onOtherControl) return;
     e.preventDefault();
     if (mode === "boot") setMode("archive");
     else if (mode === "archive") openFile();
+    else if (mode === "detail") togglePlay();
   }
 });
 

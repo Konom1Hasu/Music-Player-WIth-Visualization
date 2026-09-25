@@ -332,6 +332,35 @@ console.log('\n[9] PowerShell 脚本的 UTF-8 BOM');
     else bad('所有 .ps1 语法解析通过', parseBad.join(' | '));
 }
 
+/* ---------------------------------------------------------------- 10. .bat 必须是纯 ASCII
+   cmd.exe 按**字节偏移**重读批处理：文件里只要有多字节字符（注释里写个中文路径就算），
+   读指针就会错位，后面的行会被当成新命令去执行 —— 实际踩过一次，终端里刷出
+   'Needs' 不是内部或外部命令 / 'wershell' 不是… 这种碎片，连 `winget install` 都被
+   当成命令跑了一次。所以这里常态化检查：仓库根目录与 scripts\ 下的 .bat 不得含非 ASCII 字节。 */
+console.log('\n[10] 批处理文件是纯 ASCII');
+{
+    const bats = tracked.filter(f => {
+        const low = f.toLowerCase();
+        if (!low.endsWith('.bat') && !low.endsWith('.cmd')) return false;
+        return low.indexOf('/') < 0 || low.startsWith('scripts/');
+    });
+    const dirty = [];
+    for (const rel of bats) {
+        const buf = fs.readFileSync(path.join(ROOT, rel));
+        let n = 0, firstAt = -1, firstLine = 0;
+        for (let i = 0; i < buf.length; i++) {
+            if (buf[i] > 127) { n++; if (firstAt < 0) firstAt = i; }
+        }
+        if (n) {
+            firstLine = buf.slice(0, firstAt).toString('latin1').split('\n').length;
+            dirty.push(rel + '（' + n + ' 个非 ASCII 字节，首个在第 ' + firstLine + ' 行）');
+        }
+    }
+    if (dirty.length === 0) ok(bats.length + ' 个 .bat/.cmd 都是纯 ASCII');
+    else bad('所有 .bat/.cmd 都是纯 ASCII（cmd.exe 会错位重读多字节字符）',
+        dirty.join(', ') + ' —— 中文只放在配合的 .ps1 里，.bat 只做纯 ASCII 转发');
+}
+
 /* ---------------------------------------------------------------- 结果 */
 console.log('');
 console.log('检查 ' + checked + ' 项：' + (checked - errors) + ' 通过, ' + errors + ' 失败' + (warns ? '（另有 ' + warns + ' 条提示）' : ''));

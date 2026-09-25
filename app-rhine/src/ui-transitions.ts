@@ -44,7 +44,12 @@ export class SurfaceTransition {
     this.animations = [];
     this.root.hidden = false;
     this.root.dataset.transition = show ? "opening" : "closing";
+    let timer: number | undefined;
     const complete = () => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
       if (revision !== this.revision) return;
       this.root.hidden = !show;
       this.root.dataset.transition = show ? "open" : "closed";
@@ -56,8 +61,9 @@ export class SurfaceTransition {
       complete();
       return;
     }
+    const duration = show ? this.enterDuration : this.exitDuration;
     const options: KeyframeAnimationOptions = {
-      duration: show ? this.enterDuration : this.exitDuration,
+      duration,
       easing: show ? enterEase : exitEase,
       fill: "both",
     };
@@ -77,6 +83,12 @@ export class SurfaceTransition {
         ),
       );
     }
+    /* ★ 收尾不能只靠动画的 finished：动画被 cancel、被下一次 run 抢占，
+       或者窗口被遮挡 / 无头环境里动画时间轴停住时，finished 可能永远不落定，
+       于是 finished 回调永远不执行 —— 调用方（弹窗）会把"正在收尾"这个状态
+       一直握在手里，整机跟着按不动。这里按动画时长补一条兜底，
+       complete 自身按 revision 判重，重复调用是安全的。 */
+    timer = window.setTimeout(complete, duration + 160);
     void fade.finished.then(complete).catch(() => {});
   }
 }
