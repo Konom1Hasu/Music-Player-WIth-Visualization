@@ -9,21 +9,23 @@
  *   换成 getByteFrequencyData 之后这些全都没了，观感也就回不到那版。
  *   这里保留那条流水线，只把数据源换成 AnalyserNode 的时域缓冲（getFloatTimeDomainData）。
  *
- * 与 1.3.0 的两处有意差异（用户反馈"毛刺感太严重、帧率也不够"）：
- *   1. 分析 30Hz、绘制 60Hz：worker 每 33ms 交一次频段，渲染循环每帧把"上一帧值"
- *      一阶逼近"目标值"，柱高连续滑动而不是每 33ms 跳一格。帧率翻倍，
- *      而 Goertzel 的算力开销一分没涨（还是 30 次/秒）。
- *   2. 去毛刺：抖动从"行波式正弦"改成"逐柱慢速随机"（不再横向爬行）、
- *      抖动幅度下调、量化前补一道 [1,2,1] 横向平滑并多留一级量化余量。
- *      低频那只"细针"和 14 级阶梯感都保留，只是不再毛糙。
+ * 与 1.3.0 的关系（用户 2026-09-25 明确要求"参数设置请完全参照 1.3.0 版本的播放器"）：
+ *   1. 观感参数**逐个照抄 1.3.0**：1024 点分析窗、抖动幅度 0.45、行波空间频率
+ *      0.1 + 0.2·(K−0.4)、相位步进 0.03、单边颤动 0.055、14 级量化、倾斜 55、
+ *      泵动 0.40、幂次 2.1、一阶跟随系数 0.7−0.2·(i/n) / 0.58+0.22·(i/n)。
+ *      2.0.0 曾按"毛刺感太严重"做过一轮去毛刺（慢速随机抖动、[1,2,1] 平滑、512 点窗），
+ *      已按用户要求整体撤回 —— 屏幕上看到的就是 1.3.0 那条流水线的输出。
+ *   2. 只动**架构、不动观感**：Goertzel 从主线程搬进 Web Worker（每 33ms 一帧，
+ *      与 1.3.0 的 30Hz 分析节拍一致），主线程只负责按 60fps 重画同一份 bars。
+ *      render() 不做二次插值，所以阶梯与抖动与 1.3.0 逐像素一致，只是重画次数更多。
  */
 
 export const SPECTRUM_BANDS = 120; // 对数频段数
 const BAR_N = 120; // 柱数
 const VIZ_LEVELS = 14; // 阶梯级数
-/* 分析窗长：1.3.0 是 1024。512 在 42Hz–16kHz 的对数分带下频率分辨率完全够
-   （最低带也跨多个 bin），而 Goertzel 的乘加量减半 —— 分析 30Hz 的算力只占原来一半。 */
-const ANALYSIS_WINDOW = 512;
+/* 分析窗长：★ 维持 1.3.0 的 1024 点（用户要求"参数完全参照 1.3.0"，窗长也是参数）。
+   1024 点 Hann 窗在 42Hz 处的等效噪声带宽约 5Hz，正好护住低频那根"细针"的稳定度。 */
+const ANALYSIS_WINDOW = 1024;
 /** worker 侧的分析窗长（与这里必须一致；player.ts 用它决定喂多少采样） */
 export const SPECTRUM_WINDOW = ANALYSIS_WINDOW;
 
@@ -35,13 +37,13 @@ const BASS_SIGMA = 0.048; // 左峰宽丘的 σ
 const BASS_GAIN_TARGET = 1.05; // 左峰"静态总增益"目标
 const BASS_WIDE_CENTER = 0.12; // 左峰宽丘中心（≈45Hz）
 
-/* 抖动（毛刺的主要来源）：幅度由 0.45 降到 0.16，并且改成逐柱慢速随机，
-   不再是"相位每帧 +0.03 的正弦行波" —— 后者会在柱面上留下横向爬行的毛边。 */
-const JITTER_AMP = 0.16 * JITTER_K;
-const JITTER_WOBBLE = 0.022 * JITTER_K;
-const JITTER_SLIDE = 0.5; // 逐柱随机值的滑动速度（越小越稳）
-const JITTER_MASK = (1 << 12) - 1;
-const SMOOTH_W = 0.26; // 量化前 [1,2,1] 横向平滑权重（0 = 不平滑）
+/* ★ 参数一律照 1.3.0 的原值，不做任何"调优"（用户 2026-09-25 明确要求："参数设置请完全参照
+   1.3.0 版本的播放器"）。抖动就是原来那套：相位每帧 +0.03 的正弦行波、幅度 0.45、
+   空间频率 0.1 + 0.2·(K−0.4)、单边颤动 0.055 —— 全部乘 JITTER_K（固定 1.00）。 */
+const JITTER_AMP = 0.45 * JITTER_K;
+const JITTER_FREQ = 0.1 + 0.2 * (JITTER_K - 0.4);
+const JITTER_STEP = 0.03 * JITTER_K;
+const JITTER_WOBBLE = 0.055 * JITTER_K;
 const LOG101 = Math.log10(101);
 const F_MIN = 42;
 const F_MAX = 16000;
@@ -72,15 +74,12 @@ export class Spectrum {
   private freq = new Float32Array(SPECTRUM_BANDS + 1); // 最后一位放 kick
   private bandK: Float32Array;
   private bandBoost: Float32Array;
-  /* bars = 分析节拍上的目标值；show = 每帧插值后的显示值（绘制与刻度都读它） */
+  /* bars = 每根柱的当前值（1.3.0 只有这一个数组，绘制直接读它） */
   private bars = new Float32Array(BAR_N);
-  private show = new Float32Array(BAR_N);
   private peaks = new Float32Array(BAR_N);
-  private raw = new Float32Array(BAR_N);
-  private noise = new Float32Array(BAR_N);
-  private smoothInit = false;
   /* 按量化级分桶用的容器（每帧复用，避免每帧新建数组） */
   private buckets: number[][] = Array.from({ length: VIZ_LEVELS }, () => []);
+  private jitterPhase = 0;
   private kickEnergy = 0;
   private kickRef = 0;
   private grad: CanvasGradient | null = null;
@@ -113,20 +112,18 @@ export class Spectrum {
   setMode(mode: SpectrumMode) {
     this.mode = mode;
   }
-  /** 供播放条刻度取样（显示值，已插值） */
+  /** 供播放条刻度取样（1.3.0 里也是直接读柱高数组） */
   get levels() {
-    return this.show;
+    return this.bars;
   }
-  /** 诊断用：三段数据的快照（归一化后的频段 / 流水线目标值 / 显示值） */
+  /** 诊断用：归一化后的频段 + 柱高快照 */
   snapshot() {
-    return { freq: Array.from(this.freq), bars: Array.from(this.bars), show: Array.from(this.show) };
+    return { freq: Array.from(this.freq), bars: Array.from(this.bars), show: Array.from(this.bars) };
   }
   /** 换曲时把峰值线清掉，免得上一首的峰值留在屏幕上 */
   resetPeaks() {
     this.peaks.fill(0);
     this.bars.fill(0);
-    this.show.fill(0);
-    this.smoothInit = false;
     this.kickRef = 0;
     this.kickEnergy = 0;
   }
@@ -141,8 +138,8 @@ export class Spectrum {
       s2 = s1;
       s1 = s0;
     }
-    // 归一化按窗长常数折算（1.3.0 的 N/4），分析窗长短于缓冲时读数与原来同量级
-    return Math.sqrt(Math.max(0, s1 * s1 + s2 * s2 - co * s1 * s2)) / ((ANALYSIS_WINDOW / 4) * (n / ANALYSIS_WINDOW));
+    // 1.3.0 的归一化就是 N/4（N = 分析窗长 = 1024）
+    return Math.sqrt(Math.max(0, s1 * s1 + s2 * s2 - co * s1 * s2)) / (n / 4);
   }
   private analyze(td: Float32Array) {
     const n = analysisWindow(td);
@@ -219,25 +216,11 @@ export class Spectrum {
     return s / Math.max(1, b - a);
   }
 
-  /** 逐柱慢速随机（比原来的正弦行波稳，且不会横向爬行） */
-  private noiseAt(i: number, tick: number) {
-    const n = i * JITTER_MASK;
-    const a = Math.sin(n * 12.9898 + tick * 78.233) * 43758.5453;
-    const b = Math.sin(n * 39.3468 + tick * 11.135) * 24634.6345;
-    return (a - Math.floor(a)) * 0.6 + (b - Math.floor(b)) * 0.4 - 0.5;
-  }
-
-  /* ---------- 柱高流水线（每个"分析节拍"跑一次，30Hz） ---------- */
+  /* ---------- 柱高流水线（★ 逐行照 1.3.0，不做任何平滑/降噪/调优） ---------- */
   private advance() {
     const n = BAR_N;
     const tilt = (50 - TILT_STRENGTH) / 50;
-    const noise = this.noise;
-    for (let i = 0; i < n; i++) {
-      const tgt = this.noiseAt(i, 0);
-      noise[i] += (tgt - noise[i]) * JITTER_SLIDE;
-    }
     const bars = this.bars;
-    const raw = this.raw;
     for (let i = 0; i < n; i++) {
       let v = this.sampleBand(i, n);
       v *= Math.pow(5, tilt * (1 - i / n)); // 倾斜补偿（低频端最高 5×）
@@ -246,21 +229,15 @@ export class Spectrum {
       const pumpW = Math.exp(-Math.pow((i / n - 0.07) / 0.1, 2));
       v *= 1 - pumpW * KICK_PUMP * (1 - this.kickEnergy);
       v += this.kickEnergy * 0.06 * pumpW;
-      // 抖动：向上幅度按剩余余量缩放，避免峰心两侧被一起钳住而失去针形
+      // 抖动：正弦行波（空间频率 JITTER_FREQ、相位每拍 +JITTER_STEP），
+      // 向上幅度按剩余余量缩放，避免峰心两侧被一起钳住而失去针形
+      const ph = i * JITTER_FREQ * Math.PI * 2 + this.jitterPhase;
       const headroom = Math.max(0, Math.min(1, (1 - v) / 0.45));
-      v *= 1 + noise[i] * JITTER_AMP * headroom;
-      raw[i] = Math.max(0.02, Math.min(1, v));
-    }
-    // 横向平滑 [1,2,1]：抹掉相邻柱之间一格一格的锯齿（量化前做，阶梯才是完整的）
-    for (let i = 0; i < n; i++) {
-      const l = raw[i > 0 ? i - 1 : 0];
-      const r = raw[i < n - 1 ? i + 1 : n - 1];
-      bars[i] = Math.max(0.02, Math.min(1, SMOOTH_W * (0.25 * l + 0.5 * raw[i] + 0.25 * r) + (1 - SMOOTH_W) * raw[i]));
-    }
-    for (let i = 0; i < n; i++) {
-      let v = Math.round(bars[i] * (VIZ_LEVELS - 1)) / (VIZ_LEVELS - 1); // 14 级量化（阶梯感）
-      // 量化后补一层"单边向下"的轻微颤动：满高条的顶端不会看着是死的
-      v *= 1 - JITTER_WOBBLE * (0.5 - noise[i]);
+      v *= 1 + Math.sin(ph) * JITTER_AMP * headroom;
+      v = Math.max(0.02, Math.min(1, v));
+      v = Math.round(v * (VIZ_LEVELS - 1)) / (VIZ_LEVELS - 1); // 14 级量化（阶梯感）
+      // 量化后补一层"单边向下"的颤动：满高条的顶端不会看着是死的
+      v *= 1 - JITTER_WOBBLE * (0.5 - 0.5 * Math.sin(ph));
       // 一阶跟随（系数随频率放缓）——老式的乘法自衰减会让尾巴拖得很长
       const atk = 0.7 - 0.2 * (i / n);
       const rel = 0.58 + 0.22 * (i / n);
@@ -268,10 +245,7 @@ export class Spectrum {
       // 峰值线按分析节拍衰减：放渲染循环里会随帧率变化
       this.peaks[i] = Math.max(this.peaks[i] * 0.97, bars[i]);
     }
-    if (!this.smoothInit) {
-      this.show.set(bars);
-      this.smoothInit = true;
-    }
+    this.jitterPhase += JITTER_STEP;
   }
 
   /* ---------- 绘制 ---------- */
@@ -291,7 +265,7 @@ export class Spectrum {
     const gap = w / BAR_N;
     const bw = Math.max(1, gap * 0.7);
     const grad = this.makeGrad(ctx, h);
-    const values = this.show;
+    const values = this.bars;
     /* 柱高本来就是 14 级量化过的，所以按"级"分桶画：globalAlpha 每帧只改 14 次
        （原实现是每根柱改一次，120 次状态切换），帧率能实打实抬上去。 */
     const buckets: number[][] = this.buckets;
@@ -323,7 +297,7 @@ export class Spectrum {
   private drawTimbre(ctx: CanvasRenderingContext2D, w: number, h: number) {
     const gap = w / BAR_N;
     const bw = Math.max(1, gap * 0.7);
-    const values = this.show;
+    const values = this.bars;
     const gLow = ctx.createLinearGradient(0, 0, 0, h);
     gLow.addColorStop(0, this.palette.strong);
     gLow.addColorStop(1, this.palette.base);
@@ -347,7 +321,7 @@ export class Spectrum {
     const cx = w / 2;
     const cy = h / 2;
     const base = Math.min(w, h) * 0.28;
-    const values = this.show;
+    const values = this.bars;
     ctx.strokeStyle = this.palette.ring;
     ctx.lineWidth = 1;
     ctx.globalAlpha = 0.28;
@@ -369,7 +343,7 @@ export class Spectrum {
   }
   private drawWave(ctx: CanvasRenderingContext2D, w: number, h: number) {
     const n = Math.min(BAR_N, 96);
-    const values = this.show;
+    const values = this.bars;
     ctx.strokeStyle = this.palette.light;
     ctx.lineWidth = 2;
     ctx.globalAlpha = 0.9;
@@ -396,12 +370,11 @@ export class Spectrum {
     else this.drawBars(ctx, w, h); // mix / bars 同款（鼓点已在柱高里）
   }
 
-  /** 每帧调用（渲染节拍）：把显示值朝分析目标值逼近再画，柱高因此是连续滑动的。 */
-  render(dt: number) {
-    const k = 1 - Math.exp(-dt / 0.055);
-    const show = this.show;
-    const bars = this.bars;
-    for (let i = 0; i < BAR_N; i++) show[i] += (bars[i] - show[i]) * k;
+  /** 渲染节拍：重画当前柱高。
+      1.3.0 是 30fps 边算边画，这里是 worker 30Hz 算、画布按 60fps 重画同一份 bars ——
+      **画的就是那一个数组，不做二次插值**，所以 14 级阶梯与正弦抖动的观感与 1.3.0 完全一致，
+      只是屏幕上的合成次数更多（滚动、缩放一类的合成更顺）。 */
+  render(_dt: number) {
     this.draw();
   }
   /** 分析节拍：喂一段时域数据（同步路径；worker 可用时走 applyBands） */
@@ -417,7 +390,7 @@ export class Spectrum {
     this.kickEnergy = freq.length > SPECTRUM_BANDS && isFinite(freq[SPECTRUM_BANDS]) ? freq[SPECTRUM_BANDS] : 0;
     this.advance();
   }
-  /** 没有音频时把目标值收到静默状态（渲染节拍照旧插值，收起过程也是滑动而不是跳变） */
+  /** 没有音频时把柱高收到静默状态 */
   decay() {
     let live = false;
     for (let i = 0; i < BAR_N; i++) {
@@ -426,7 +399,6 @@ export class Spectrum {
       if (this.bars[i] > 0.01) live = true;
     }
     this.kickEnergy = 0;
-    if (!this.smoothInit) this.smoothInit = true;
     return live;
   }
 }

@@ -25,7 +25,6 @@ import {
 import {
   initPlayer,
   onLibraryChange,
-  playAt,
   getSongs,
   togglePlay,
   hasSongs,
@@ -271,7 +270,10 @@ rebuildTicks();
 /* 正在播放的曲目变化：三维档案阵列与右侧详情一起跟过去，保持一致 */
 window.addEventListener("rhine-track", (event) => {
   const index = Number((event as CustomEvent).detail);
-  if (!Number.isFinite(index) || !getSongs().length) return;
+  /* ★ 必须同时确认 records 里有这一条：启动时"恢复上次播放的曲目"会在曲库刚读完、
+     而档案记录还没重建的那一瞬间派发这个事件，此时 records 还是空的 ——
+     直接往下走会去读 records[i].title 而抛 TypeError，整个启动流程就断在这里。 */
+  if (!Number.isFinite(index) || !getSongs().length || !records[index]) return;
   if (index === selected) return;
   selected = index;
   columnMemory[fileLocation(selected).lane] = selected;
@@ -414,8 +416,8 @@ function replayBootAfterModal(forcePreview: boolean) {
 }
 function openFile() {
   if (!ready) return;
-  // 选中曲目即播放（空库的占位档案不会触发）
-  if (getSongs().length) playAt(selected);
+  /* 回车 / 点击只"读取档案"（进详情），**不自动播放** —— 起播交给用户：
+     按播放键、点播放列表里的一行，或者按空格。 */
   closeModal(() => {
     setMode("detail");
     audio.play("open");

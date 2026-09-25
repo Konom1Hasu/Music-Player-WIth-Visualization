@@ -2320,6 +2320,21 @@ body.rhine-night #player-bar #p-play:hover {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 启动时播放条恢复成"上次在听的那首"：标题右侧挂一句提示，真的起播后由 JS 撤掉 */
+.p-now .p-resume {
+  display: inline-block;
+  margin-top: 5px;
+  padding: 1px 7px 2px;
+  font-size: 9px;
+  font-style: normal;
+  letter-spacing: 0.9px;
+  color: var(--p-accent);
+  border: 1px solid var(--p-hair);
+  white-space: nowrap;
+}
+.p-now.resumed #p-now-title {
+  color: var(--p-accent);
+}
 .p-spectrum {
   display: flex;
   align-items: flex-end;

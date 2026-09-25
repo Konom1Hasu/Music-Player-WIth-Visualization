@@ -34,6 +34,9 @@ const desktop = (window as any).desktop as
 
 let songs: Song[] = [];
 let currentId: string | null = null;
+/* 真正装进 <audio> 元素的是哪一首。启动时"记得上次播放的那首"只填界面不装音频，
+   所以 currentId 和 loadedId 要分开：前者是"界面上的当前曲目"，后者是"音频里的那一首"。 */
+let loadedId: string | null = null;
 let mode = "list"; // list | order | single | shuffle
 /* 诊断开关：URL 参数或 localStorage（探针页刷新后仍要生效，于是也认 localStorage）。
    只把内部对象挂到 window 上，不改变任何播放 / 频谱行为。 */
@@ -340,6 +343,29 @@ function syncRecords() {
 }
 
 /* ---------- 播放控制 ---------- */
+/** 只把音频装进 <audio> 元素（不碰界面状态）。启动时的"恢复上次曲目"不走这里。 */
+function loadSongAudio(s: Song) {
+  if (currentUrl) {
+    URL.revokeObjectURL(currentUrl);
+    currentUrl = null;
+  }
+  if (s.srcUrl) audio.src = s.srcUrl;
+  else if (s.file) {
+    currentUrl = URL.createObjectURL(s.file);
+    audio.src = currentUrl;
+  }
+  loadedId = s.id;
+  pendingSeek = s.pos > 3 ? s.pos : 0;
+  posSavedAt = s.pos > 3 ? s.pos : 0;
+  if (DIAG)
+    (window as any).__lastLoad = {
+      id: s.id,
+      title: s.title,
+      pos: s.pos,
+      pendingSeek,
+      urlKind: s.srcUrl ? "url" : s.file ? "blob" : "none",
+    };
+}
 function selectSong(id: string) {
   // 离开这首之前把最后的位置落一次（下次播放它时用来续上）
   const leaving = songs.find((x) => x.id === currentId);
@@ -350,18 +376,7 @@ function selectSong(id: string) {
   currentId = id;
   const s = songs.find((x) => x.id === id);
   if (!s) return;
-  if (currentUrl) {
-    URL.revokeObjectURL(currentUrl);
-    currentUrl = null;
-  }
-  if (s.srcUrl) audio.src = s.srcUrl;
-  else if (s.file) {
-    currentUrl = URL.createObjectURL(s.file);
-    audio.src = currentUrl;
-  }
-  pendingSeek = s.pos > 3 ? s.pos : 0;
-  posSavedAt = s.pos > 3 ? s.pos : 0;
-  if (DIAG) (window as any).__lastLoad = { id: s.id, title: s.title, pos: s.pos, pendingSeek, urlKind: s.srcUrl ? "url" : s.file ? "blob" : "none" };
+  loadSongAudio(s);
   spectrum?.resetPeaks();
   renderNow();
   // 让三维档案阵列与详情区跟上正在播放的这一首（播放列表与档案阵列是同一份数据）
@@ -374,13 +389,16 @@ export function playAt(i: number) {
   if (!songs.length) return;
   i = ((i % songs.length) + songs.length) % songs.length;
   const s = songs[i];
-  /* 点的就是当前这首：不要重新加载（重新赋 audio.src 会回到 0 秒），
-     暂停中就接着放、正在放就保持 —— 这就是"点歌不要重新播放"。 */
-  if (s.id === currentId) {
+  /* 点的就是当前这首、而且**真的装进 audio 元素**了：不要重新加载（重新赋 audio.src
+     会回到 0 秒），暂停中就接着放、正在放就保持 —— 这就是"点歌不要重新播放"。
+     判据用 currentId === loadedId：启动时"记得上次播放的那首"只填了界面，
+     还没装进 audio，那时候点它必须真的去加载。 */
+  if (s.id === currentId && s.id === loadedId) {
     if (audio.paused) audio.play().catch(() => {});
     return;
   }
   selectSong(s.id);
+  markRestored(false);
   s.plays = (s.plays || 0) + 1;
   persist(s);
   audio.play().catch(() => {});
@@ -851,21 +869,40 @@ let vizDenied = false;
 let vizRaf = 0;
 let vizLast = 0;
 let spectrum: Spectrum | null = null;
-/* ?viztest=1：不播音乐，用合成信号跑频谱 —— 用来在无音频的环境里核对频谱观感
-   （音高固定 55Hz 低音 + 440Hz / 2.4kHz，低音每 4 秒来一次"鼓点"）。 */
+/* ?viztest=1：不播音乐，用合成信号跑频谱 —— 用来在无音频的环境里核对频谱观感。
+   信号要有**真实音乐的频谱形状**：粉噪打底（每倍频程 −3dB，高频自然衰减）＋ 一条低频
+   基音与它的谐波 ＋ 每 4 秒一次的鼓点包络。
+   早先这里是"55Hz + 440Hz + 2.4kHz 三个纯音"——纯音经过 1024 点 Hann 加窗后
+   旁瓣泄漏很宽，120 个对数频段的读数几乎一样大，本帧峰值归一后全部贴到 1.0，
+   看起来就是"柱子全顶满"，完全没法用来看观感。 */
 let vizTestPhase = 0;
+let vizNoiseLp = 0; // 粉噪的一阶低通状态（跨帧连续，噪声才连贯）
+let vizNoiseIdx = 0; // 已生成的采样总数（时间轴连续，避免每帧从头开始）
+const VIZ_NOISE_HP = 0.55; // 粉噪的高频衰减（一阶低通系数）
 function vizTestTimeData(out: Float32Array) {
   const sr = actx?.sampleRate ?? 48000;
   vizTestPhase += 1;
   const beat = Math.pow(Math.max(0, Math.sin((vizTestPhase / 120) * Math.PI * 2)), 8);
-  for (let i = 0; i < out.length; i++) {
-    const t = i / sr;
-    let s = (0.35 + 0.5 * beat) * Math.sin(2 * Math.PI * 55 * t);
-    s += 0.18 * Math.sin(2 * Math.PI * 440 * t + vizTestPhase * 0.02);
-    s += 0.1 * Math.sin(2 * Math.PI * 2400 * t);
-    s += 0.04 * (Math.random() * 2 - 1);
-    out[i] = s * 0.7;
+  const n = out.length;
+  for (let i = 0; i < n; i++) {
+    const t = (vizNoiseIdx + i) / sr;
+    /* 频谱形状要**像真实音乐**：低频厚、高频薄（一阶低通 ＝ −6dB/oct，再叠白噪垫底）。
+       早先用"三个纯音"，1024 点 Hann 加窗后旁瓣泄漏很宽，120 个对数频段读数几乎一样，
+       本帧峰值归一后整排都贴到 1.0，看起来就是"柱子全顶满"——完全没法用来看观感。 */
+    vizNoiseLp += (Math.random() * 2 - 1 - vizNoiseLp) * VIZ_NOISE_HP;
+    let s = vizNoiseLp * 0.9 + (Math.random() * 2 - 1) * 0.1;
+    // 低频基音 + 谐波（受鼓点包络调制），给低频那根"细针"一点真实素材
+    const env = 0.35 + 0.65 * beat;
+    s +=
+      env *
+      (0.26 * Math.sin(2 * Math.PI * 55 * t) +
+        0.12 * Math.sin(2 * Math.PI * 110 * t) +
+        0.05 * Math.sin(2 * Math.PI * 220 * t));
+    // 中高频人声区：窄带扫频（随鼓点起伏）
+    s += env * 0.06 * Math.sin(2 * Math.PI * (700 + 400 * Math.sin(2 * Math.PI * 0.3 * t)) * t);
+    out[i] = Math.max(-1, Math.min(1, s * 0.5));
   }
+  vizNoiseIdx += n;
   return beat;
 }
 
@@ -1314,7 +1351,17 @@ export function mountSongDetail(root: ParentNode) {
     if (VIZ_TEST || DIAG) {
       (window as any).__audioEl = audio;
       (window as any).__rhineViz = vizDiag;
-      if (VIZ_TEST) (window as any).__spectrum = spectrum;
+      if (VIZ_TEST) {
+        (window as any).__spectrum = spectrum;
+        // 合成信号的峰值：用来核对 ?viztest=1 的时域数据到底有没有在跑
+        (window as any).__vizTestProbe = () => {
+          const out = new Float32Array(1024);
+          const beat = vizTestTimeData(out);
+          let peak = 0;
+          for (let i = 0; i < out.length; i++) peak = Math.max(peak, Math.abs(out[i]));
+          return { beat, peak, sr: actx?.sampleRate ?? 0 };
+        };
+      }
     }
   }
   if (vizRaf) return;
@@ -1342,7 +1389,12 @@ audio.addEventListener("timeupdate", () => {
       posSavedAt = cur;
       persist(s);
     }
+    // 播放条上那行"上次听到这里"的提示，一旦真的开始播就撤掉
+    markRestored(false);
   }
+  /* localStorage 里的播放头（上次在听哪首、听到哪）—— 每次 timeupdate 覆盖写，
+     量很小，换来的是"不管是正常关窗还是被强杀，下次启动都能显示上次的位置"。 */
+  savePlayhead();
   stepLyrics();
 });
 audio.addEventListener("loadedmetadata", () => {
@@ -1389,6 +1441,7 @@ audio.addEventListener("pause", () => {
     (s as any)._savedAt = Date.now();
     persist(s);
   }
+  savePlayhead();
   renderNow();
 });
 audio.addEventListener("ended", () => {
@@ -1427,6 +1480,74 @@ function savePosition() {
   if (s && audio.currentTime > 3) {
     s.pos = audio.currentTime;
     persist(s);
+  }
+  savePlayhead();
+}
+
+/* ---------- 启动时恢复"上次播放的那一首 + 上次的位置" ----------
+   目标很具体：**软件启动后，播放条上要显示上次在听的那首和它的进度**，
+   这样一眼能看出上次听到哪，按播放就从那儿继续。
+
+   为什么不用 `currentId = 上次那首` 就算完：那等于告诉 playAt()"这首已经装好了"，
+   于是点它会走 early-return、根本不加载。所以：
+     · 只调 `selectSong(id)`——它负责记住"界面上的当前曲目"并渲染播放条与列表，
+       不碰 audio 元素（加载音频的那几句在 `loadSongAudio()` 里）；
+     · 再用 `loadedId = null` 标明"还没装进 audio"，点播放时就真的会去加载。 */
+const LS_PLAYHEAD = "rhine-playhead";
+function savePlayhead() {
+  const s = currentSong();
+  if (!s) return;
+  try {
+    localStorage.setItem(LS_PLAYHEAD, JSON.stringify({ id: s.id, pos: Math.max(0, s.pos || 0) }));
+  } catch {
+    /* ignore */
+  }
+}
+function restorePlayhead() {
+  let saved: { id?: string; pos?: number } | null = null;
+  try {
+    saved = JSON.parse(localStorage.getItem(LS_PLAYHEAD) || "null");
+  } catch {
+    saved = null;
+  }
+  if (!saved || !saved.id) return;
+  const s = songs.find((x) => x.id === saved!.id);
+  if (!s) return; // 这首已经被移除了
+  const pos = saved.pos || s.pos || 0;
+  if (pos > 3) s.pos = pos;
+  currentId = s.id;
+  loadedId = null; // 还没装进 audio
+  /* 播放条：曲名 / 艺术家 / 进度 / 时间都按上次的位置显示。
+     audio 元素还是空的，时长取库里记的 duration。 */
+  renderNow();
+  const seek = document.querySelector("#p-seek") as HTMLInputElement | null;
+  const tc = document.querySelector("#p-time-cur");
+  const td = document.querySelector("#p-time-dur");
+  const dur = s.duration || 0;
+  if (seek && dur > 0) seek.value = String(Math.round((Math.min(pos, dur) / dur) * 1000));
+  if (tc) tc.textContent = fmt(pos);
+  if (td) td.textContent = dur > 0 ? fmt(dur) : "--:--";
+  markRestored(true);
+  if (DIAG) (window as any).__restored = { id: s.id, title: s.title, pos, dur };
+  // 让档案阵列与详情面板也停在上一首上（用户看到的是"上次听的这首"）
+  const index = songs.findIndex((x) => x.id === s.id);
+  if (index >= 0) window.dispatchEvent(new CustomEvent("rhine-track", { detail: index }));
+}
+/** 给播放条加一个"接着上次听"的提示，并在用户真的起播后清掉 */
+function markRestored(on: boolean) {
+  const el = document.querySelector<HTMLElement>("#p-now-title");
+  if (!el) return;
+  const wrap = el.parentElement;
+  if (!wrap) return;
+  wrap.classList.toggle("resumed", on);
+  const old = wrap.querySelector<HTMLElement>(".p-resume");
+  if (on && !old) {
+    const tag = document.createElement("em");
+    tag.className = "p-resume";
+    tag.textContent = "上次听到这里 · 按播放继续";
+    wrap.appendChild(tag);
+  } else if (!on && old) {
+    old.remove();
   }
 }
 
@@ -1503,9 +1624,12 @@ function applyLibrary(saved: Song[]) {
     songs = saved.sort((a, b) => (a.order || 0) - (b.order || 0));
     orderSeq = songs.reduce((m, s) => Math.max(m, s.order || 0), 0) + 1;
     currentId = null;
+    loadedId = null;
   }
   if (VIZ_TEST) (window as any).__libraryLoaded = songs.length;
-  // 曲库到位：重排档案阵列、刷新播放列表与详情区（空库时的占位档案会被真实曲目换掉）
+  /* 曲库到位后，先按"上次在听的那首 + 上次的位置"把播放条恢复出来，
+     再把档案阵列 / 播放列表 / 详情区刷一遍 —— 启动后一眼能看出上次听到哪。 */
+  restorePlayhead();
   notify();
   renderNow();
 }

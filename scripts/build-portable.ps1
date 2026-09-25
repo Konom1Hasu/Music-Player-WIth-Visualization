@@ -149,7 +149,51 @@ else {
     }
 }
 
-# ---------------------------------------------------------------- 3. 同步 app
+# ---------------------------------------------------------------- 3. 同步界面产物
+# ★ 这一节是 2.0.1 补的教训：原来的脚本只把 app/ 同步进 resources/app/，
+#   既不会重新构建 app-rhine/dist，也不会把它同步到 app/ui/ ——
+#   于是 2.0.0 的便携版里界面还是上一个版本的 JS，播放器的改动一个都没进包。
+#   现在这里强制"先构建、再同步"，并且核对 index.html 引用的产物确实换成了新的。
+$RhineDir = Join-Path $Root 'app-rhine'
+$DistDir  = Join-Path $RhineDir 'dist'
+$UiDir    = Join-Path $AppDir 'ui'
+
+if (Test-Path (Join-Path $RhineDir 'package.json')) {
+    Write-Step '构建界面产物：app-rhine（vite build）'
+    if (-not (Test-Path (Join-Path $RhineDir 'node_modules'))) {
+        throw "app-rhine\node_modules 不存在，先在该目录执行 npm install"
+    }
+    Push-Location $RhineDir
+    try {
+        # 构建输出走 stdout，交给控制台；只要退出码不为 0 就停在这里
+        & npm.cmd run build
+        if ($LASTEXITCODE -ne 0) { throw "vite build 失败（退出码 $LASTEXITCODE）" }
+    }
+    finally { Pop-Location }
+    if (-not (Test-Path (Join-Path $DistDir 'index.html'))) { throw "构建后找不到 $DistDir\index.html" }
+
+    Write-Step "同步界面产物：app-rhine\dist -> app\ui"
+    if (Test-Path $UiDir) { Remove-Item $UiDir -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $UiDir | Out-Null
+    Copy-Item (Join-Path $DistDir '*') $UiDir -Recurse -Force
+    # 观测探针页（_probe*.html）只用于自动化核对，不进发布包
+    Get-ChildItem $UiDir -Filter '_probe*.html' -File | Remove-Item -Force
+
+    $uiJs  = @(Get-ChildItem (Join-Path $UiDir 'assets') -Filter 'index-*.js'  -File)
+    $uiCss = @(Get-ChildItem (Join-Path $UiDir 'assets') -Filter 'index-*.css' -File)
+    if ($uiJs.Count -ne 1) { throw "app\ui\assets 下的 index-*.js 不是恰好一个（$($uiJs.Count) 个）：可能残留了旧产物" }
+    if ($uiCss.Count -ne 1) { throw "app\ui\assets 下的 index-*.css 不是恰好一个（$($uiCss.Count) 个）" }
+    if (-not (Select-String -Path (Join-Path $UiDir 'index.html') -Pattern $uiJs[0].Name -Quiet)) {
+        throw "app\ui\index.html 没有引用 $($uiJs[0].Name)（同步没生效）"
+    }
+    Write-Ok "界面产物：$($uiJs[0].Name)（$('{0:N0}' -f $uiJs[0].Length) B）+ $($uiCss[0].Name)（$('{0:N0}' -f $uiCss[0].Length) B）"
+}
+else {
+    Write-Warn2 'app-rhine 不存在，跳过界面构建（沿用 app\ui 里已有的产物）'
+    if (-not (Test-Path $UiDir)) { throw "既没有 app-rhine 也没有 $UiDir —— 便携版会没有界面" }
+}
+
+# ---------------------------------------------------------------- 4. 同步 app
 $TargetApp = Join-Path $OutDir 'resources\app'
 Write-Step "同步源码：app\ -> resources\app"
 
@@ -168,7 +212,7 @@ foreach ($f in $required) {
 }
 Write-Ok '哈希校验通过'
 
-# ---------------------------------------------------------------- 4. 报告
+# ---------------------------------------------------------------- 5. 报告
 $totalMB = [math]::Round((Get-ChildItem $OutDir -Recurse -File | Measure-Object Length -Sum).Sum / 1MB, 1)
 $appMB   = [math]::Round(($copied | Measure-Object Length -Sum).Sum / 1MB, 1)
 

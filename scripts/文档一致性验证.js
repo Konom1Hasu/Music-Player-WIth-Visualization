@@ -279,6 +279,59 @@ else {
     else ok('每个版本标签都有对应的更新日志段落');
 }
 
+/* ---------------------------------------------------------------- 9. PowerShell 脚本编码
+   本仓库的 .ps1 里全是中文提示。PowerShell 5.1 读无 BOM 的 .ps1 会按本地代码页
+   （本机 936）解码，UTF-8 的中文就被解成乱码 —— 而且乱码里会出现引号，
+   整个脚本直接"字符串未闭合"报错。build-portable.ps1 就这么坏过一次
+   （改它的时候把 BOM 弄丢了），所以这里常态化检查。 */
+console.log('\n[9] PowerShell 脚本的 UTF-8 BOM');
+{
+    const psFiles = tracked.filter(f => f.toLowerCase().endsWith('.ps1'));
+    const noBom = [], parseBad = [];
+    /* 解析器优先 pwsh（PS 7），退回 powershell.exe（PS 5.1）—— 语法本身两者一致。
+       沙箱（受限 stdio）下 spawn 会 EPERM，这时退化成"只查 BOM"并给一条提示，不算失败。 */
+    let parserExe = null, parserBlocked = false;
+    {
+        const cp = require('child_process');
+        for (const exe of ['pwsh', 'powershell']) {
+            try {
+                cp.execFileSync(exe, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { stdio: 'ignore' });
+                parserExe = exe;
+                break;
+            } catch (e) {
+                if (e && (e.code === 'EPERM' || e.code === 'EACCES')) { parserBlocked = true; break; }
+            }
+        }
+    }
+    for (const rel of psFiles) {
+        const abs = path.join(ROOT, rel);
+        const buf = fs.readFileSync(abs);
+        const bom = buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF;
+        if (!bom) noBom.push(rel);
+        if (bom && parserExe) {
+            try {
+                const out = require('child_process').execFileSync(parserExe, ['-NoProfile', '-NonInteractive', '-Command',
+                    '$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile(' +
+                    JSON.stringify(abs) + ',[ref]$null,[ref]$e); if($e.Count){$e | ForEach-Object {$_.Message}}; exit $e.Count'
+                ], { encoding: 'utf8' });
+                if (String(out).trim()) parseBad.push(rel + '：' + String(out).trim().split('\n')[0]);
+            } catch (e) {
+                const msg = String((e && e.stdout) || '').trim().split('\n')[0];
+                const line = rel + '：' + (msg || (e && e.message) || '解析失败');
+                /* 子进程被沙箱挡住（EPERM/EACCES）不是脚本的问题，单独记，最后降级成提示 */
+                if (/EPERM|EACCES|spawnSync/i.test(line)) parserBlocked = true;
+                else parseBad.push(line);
+            }
+        }
+    }
+    if (noBom.length === 0) ok(psFiles.length + ' 个 .ps1 都带 UTF-8 BOM');
+    else bad('所有 .ps1 都带 UTF-8 BOM', '缺 BOM（PS 5.1 下中文会变乱码、甚至语法报错）：' + noBom.join(', '));
+    if (parserBlocked) warn('能解析 .ps1', '当前环境不允许起子进程（EPERM），本次只查了 BOM');
+    else if (!parserExe) warn('能解析 .ps1', '找不到 pwsh / powershell，跳过语法解析');
+    else if (parseBad.length === 0) ok(psFiles.length + ' 个 .ps1 语法解析通过（' + parserExe + '）');
+    else bad('所有 .ps1 语法解析通过', parseBad.join(' | '));
+}
+
 /* ---------------------------------------------------------------- 结果 */
 console.log('');
 console.log('检查 ' + checked + ' 项：' + (checked - errors) + ' 通过, ' + errors + ' 失败' + (warns ? '（另有 ' + warns + ' 条提示）' : ''));

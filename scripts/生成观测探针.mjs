@@ -56,7 +56,13 @@ function flush(tag) {
 }
 post('探针已注入，t=' + Math.round(performance.now()) + 'ms');
 flush('心跳');
-window.addEventListener('error', (e) => post('页面错误 ' + e.message));
+window.addEventListener('error', (e) => {
+  post('页面错误 ' + e.message + '  @ ' + (e.filename || '?') + ':' + (e.lineno || '?'));
+  /* ★ 这里必须写 String.fromCharCode(10) 而不是 '\n'：
+     这份探针脚本是外层模板字符串里的文本，'\n' 会被外层提前解释成真正的换行，
+     生成的页面里就变成 split(' 换行 ') —— 字符串未闭合，整段内联脚本直接语法报错。 */
+  if (e.error && e.error.stack) post('栈：' + String(e.error.stack).split(String.fromCharCode(10)).slice(0, 4).join(' / '));
+});
 /* ---------- 1. 预置两首曲目：第二首带"上次停在 88 秒"的位置 ----------
    首屏加载时 initPlayer() 早就把空库读完了，所以这里预置完之后刷新一次页面，
    第二次加载才是"曲库里本来就有歌"的真实状态（也正是用户看到的现象）。 */
@@ -74,6 +80,9 @@ req.onsuccess = () => {
     srcUrl: ${JSON.stringify(wav)},
     duration: 30, fav: false, plays: 0, pos: 12, order: 1, lrc: "" });
   tx.oncomplete = () => {
+    /* 顺便写一份"上次在听"的播放头（localStorage），用来验证启动时播放条的恢复：
+       应当显示《续播测试曲》并且进度停在 12 秒。 */
+    try { localStorage.setItem('rhine-playhead', JSON.stringify({ id: 'seed-b', pos: 12 })); } catch (e) {}
     const nth = sessionStorage.getItem('probe-seeded') ? '二' : '一';
     post('预置曲目已写入（第 ' + nth + ' 次加载）');
     flush('预置');
@@ -130,6 +139,20 @@ const ROWS = () => {
 setTimeout(async () => {
   const rows = await waitFor(ROWS, 25000);
   post('播放列表行数 = ' + (rows ? rows.length : 0) + (rows ? '（' + rows[0].textContent.trim().slice(0, 24) + ' / ' + rows[1].textContent.trim().slice(0, 24) + '）' : ''));
+  /* A0. 启动时播放条是否恢复了"上次在听的那首 + 上次的位置"
+        （预置的播放头是 seed-b / 12 秒） */
+  const title = (document.querySelector('#p-now-title') || {}).textContent || '';
+  const artist = (document.querySelector('#p-now-artist') || {}).textContent || '';
+  const cur = (document.querySelector('#p-time-cur') || {}).textContent || '';
+  const durTxt = (document.querySelector('#p-time-dur') || {}).textContent || '';
+  const seekEl = document.querySelector('#p-seek');
+  const hint = document.querySelector('.p-now .p-resume');
+  post('播放条曲目 = 「' + title + '」（' + artist + '）');
+  post('播放条时间 = ' + cur + ' / ' + durTxt + '，进度条 value = ' + (seekEl ? seekEl.value : '?') + '/1000'
+    + '，提示 = ' + (hint ? '「' + hint.textContent + '」' : '无'));
+  post('结论：' + (title.indexOf('续播测试曲') >= 0 && cur === '0:12'
+    ? '启动恢复生效（显示上次那首、进度停在 0:12）'
+    : (title ? '标题恢复了但进度/时间不对（时间=' + cur + '）' : '没恢复（播放条还是空的）')));
   /* 直接读一次 IndexedDB，确认预置数据真的在库里（排除"读不出来"和"没写进去"） */
   await new Promise((res) => {
     const t0 = performance.now();
@@ -235,18 +258,34 @@ setTimeout(async () => {
   const vals = Array.from(sp.levels);
   const max = Math.max.apply(null, vals);
   const pegged = vals.filter((v) => v > 0.98).length;
-  /* 毛刺的三段对照：worker 原始频段 → 流水线目标值 → 显示值。
-     逐段下降就说明去毛刺确实在起作用（用同一份信号比，不依赖合成信号）。 */
+  /* 相邻柱高差：worker 原始频段 vs 最终柱高。
+     柱高含 1.3.0 的 14 级量化 + 正弦抖动，本来就该比原始频段更有起伏 ——
+     这里只用来看"有没有被额外加上平滑"（2.0.0 曾加过 [1,2,1] 平滑，现已按用户要求撤掉）。 */
   const rough = (arr) => {
     let d = 0;
     for (let i = 1; i < arr.length; i++) d += Math.abs(arr[i] - arr[i - 1]);
     return d / (arr.length - 1);
   };
   const snap = sp.snapshot ? sp.snapshot() : null;
+  if (window.__vizTestProbe) {
+    const t = window.__vizTestProbe();
+    post('合成信号自检：peak=' + t.peak.toFixed(4) + ' beat=' + t.beat.toFixed(3) + ' sampleRate=' + t.sr);
+  } else {
+    post('没有 __vizTestProbe（?viztest=1 未生效？viztest=' + /viztest=1/.test(location.search) + '）');
+  }
   if (snap) {
-    post('毛刺三段对照（相邻柱高差平均）: worker 原始频段 ' + rough(snap.freq).toFixed(4)
-      + '  →  流水线目标 ' + rough(snap.bars).toFixed(4)
-      + '  →  显示值 ' + rough(snap.show).toFixed(4));
+    post('渲染循环：frames=' + (vd ? vd.frames : '?') + ' rendered=' + (vd ? vd.rendered : '?')
+      + ' dt=' + (vd ? vd.dt : '?') + ' busy=' + (vd ? vd.busy : '?') + ' 循环在跑=' + (vd ? Boolean(vd.rendered) : '?'));
+    post('相邻柱高差：worker 原始频段 ' + rough(snap.freq).toFixed(4)
+      + '  →  最终柱高 ' + rough(snap.bars).toFixed(4)
+      + '（柱高有 1.3.0 的量化与抖动，起伏本就更大）');
+    post('freq 快照前 8 = ' + snap.freq.slice(0, 8).map((v) => v.toFixed(3)).join(' ')
+      + ' | max ' + Math.max.apply(null, snap.freq).toFixed(3)
+      + ' | kick ' + (snap.freq[120] === undefined ? '?' : snap.freq[120].toFixed(3)));
+    post('bars 快照前 8 = ' + snap.bars.slice(0, 8).map((v) => v.toFixed(3)).join(' ')
+      + ' | max ' + Math.max.apply(null, snap.bars).toFixed(3));
+  } else {
+    post('FAIL 拿不到 snapshot（sp.snapshot 不存在）');
   }
   post('柱数 = ' + vals.length + '，最高 = ' + max.toFixed(3) + '，顶到 0.98 以上的 = ' + pegged);
   post('毛刺指标（相邻柱高差的平均，越小越平滑）= ' + (smoothN ? (smoothAcc / smoothN).toFixed(4) : '—'));
