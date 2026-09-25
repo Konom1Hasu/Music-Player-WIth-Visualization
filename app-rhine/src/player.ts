@@ -20,6 +20,10 @@ export interface Song {
   pos: number;
   lrc?: string;
   order: number;
+  /* B 站缓存专用：s.path 是原始 .m4s 路径；triedBlob 记住"这一首已用 blob 播过"，
+     避免播放失败时反复重建副本 / 反复读字节。都不落库（落库的只有持久字段）。 */
+  triedBlob?: boolean;
+  triedHeal?: boolean;
 }
 
 const desktop = (window as any).desktop as
@@ -28,6 +32,7 @@ const desktop = (window as any).desktop as
       readCover?: (arg: { path: string }) => Promise<any>;
       findLyrics?: (p: string, t: string, a: string) => Promise<string | null>;
       scanBiliCache?: () => Promise<any>;
+      prepareBiliAudio?: (p: string, force?: boolean) => Promise<any>;
       readAudio?: (p: string) => Promise<any>;
     }
   | undefined;
@@ -426,30 +431,122 @@ export function playbackSettingsMarkup(): string {
     )
     .join("");
 }
+/* ---------- B 站缓存的音源（"导入的放不出来"就是这里断的） ----------
+   库里存的是【原始 .m4s 路径】（s.path，导入时由 bili.js 的 audioPath 写入）。要能播，两件事都得做：
+
+   ① 主进程按需生成"可播放副本"（prepare-bili-audio → bili.ensureM4a）：
+      电脑端缓存会在 mp4 前面塞 9 字节自定义头，Chromium 的解复用器不认，直接 MediaError 4。
+      副本剥掉头才认。副本落在**会话临时目录**，退出即销毁 —— 所以每次启动都得重新生成。
+   ② UI 挂在本机静态服务上（http://127.0.0.1:41739），`file://` 音源会被 Chromium 拦掉
+      （Not allowed to load local resource）→ 必须用 read-audio 读回字节转成 blob 再喂给 <audio>。
+
+   旧界面 app/index.html 一直靠"启动 ensureAllPlayable + 播放失败自愈 + blob 兜底"这三条撑住，
+   终端界面重写时整段丢了：只把按钮搬了过来，音源这一路是坏的 —— 于是"导入的不能放"。
+   现在改成播放前**按需**备好（不搞启动时全库重建，那是几十 MB 的白写）：先确保副本，
+   能读字节就用 blob，读不到才退回 file:// 碰碰运气。 */
+function fileUrlToPath(url: string): string {
+  try {
+    return decodeURIComponent(String(url || "").replace(/^file:\/\/\//i, "").replace(/^file:\/\//i, ""));
+  } catch {
+    return "";
+  }
+}
+/** 让主进程备好可播放副本并把新地址写回 s.srcUrl；返回"地址变了没有"。
+    幂等：副本已经正确时主进程直接返回原路径，几乎零开销。 */
+async function ensurePlayableSource(s: Song, force = false): Promise<boolean> {
+  if (!s || !s.path || !desktop?.prepareBiliAudio) return false;
+  try {
+    const r = await desktop.prepareBiliAudio(s.path, !!force);
+    if (r && r.ok && r.url) {
+      const changed = s.srcUrl !== r.url;
+      s.srcUrl = r.url;
+      return changed;
+    }
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+/** 把音频文件读成 blob 地址（绕开 file:// 限制）。读不到返回空串。 */
+async function blobUrlOf(s: Song): Promise<string> {
+  const p = fileUrlToPath(s.srcUrl || "") || s.path || "";
+  if (!p || !desktop?.readAudio) return "";
+  try {
+    const res = await desktop.readAudio(p);
+    if (res && res.bytes && res.bytes.byteLength) {
+      const url = URL.createObjectURL(new Blob([res.bytes], { type: res.mime || "audio/mp4" }));
+      s.triedBlob = true;
+      return url;
+    }
+  } catch {
+    /* ignore */
+  }
+  return "";
+}
+/* 起播前把待续播位置准备好（内存值，不落库） */
+function armPendingSeek(s: Song) {
+  pendingSeek = rememberPos() && s.pos > 3 ? s.pos : 0;
+  posSavedAt = rememberPos() && s.pos > 3 ? s.pos : 0;
+}
+function diagLoad(s: Song) {
+  if (!DIAG) return;
+  (window as any).__lastLoad = {
+    id: s.id,
+    title: s.title,
+    pos: s.pos,
+    pendingSeek,
+    urlKind: s.srcUrl ? (s.path ? "bili" : "url") : s.file ? "blob" : "none",
+  };
+}
+/** 装 B 站缓存那一路的音源：副本 → blob → file://（依次退）。异步，装好再 play。 */
+let loadSeq = 0;
+async function loadBiliAudio(s: Song, autoplay: boolean) {
+  const token = ++loadSeq;
+  loadedId = null; // 装好之前不算"已装载"，用户这时点它 playAt 会真的来加载
+  armPendingSeek(s);
+  diagLoad(s);
+  if (autoplay) audio.pause(); // 先把上一首停住，免得异步备源期间它还在响
+  await ensurePlayableSource(s, false);
+  if (token !== loadSeq || currentId !== s.id) return;
+  const blob = await blobUrlOf(s);
+  if (token !== loadSeq || currentId !== s.id) {
+    if (blob) URL.revokeObjectURL(blob);
+    return;
+  }
+  // blob 记进 currentUrl，下次切歌时连同上一首的一起回收
+  if (blob) {
+    if (currentUrl) URL.revokeObjectURL(currentUrl);
+    currentUrl = blob;
+  }
+  /* 读不到字节就退回 file://：本机多数情况会被 Chromium 拦掉，但真拦了会触发 error
+     自愈（重建副本 → 再试 blob），不会把这一首彻底闷死。 */
+  audio.src = blob || s.srcUrl || "";
+  loadedId = s.id;
+  if (autoplay) audio.play().catch(() => {});
+}
 /** 只把音频装进 <audio> 元素（不碰界面状态）。启动时的"恢复上次曲目"不走这里。 */
-function loadSongAudio(s: Song) {
+function loadSongAudio(s: Song, autoplay = false) {
   if (currentUrl) {
     URL.revokeObjectURL(currentUrl);
     currentUrl = null;
   }
-  if (s.srcUrl) audio.src = s.srcUrl;
-  else if (s.file) {
+  s.triedBlob = false;
+  s.triedHeal = false;
+  if (s.srcUrl) {
+    // B 站缓存：副本要在会话临时目录里重新生成，而且必须绕开 file:// 限制 —— 异步装载
+    void loadBiliAudio(s, autoplay);
+    return;
+  }
+  loadedId = null;
+  if (s.file) {
     currentUrl = URL.createObjectURL(s.file);
     audio.src = currentUrl;
   }
   loadedId = s.id;
-  pendingSeek = rememberPos() && s.pos > 3 ? s.pos : 0;
-  posSavedAt = rememberPos() && s.pos > 3 ? s.pos : 0;
-  if (DIAG)
-    (window as any).__lastLoad = {
-      id: s.id,
-      title: s.title,
-      pos: s.pos,
-      pendingSeek,
-      urlKind: s.srcUrl ? "url" : s.file ? "blob" : "none",
-    };
+  armPendingSeek(s);
+  diagLoad(s);
 }
-function selectSong(id: string) {
+function selectSong(id: string, autoplay = false) {
   // 离开这首之前把最后的位置落一次（下次播放它时用来续上）；关了"记住进度"就不落
   const leaving = songs.find((x) => x.id === currentId);
   if (leaving && rememberPos() && audio.currentTime > 3) {
@@ -459,7 +556,7 @@ function selectSong(id: string) {
   currentId = id;
   const s = songs.find((x) => x.id === id);
   if (!s) return;
-  loadSongAudio(s);
+  loadSongAudio(s, autoplay);
   spectrum?.resetPeaks();
   renderNow();
   // 让三维档案阵列与详情区跟上正在播放的这一首（播放列表与档案阵列是同一份数据）
@@ -499,11 +596,14 @@ export function playAt(i: number) {
     followWithArchive(i);
     return;
   }
-  selectSong(s.id);
+  selectSong(s.id, true);
   markRestored(false);
   s.plays = (s.plays || 0) + 1;
   persist(s);
-  audio.play().catch(() => {});
+  /* 普通文件（objectURL）在这里起播；B 站缓存那一类的音源是异步备好的
+     （要重新生成副本 + 读字节转 blob），由 loadBiliAudio 自己起播 ——
+     这里再 play() 一次只会把上一首的残留音源又推起来。 */
+  if (!s.srcUrl) audio.play().catch(() => {});
   followWithArchive(i);
 }
 /* 诊断开关：?viztest=1 / ?diag=1 时把播放内核挂到 window 上，自动化核对"点歌续播"用 */
@@ -704,16 +804,48 @@ async function addFiles(fileList: FileList | File[]) {
   if (!currentId && songs.length) selectSong(songs[0].id);
   toast(`导入完成：新增 ${added} 首`);
 }
+/* 探时长：B 站缓存那一路的 file:// 音源会被拦，失败时"确保副本 → 读字节转 blob"再测一次，
+   否则列表里这一首的时长永远是 0:00。 */
 function probeDuration(s: Song) {
   const tmp = new Audio();
-  const url = s.srcUrl || (s.file ? URL.createObjectURL(s.file) : "");
+  let url = s.srcUrl || (s.file ? URL.createObjectURL(s.file) : "");
+  let done = false;
+  const drop = (u: string) => {
+    if (u.startsWith("blob:")) URL.revokeObjectURL(u);
+  };
   tmp.preload = "metadata";
   tmp.onloadedmetadata = () => {
-    s.duration = tmp.duration || 0;
-    persist(s);
+    if (done) return;
+    done = true;
+    if (tmp.duration) {
+      s.duration = tmp.duration;
+      persist(s);
+    }
+    drop(url);
   };
-  tmp.onerror = () => {};
-  tmp.src = url;
+  tmp.onerror = () => {
+    if (done) return;
+    drop(url);
+    if (!s.path || !desktop?.readAudio) return;
+    done = true;
+    void (async () => {
+      await ensurePlayableSource(s, false);
+      const b = await blobUrlOf(s);
+      if (!b) return;
+      const t2 = new Audio();
+      t2.preload = "metadata";
+      t2.onloadedmetadata = () => {
+        if (t2.duration) {
+          s.duration = t2.duration;
+          persist(s);
+        }
+        URL.revokeObjectURL(b);
+      };
+      t2.onerror = () => URL.revokeObjectURL(b);
+      t2.src = b;
+    })();
+  };
+  if (url) tmp.src = url;
 }
 
 /* ---------- 旧曲库的乱码修复 ----------
@@ -1795,6 +1927,45 @@ export function mountSongDetail(root: ParentNode) {
   const live = (analyserNode && !audio.paused) || VIZ_TEST;
   if (live) vizRaf = requestAnimationFrame(vizFrame);
 }
+
+/* 播放失败自愈（B 站缓存这一路）：副本被会话清理、头没剥干净、file:// 被拦时，
+   强制重建副本，再退回 blob 播放。旧界面 app/index.html 里就有这一段，重写时一并丢了 ——
+   于是导入进来的曲目点了没反应也没提示。每首只自愈一次，避免来回重试。 */
+let playbackErrorHandling = false;
+audio.addEventListener("error", async () => {
+  const s = currentSong();
+  const code = audio.error ? audio.error.code : 0;
+  const why =
+    code === 4 ? "格式不支持或文件头异常" : code === 3 ? "解码失败" : code === 2 ? "读取失败" : code === 1 ? "读取被中止" : "未知错误";
+  const name = s ? `《${s.title}》` : "当前曲目";
+  if (s && s.path && desktop?.prepareBiliAudio && !playbackErrorHandling && !s.triedHeal) {
+    playbackErrorHandling = true;
+    s.triedHeal = true;
+    try {
+      toast(`${name}${why}，正在重建可播放副本…`);
+      await ensurePlayableSource(s, true); // force = 强制重建
+      if (currentId === s.id) {
+        const blob = await blobUrlOf(s);
+        if (blob) {
+          if (currentUrl && currentUrl !== blob) URL.revokeObjectURL(currentUrl);
+          currentUrl = blob;
+        }
+        const src = blob || s.srcUrl || "";
+        if (src && src !== audio.src) {
+          audio.src = src;
+          loadedId = s.id;
+          audio.play().catch(() => {});
+          playbackErrorHandling = false;
+          return;
+        }
+      }
+    } catch {
+      /* 落到下面的提示 */
+    }
+    playbackErrorHandling = false;
+  }
+  toast(`${name}无法播放：${why}${code ? `（MediaError ${code}）` : ""}`);
+});
 
 /* ---------- 事件 ---------- */
 audio.addEventListener("timeupdate", () => {
