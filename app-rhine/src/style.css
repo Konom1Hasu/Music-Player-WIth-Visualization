@@ -2192,7 +2192,7 @@ body.rhine-night #player-playlist {
 #player-bar {
   position: absolute;
   left: 59px;
-  bottom: 94px;
+  bottom: 80px;
   width: 880px;
   height: 134px;
   display: flex;

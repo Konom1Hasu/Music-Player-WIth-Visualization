@@ -32,6 +32,10 @@
 .PARAMETER Page
     相对 Root 的页面路径，默认 index.html。
 
+.PARAMETER Query
+    附加到地址后面的查询串（可以带也可以不带开头的 ?），例如 'scene=archive&time=20'。
+    用来给界面拍"某个具体状态"的快照。
+
 .PARAMETER Swiftshader
     用软件 GL 渲染 WebGL（无显卡环境必需，但会很慢）。
 
@@ -55,6 +59,7 @@ param(
     [int]$Height = 900,
     [int]$BudgetMs = 6000,
     [string]$Page = 'index.html',
+    [string]$Query = '',
     [switch]$Swiftshader,
     [switch]$KeepOpen
 )
@@ -161,7 +166,7 @@ try {
         $prof = Join-Path $OutDir ('_prof_' + [IO.Path]::GetFileNameWithoutExtension($b))
         Remove-Item $prof -Recurse -Force -ErrorAction SilentlyContinue
         $tryArgs = @($eargs | Where-Object { $_ -notlike '--user-data-dir=*' }) +
-                   @("--user-data-dir=$prof", "--screenshot=$png", ($url + $Page))
+                   @("--user-data-dir=$prof", "--screenshot=$png", ($url + $Page + $Query))
         $oldEap = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         try {
