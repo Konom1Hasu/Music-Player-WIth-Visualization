@@ -349,6 +349,10 @@ button {
   letter-spacing: 1.1px;
   opacity: 0.55;
   padding: 10px 0;
+  /* ★ 颜色必须写死：开屏这一段永远是原片的浅底（见 body.theme-dark .boot-background），
+     而 .skip 原来是继承 body 的颜色 —— 深色主题下继承到浅色，浅底浅字，
+     那个"跳过开屏"的按钮等于看不见，用户只能干等满 27 秒。 */
+  color: #080a08;
 }
 .skip span {
   margin-left: 28px;
@@ -2908,8 +2912,18 @@ body.theme-dark #stage,
 body.theme-dark .archive-atmosphere {
   background: #171a15;
 }
+/* ★ 开屏流程**不跟随深色主题**：它复刻的是参考片里的固定帧（浅底 + 深色字/线），
+   所有 ink 都是写死的深色。以前这里把 .boot-background 单独改成深色渐变，
+   于是深色主题下变成"深色字画在深色底上" —— 动画其实在跑，但整屏就是一块黑，
+   要等 26.92 秒（原片时间轴）才被白色扫掉，用户看到的正是"黑块要很久很久才会被擦掉"。
+   深色主题从档案界面开始生效，开屏这一段保持原片配色。 */
 body.theme-dark .boot-background {
-  background: radial-gradient(ellipse at 51% 48%, #1d2019 0%, #15180f 76%, #101208 100%);
+  background: radial-gradient(
+    ellipse at 51% 48%,
+    #e7e7e1 0%,
+    #e3e1dc 76%,
+    #e4dfdb 100%
+  );
 }
 body.theme-dark .brand,
 body.theme-dark .brand *,
