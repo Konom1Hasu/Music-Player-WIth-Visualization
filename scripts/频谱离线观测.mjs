@@ -9,15 +9,36 @@
  * 两者任一改了都要同步核一遍：脚本开头会读源码里的关键常量，对不上直接报错退出。
  *
  * 用法：node scripts\频谱离线观测.mjs [秒数]
+ *      （脚本会自己带 --experimental-transform-types 重启一次：spectrum.ts 用了
+ *        构造器参数属性这类"需要转换、不能只擦除"的语法，Node 的默认 strip-only 会拒绝）
  */
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.resolve(here, "..", "app-rhine", "src");
-/* Windows 上不能把 "D:\..." 直接丢给 import()：ESM 加载器只认 file:// URL */
-const { Spectrum } = await import(pathToFileURL(path.join(SRC, "spectrum.ts")).href);
+
+/* 自举：Node 24 的 strip-only 模式处理不了 `constructor(private canvas: ...)`。
+   这里在同进程里"带 flag 再跑一遍"，测的仍然是 src/spectrum.ts 本身。 */
+async function loadSpectrum() {
+  const url = pathToFileURL(path.join(SRC, "spectrum.ts")).href; // Windows 上不能把 "D:\..." 丢给 import()
+  try {
+    return await import(url);
+  } catch (e) {
+    if (!/ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX|ERR_UNKNOWN_FILE_EXTENSION/.test(String(e && e.code))) throw e;
+    if (!process.env.RHINE_VIZ_OFFLINE_RETRY) {
+      console.log('（首次加载被 Node 的 strip-only 模式拒绝，带 --experimental-transform-types 重跑一次）');
+      const r = spawnSync(process.execPath,
+        ['--experimental-transform-types', '--no-warnings', fileURLToPath(import.meta.url), ...process.argv.slice(2)],
+        { stdio: 'inherit', env: { ...process.env, RHINE_VIZ_OFFLINE_RETRY: '1' } });
+      process.exit(r.status === null ? 1 : r.status);
+    }
+    throw e;
+  }
+}
+const { Spectrum } = await loadSpectrum();
 
 /* ---------- 0. 源码一致性自检：常量被改过就报错，免得测的是旧参数 ---------- */
 const spSrc = fs.readFileSync(path.join(SRC, "spectrum.ts"), "utf8");

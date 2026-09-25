@@ -165,12 +165,17 @@ if (Test-Path (Join-Path $RhineDir 'package.json')) {
     }
     Push-Location $RhineDir
     try {
-        # 构建输出走 stdout，交给控制台；只要退出码不为 0 就停在这里。
-        # ★ 受限环境注意：vite 在 Windows 上会 `exec("net use")` 探测网络盘映射，
-        #   进程生成被禁止时（沙箱 / 受限策略）会直接抛 `[commonjs--resolver] spawn EPERM`，
-        #   报错样子很像代码问题。遇到就换一个能起子进程的普通终端重跑。
-        & npm.cmd run build
-        if ($LASTEXITCODE -ne 0) { throw "vite build 失败（退出码 $LASTEXITCODE）：若报 spawn EPERM，说明当前环境不允许起子进程，请在普通终端重跑" }
+        # ★ EAP 必须在调用前后放宽，退出码自己判：
+        #   vite / npm 会把进度与告警写到 stderr，而本脚本开头是 $ErrorActionPreference='Stop'，
+        #   PowerShell 5.1 会把原生命令的 stderr 当成**终止性错误**直接中断 ——
+        #   表现为"vite build 一闪就失败，像是编译不过"，其实构建可能刚刚开始。
+        # （发布流程里 release.ps1 用 `| Out-Null` 调本脚本，更容易踩到这一点。）
+        $oldEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & npm.cmd run build } finally { $ErrorActionPreference = $oldEap }
+        if ($LASTEXITCODE -ne 0) {
+            throw "vite build 失败（退出码 $LASTEXITCODE）：若报 spawn EPERM，说明当前环境不允许起子进程，请在普通终端重跑"
+        }
     }
     finally { Pop-Location }
     if (-not (Test-Path (Join-Path $DistDir 'index.html'))) { throw "构建后找不到 $DistDir\index.html" }
