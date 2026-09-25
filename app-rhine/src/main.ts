@@ -97,7 +97,8 @@ const bootSequence = new BootSequence($("#stage"));
 type Mode = "boot" | "archive" | "detail";
 let mode: Mode = "boot",
   selected = 0,
-  bootStart = 0,
+  bootOrigin = 0,
+  bootApp0 = 0,
   lastStep = "",
   ready = false;
 let modal: "search" | "saved" | "settings" | null = null,
@@ -464,7 +465,9 @@ function replayBoot(forcePreview = false) {
   closeModal(() => replayBootAfterModal(forcePreview));
 }
 function replayBootAfterModal(forcePreview: boolean) {
-  bootStart = performance.now() / 1000 - 1.76;
+  bootOrigin = performance.now() / 1000;
+  bootApp0 = 1.76;
+  bootSpeed = BOOT_SPEED;
   frozenTime = null;
   lastStep = "";
   setMode(prefs.reduced && !forcePreview ? "archive" : "boot");
@@ -980,11 +983,27 @@ let lastTime = 0,
   frameCount = 0,
   frameStart = performance.now(),
   fps = 0;
+/* ============================ 开屏时间轴 ============================
+   原片 25fps，app 时间 0 对应视频 5 秒（见 boot-motion.ts）。
+   参考片里白场扫过、`.boot-background` 归零发生在 appTime 21.88（视频 26.88 秒附近），
+   正常启动时 appTime 从 1.16 起（原代码把 bootStart 设成"现在 − 1.76 + 0.6"）。
+   用原速播的话要 20.7 秒才扫掉 —— 用户要求"黑块擦去控制在 7 秒以内"，
+   所以整条时间轴按 BOOT_SPEED 倍速播：
+       1.16 + (21.88 − 1.16) / 3 = 6.9 秒  ✓
+   倍速只作用在"已经过去多久"上，起始偏移（从哪一帧进）保持原样；
+   `?time=` / `?freeze=1` 的逐帧复核路径不受影响（frozenTime 直接给 appTime）。 */
+const BOOT_SPEED = 3;
+/** 当前生效的倍速：正常启动用 BOOT_SPEED，逐帧复核（?time=）保持原速 1× */
+let bootSpeed = BOOT_SPEED;
+/** 当前该喂给 bootFrame 的 appTime（秒，原片时间轴） */
+function bootAppTime(now: number) {
+  return bootApp0 + (now - bootOrigin) * bootSpeed;
+}
 function frame(ms: number) {
   const time = ms / 1000;
   const cinema =
     mode === "boot" && ready
-      ? bootFrame(frozenTime ?? time - bootStart)
+      ? bootFrame(frozenTime ?? bootAppTime(time))
       : undefined;
   if (!viewer?.isOpen) scene?.update(time, cinema);
   viewer?.update(time);
@@ -1054,17 +1073,19 @@ async function start() {
     };
     savePrefs();
     ready = true;
-    bootStart = performance.now() / 1000;
+    const params = new URLSearchParams(location.search);
+    bootOrigin = performance.now() / 1000;
+    /* 起始 appTime：正常启动从 1.76 起，再减 0.6 让加载遮罩先收干净
+       （与旧代码的 `bootStart -= 1.76; bootStart += 0.6` 等价）；
+       带 ?time= 的逐帧复核按参数指定值起，不额外偏移。 */
+    bootApp0 = params.has("time") ? Number(params.get("time")) : 1.16;
+    bootSpeed = params.has("time") ? 1 : BOOT_SPEED;
     setMode("boot");
     select(0);
     $("#loading").classList.add("loaded");
     setTimeout(() => $("#loading").remove(), 600);
-    const params = new URLSearchParams(location.search);
     if (params.get("scene") === "archive") setMode("archive");
     if (params.get("scene") === "detail") setMode("detail");
-    bootStart -= params.has("time") ? Number(params.get("time")) : 1.76;
-    // Let the loading veil finish before the first reference letter appears.
-    if (!params.has("time")) bootStart += 0.6;
     if (prefs.reduced && !params.has("time")) setMode("archive");
     requestAnimationFrame(frame);
   } catch (error) {
@@ -1096,7 +1117,9 @@ Object.assign(window, {
     },
     seek: (t: number) => {
       setMode("boot");
-      bootStart = performance.now() / 1000 - t;
+      bootOrigin = performance.now() / 1000;
+      bootApp0 = t;
+      bootSpeed = 1; // 复核用：从这一帧起按原速走，方便对着原片看
       lastStep = "";
     },
     archive: () => setMode("archive"),
@@ -1107,7 +1130,7 @@ Object.assign(window, {
       fps: Math.round(fps),
       mode,
       ready,
-      bootTime: mode === "boot" ? (frozenTime ?? performance.now() / 1000 - bootStart) + 5 : null,
+      bootTime: mode === "boot" ? (frozenTime ?? bootAppTime(performance.now() / 1000)) + 5 : null,
       selected: records[selected].id,
       // 收藏统一以播放器曲目的 fav 字段为准（原来的档案收藏集合已废弃）
       saved: getSongs().filter((s) => s.fav).map((s) => s.title),
