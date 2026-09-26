@@ -604,8 +604,62 @@ async function loadBiliAudio(s: Song, autoplay: boolean) {
   loadedId = s.id;
   if (autoplay) audio.play().catch(() => {});
 }
-/** 只把音频装进 <audio> 元素（不碰界面状态）。启动时的"恢复上次曲目"不走这里。 */
-function loadSongAudio(s: Song, autoplay = false) {
+/** 系统设置里的"封面维护"一行：一键重读全部封面。
+    复用 .settings-list label 那套行式版式（和 REDUCED MOTION / 播放行为三项一致）。 */
+export function coverToolsMarkup(): string {
+  return (
+    `<label><div><strong>RE-READ ALL COVERS</strong><span>` +
+    `把每一首的封面重新从本地文件里读一遍（内嵌封面 / NCM 头部），读完自动保存并刷新列表与档案阵列；` +
+    `没有本地文件路径的曲目（浏览器模式导入的）会跳过</span></div>` +
+    `<button type="button" class="edit-mini" data-action="reread-covers" style="pointer-events:auto">重新读取全部封面</button></label>`
+  );
+}
+/** 一键重新读取全部封面。
+    · 逐首走主进程的 read-cover（NCM / MP3 / FLAC / M4A / WAV / OGG / APE…），
+      读到就换算成统一尺寸的 dataURL 落库（和导入时的处理一致）；
+    · 没有本地路径的曲目（浏览器模式 / 只有 File 对象）跳过 —— 没有可读的文件；
+    · 进度用 toast 报，最后给一条汇总；读完 notify() + 派发 rhine-cover，
+      列表、档案阵列、三维封面板与详情一起刷新。 */
+export async function rereadAllCovers() {
+  if (!desktop?.readCover) {
+    toast("重新读取封面需在桌面版使用");
+    return;
+  }
+  const targets = songs.filter((s) => Boolean(s.filePath || s.ncmPath));
+  if (!targets.length) {
+    toast("没有可重读封面的曲目（它们没有本地文件路径）");
+    return;
+  }
+  let ok = 0,
+    same = 0,
+    bad = 0;
+  for (let i = 0; i < targets.length; i++) {
+    const s = targets[i];
+    if (i === 0 || (i + 1) % 8 === 0 || i + 1 === targets.length)
+      toast(`正在重新读取封面 ${i + 1}/${targets.length}…《${s.title}》`);
+    try {
+      const rc = await desktop.readCover({ path: s.filePath || s.ncmPath || "" });
+      if (rc && rc.dataUrl) {
+        const next = (await coverToDataUrl(rc.dataUrl)) || rc.dataUrl;
+        if (next && next !== s.cover) {
+          s.cover = next;
+          persist(s);
+          ok++;
+        } else same++;
+      } else bad++;
+    } catch {
+      bad++;
+    }
+  }
+  notify();
+  window.dispatchEvent(new CustomEvent("rhine-cover"));
+  toast(
+    `封面重读完成：更新 ${ok} 首` +
+      (same ? `，${same} 首没有新封面` : "") +
+      (bad ? `，${bad} 首读取失败` : ""),
+  );
+}
+/** 只把音频装进 <audio> 元素（不碰界面状态）。启动时的"恢复上次曲目"不走这里。 */function loadSongAudio(s: Song, autoplay = false) {
   if (currentUrl) {
     URL.revokeObjectURL(currentUrl);
     currentUrl = null;
@@ -1214,8 +1268,8 @@ function renderNow() {
   const playIcon = bar?.querySelector("#p-play-icon");
   if (playIcon)
     playIcon.innerHTML = audio.paused
-      ? '<path d="M6 3.6 20 12 6 20.4z"/>'
-      : '<path d="M5.6 3.6h4.8v16.8H5.6zM13.6 3.6h4.8v16.8h-4.8z"/>';
+      ? '<path d="M7.8 5v14l11-7z"/>'
+      : '<path d="M8.6 5.4v13.2"/><path d="M15.4 5.4v13.2"/>';
   // 详情区若正开着，同步它的播放键与状态字样
   const exp = document.querySelector<HTMLElement>('.detail-content .export-button[data-action="play-now"]');
   if (exp) exp.innerHTML = `${audio.paused ? "PLAY" : "PAUSE"} <span>${audio.paused ? "▶" : "■"}</span>`;
@@ -1615,15 +1669,15 @@ function buildUI() {
     <div class="p-top">
       <span class="p-label">NOW PLAYING <i>／</i> 正在播放</span>
       <div class="p-controls">
-        <button id="p-prev" title="上一首"><svg viewBox="0 0 24 24" width="13" height="13"><path d="M6 4h2.4v16H6zM20 4v16l-10-8z"/></svg></button>
-        <button id="p-play" title="播放 / 暂停"><svg id="p-play-icon" viewBox="0 0 24 24" width="15" height="15"><path d="M6 3.6 20 12 6 20.4z"/></svg></button>
-        <button id="p-next" title="下一首"><svg viewBox="0 0 24 24" width="13" height="13"><path d="M15.6 4H18v16h-2.4zM4 4v16l10-8z"/></svg></button>
+        <button id="p-prev" title="上一首"><svg class="ico-line" viewBox="0 0 24 24" width="15" height="15"><path d="M7.4 5.2v13.6"/><path d="M18.6 6.1v11.8L9.8 12z"/></svg></button>
+        <button id="p-play" title="播放 / 暂停"><svg id="p-play-icon" class="ico-line" viewBox="0 0 24 24" width="17" height="17"><path d="M7.8 5v14l11-7z"/></svg></button>
+        <button id="p-next" title="下一首"><svg class="ico-line" viewBox="0 0 24 24" width="15" height="15"><path d="M16.6 5.2v13.6"/><path d="M5.4 6.1v11.8L14.2 12z"/></svg></button>
         <i class="p-sep" aria-hidden="true"></i>
         <button id="p-mode" title="播放模式">↻</button>
         <button id="p-rate" title="播放速度">1×</button>
         <button id="p-fav" title="收藏当前曲目">♡</button>
         <button id="p-import" title="导入音乐（右键 ＝ 导入整个文件夹）">＋</button>
-        <button id="p-bili" title="导入 B 站缓存（选择本机缓存文件夹，自动识别其中的音频）" aria-label="导入 B 站缓存"><svg viewBox="0 0 24 24" width="14" height="14" style="fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round"><rect x="3" y="7.4" width="18" height="12.4" rx="2.6"/><path d="M8 3.6 12 7l4-3.4"/></svg></button>
+        <button id="p-bili" title="导入 B 站缓存（选择本机缓存文件夹，自动识别其中的音频）" aria-label="导入 B 站缓存"><svg class="ico-line" viewBox="0 0 24 24" width="15" height="15"><rect x="3.4" y="7.6" width="17.2" height="11.8" rx="2.4"/><path d="M8.4 3.8 12 7.2l3.6-3.4"/></svg></button>
         <button id="p-list" title="播放列表 ／ 档案阵列">☰</button>
       </div>
     </div>

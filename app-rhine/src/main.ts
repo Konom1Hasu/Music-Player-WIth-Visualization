@@ -40,6 +40,8 @@ import {
   playbackSettingsMarkup,
   setPlaybackPref,
   setSortMode,
+  coverToolsMarkup,
+  rereadAllCovers,
   type PlaybackPrefs,
   toggleFavAt,
   importFiles,
@@ -294,7 +296,8 @@ function refreshArchive() {
   columnMemory = archiveColumns.map((_, lane) => columnFiles(lane)[0]);
   rebuildTicks();
   updateSelection();
-  if (mode === "detail") renderDetail();
+  /* 库变动（导入 / 删除 / 改标签）：内容换掉即可，不要再涂黑一次 */
+  if (mode === "detail") renderDetail(true);
 }
 onLibraryChange(refreshArchive);
 rebuildTicks();
@@ -324,7 +327,8 @@ window.addEventListener("rhine-track", (event) => {
   if (!Number.isFinite(index) || !getSongs().length || !records[index]) return;
   if (index === selected) return;
   focusArchive(index);
-  if (mode === "detail") renderDetail();
+  /* 换歌：右侧换成新的一首，但**不再涂黑**（否则每换一首都要等解密动画走完才能看清） */
+  if (mode === "detail") renderDetail(true);
 });
 /* 歌词由 player.ts 自己维护：详情区只有一行"当前歌词"字幕，不需要终端重绘 */
 
@@ -340,8 +344,8 @@ window.addEventListener("rhine-open-track", (event) => {
   const changed = index !== selected;
   if (changed) focusArchive(index);
   if (mode === "detail") {
-    /* 已经在详情里就只把内容换成这一首（换歌时才有必要重绘，避免白放一次解密动画） */
-    if (changed) renderDetail();
+    /* 已经在详情里就只把内容换成这一首（换歌时才有必要重绘；而且换歌不再涂黑） */
+    if (changed) renderDetail(true);
     return;
   }
   setMode("detail");
@@ -483,18 +487,26 @@ function replayBootAfterModal(forcePreview: boolean) {
 }
 function openFile() {
   if (!ready) return;
-  /* 回车 / 点击只"读取档案"（进详情），**不自动播放** —— 起播交给用户：
-     按播放键、点播放列表里的一行，或者按空格。 */
+  /* 回车 / 点击 = 打开档案（进详情）：现在**同时起播**这一首，见下面的说明 */
   closeModal(() => {
-    /* ★ 打开档案时把播放器切到这一首（**不自动播放**）：
-       否则右侧详情写的是这一档案的歌曲信息，播放条与频谱还在另一首上 ——
-       用户反馈的"档案打开，右侧出现该档案的歌曲信息但和正在播放的不符"。 */
-    focusTrack(selected);
+    /* ★ 打开档案 = 打开并播放（用户最新要求："按 Enter 打开档案但没有播放"）。
+       走 playAt：它装载音源、记住位置，并把三维阵列与详情一起跟过去；
+       曲库为空时才退回"只切曲目"。开屏结束是终端直接 setMode，不走这里，启动不会自己出声。 */
+    if (hasSongs()) playAt(selected);
+    else focusTrack(selected);
     setMode("detail");
     audio.play("open");
   });
 }
-function renderDetail() {
+/* 重绘右侧面板。
+   ★ instantRedaction：**换歌 / 库变动 / 编辑态刷新**时要把"涂黑条"直接判为已擦除。
+     那些黑条（document-redaction-window/ink）是跟着三维玻璃的"变清晰"播的：
+     每次换歌，新卡片从阵列升起 → 玻璃重新磨砂 → 解密进度归零，
+     于是黑条又盖回曲目信息上，要等整套解密动画走完才散 ——
+     用户反馈的"切换歌曲后，覆盖歌曲信息的黑块迟迟没有被擦去"。
+     只在**从阵列第一次进入详情**时才播这套解密；换歌时三维那边照旧演，
+     但文字不再被盖（overlay 直接置为完成）。 */
+function renderDetail(instantRedaction = false) {
   tabTransition.cancel();
   $("#object-id").textContent = "NO." + String(selected + 1).padStart(3, "0");
   // 右侧这一栏就是曲目面板：封面 / 曲目信息 / 大尺寸实时频谱 / 当前歌词字幕。
@@ -513,7 +525,10 @@ function renderDetail() {
   content.classList.remove("edit-mode");
   content.innerHTML = songDetailMarkup(selected);
   content.setAttribute("tabindex", "-1");
-  documentDecryption.reset(content, prefs.reduced || scene.decryptionFrame.phase === "clear");
+  documentDecryption.reset(
+    content,
+    instantRedaction || prefs.reduced || scene.decryptionFrame.phase === "clear",
+  );
   mountSongDetail(content);
 }
 /* ---------- 歌曲信息编辑：进入 / 保存 / 放弃 ----------
@@ -523,7 +538,8 @@ let editing = false;
 function startEditing() {
   if (editing || !hasSongs()) return;
   editing = true;
-  renderDetail();
+  /* 进编辑态也不涂黑：用户是来改字的，不是来看解密动画的 */
+  renderDetail(true);
   audio.play("page-open");
   requestAnimationFrame(() => {
     document.querySelector<HTMLInputElement>("#p-edit-title")?.focus({ preventScroll: true });
@@ -541,13 +557,14 @@ function stopEditing(save: boolean) {
   }
   refreshArchive();
   syncCover();
-  renderDetail();
+  renderDetail(true);
 }
 /** 封面变了：三维模型正面那块标签板与详情区都换掉 */
 window.addEventListener("rhine-cover", () => {
   refreshArchive();
   syncCover();
-  if (mode === "detail" && !editing) renderDetail();
+  /* 封面变了（换歌/读封面）也走"不涂黑"这条路 */
+  if (mode === "detail" && !editing) renderDetail(true);
 });
 /** 把当前选中曲目的封面与信息交给三维场景，印到左边那块文档模型的正面标签板上。 */
 function syncCover() {
@@ -684,7 +701,7 @@ function updateQualitySummary() {
   summary.textContent = `实际渲染 ${canvas.width} × ${canvas.height} · ${prefs.rendering.antialias === "smaa" ? "SMAA" : "原始抗锯齿"} · 纹理 ${metrics.anisotropy ?? 1}×${metrics.limited ? " · 已达到缓冲上限" : ""}`;
 }
 function settingsMarkup() {
-  return `<h2>SYSTEM SETTINGS<small>终端偏好设置</small></h2><p class="settings-intro"><span class="operator-name">${getOperator()}</span> <span>·</span> SESSION AUTHORIZED</p><div class="settings-list"><label class="operator-field" for="operator-input"><div><strong>OPERATOR ID</strong><span>开屏「ID CONFIRMED」与页脚显示的身份标识</span></div><input type="text" id="operator-input" maxlength="40" value="${escapeHtml(getOperator())}" autocomplete="off" spellcheck="false"/></label>${audioSettingsMarkup(prefs)}<label><div><strong>REDUCED MOTION</strong><span>减少镜头移动和过渡动效</span></div><input type="checkbox" data-pref="reduced" ${prefs.reduced ? "checked" : ""}/><i class="toggle"></i></label>${playbackSettingsMarkup()}</div>${qualityMarkup(prefs.rendering)}<div class="settings-shortcuts"><span>KEYBOARD CONTROLS</span><p><kbd>←</kbd><kbd>→</kbd> 切列 <kbd>↑</kbd><kbd>↓</kbd> 选档 <kbd>ENTER</kbd> 读取 <kbd>/</kbd> 检索 <kbd>ESC</kbd> 返回</p></div><div class="settings-bottom"><button data-action="fullscreen">FULLSCREEN <span>↗</span></button><button data-action="restart">REINITIALIZE SYSTEM <span>↻</span></button></div><div class="modal-bottom"><span>ANALYSIS OS / 1.0 · 使用 MiSans 字体（小米） <a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">字体许可</a></span><span>POWERED BY RHINE LAB</span></div>`;
+  return `<h2>SYSTEM SETTINGS<small>终端偏好设置</small></h2><p class="settings-intro"><span class="operator-name">${getOperator()}</span> <span>·</span> SESSION AUTHORIZED</p><div class="settings-list"><label class="operator-field" for="operator-input"><div><strong>OPERATOR ID</strong><span>开屏「ID CONFIRMED」与页脚显示的身份标识</span></div><input type="text" id="operator-input" maxlength="40" value="${escapeHtml(getOperator())}" autocomplete="off" spellcheck="false"/></label>${audioSettingsMarkup(prefs)}<label><div><strong>REDUCED MOTION</strong><span>减少镜头移动和过渡动效</span></div><input type="checkbox" data-pref="reduced" ${prefs.reduced ? "checked" : ""}/><i class="toggle"></i></label>${playbackSettingsMarkup()}${coverToolsMarkup()}</div>${qualityMarkup(prefs.rendering)}<div class="settings-shortcuts"><span>KEYBOARD CONTROLS</span><p><kbd>←</kbd><kbd>→</kbd> 切列 <kbd>↑</kbd><kbd>↓</kbd> 选档 <kbd>ENTER</kbd> 读取 <kbd>/</kbd> 检索 <kbd>ESC</kbd> 返回</p></div><div class="settings-bottom"><button data-action="fullscreen">FULLSCREEN <span>↗</span></button><button data-action="restart">REINITIALIZE SYSTEM <span>↻</span></button></div><div class="modal-bottom"><span>ANALYSIS OS / 1.0 · 使用 MiSans 字体（小米） <a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">字体许可</a></span><span>POWERED BY RHINE LAB</span></div>`;
 }
 
 document.addEventListener("input", (e) => {
@@ -812,6 +829,8 @@ document.addEventListener("click", (e) => {
   }
   if (action === "import-music") importFiles();
   if (action === "play-now") togglePlay();
+  /* 一键重读全部封面（系统设置里的按钮）：跑起来可能要几秒，别关弹窗，让 toast 报进度 */
+  if (action === "reread-covers") void rereadAllCovers();
   if (action === "edit-track") startEditing();
   if (action === "edit-save") stopEditing(true);
   if (action === "edit-cancel") stopEditing(false);
@@ -996,17 +1015,19 @@ let lastTime = 0,
    参考片里白场扫过、`.boot-background` 归零发生在视频 26.16–26.88 秒
    （= appTime 21.16–21.88）。
 
-   用户的两条要求是分开的：
-     · 开屏动画**按原速**（压成 3 倍速之后整段动作变快闪，太快了）；
-     · "挡住界面的那块"要在 7 秒以内被擦掉。
-   片子自己的节奏不能动，所以不压倍速，改成**从片子后半段进**：
-   从 appTime 15.2 起播 → 原速下 21.88 − 15.2 = 6.68 秒扫完 ✓（≤7 秒）
-   于是开头那段（ACCESS 文字、Logo 描画、ID 确认打字）不再播，从"START PROCESSING"
-   的鉴权打字进 → 扫描环 → WELCOME 黑底扫过 → 白场 → 档案阵列，全都是原速。
-   `?time=` / `rhine.seek()` 的逐帧复核仍是全片 1×（bootSpeed 单独存）。 */
+   ★ 结论：整段**按原速完整播**。中间试过两版"压缩"都被否掉了：
+     · 3 倍速整段播 → 用户："开屏动画太快了"；
+     · 从片子后半段（appTime 15.2）进 → 用户："显示用户名的那段动画不要省略"
+       （那段是鉴权行打字："ID CONFIRMED : <操作员名>"，在原片 321–339 帧
+         = appTime 7.84–8.56，从 15.2 进就整段跳过了）。
+   所以起点回到原代码的语义（1.76 − 0.6 = 1.16），倍速 1×。
+   挡视线的那块（深色主题下曾经整屏是黑）已经由"开屏不跟随深色主题 + 跳过按钮可见"解决；
+   原片里那块黑底 WELCOME 面板本身只存在 4.16 秒（appTime 17.76–21.92）。
+   急着进系统就按 ENTER / ESC 或点右上角 `ENTER SYSTEM ↗`。
+   `?time=` / `rhine.seek()` 的逐帧复核同样按 1× 走。 */
 const BOOT_SPEED = 1;
 /** 正常启动从片子的哪一秒进（appTime，= 视频秒数 − 5） */
-const BOOT_START_APP = 15.2;
+const BOOT_START_APP = 1.16;
 /** 当前生效的倍速：正常启动用 BOOT_SPEED，逐帧复核（?time=）保持原速 1× */
 let bootSpeed = BOOT_SPEED;
 /** 当前该喂给 bootFrame 的 appTime（秒，原片时间轴） */
@@ -1075,7 +1096,7 @@ async function start() {
       /* playAt 会按"起播即打开档案"（openOnPlay）打开详情；用户把这个开关关掉时
          双击仍然要打开，所以这里再兜一次。已经在详情里就只换内容，不重放解密动画。 */
       if (mode !== "detail") openFile();
-      else renderDetail();
+      else renderDetail(true);
     };
     scene.onHover = (i) => {
       const label = $("#hover-label");

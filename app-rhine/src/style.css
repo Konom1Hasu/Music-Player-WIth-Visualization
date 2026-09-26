@@ -172,7 +172,10 @@ button {
   right: 59px;
   bottom: 108px;
   font-size: 18px;
-  z-index: 5;
+  /* ★ 右下角这行必须永远看得见。它原来和页脚同层（5），而详情面板(4)、三维画布、
+     播放列表抽屉(8)、页脚(5) 一叠就可能把它盖住 —— 用户反馈"POWERED BY RHINE LAB 会被遮挡"。
+     抬到 12：只低于弹窗(20)、toast(30)、加载遮罩(50) 这些本来就是全屏浮层的东西。 */
+  z-index: 12;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -678,7 +681,9 @@ button {
   display: flex;
   gap: 44px;
   color: #78776e;
-  z-index: 5;
+  /* 底部两行一起抬到 12（和 .powered 一致）：它们是"系统状态条"，
+     任何面板都不该把它们盖掉，详见 .powered 那条注释。 */
+  z-index: 12;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.8s;
@@ -2450,47 +2455,57 @@ body.rhine-night #player-playlist {
   gap: 11px;
   flex: none;
 }
+/* ★ 播放条控件：**不要小方块**。
+   终端整体是"细线 + 扁平文字"的语言（`.system-nav button`、`.back-button`、`.export-button`
+   都是裸字/裸图形，悬停只换颜色），而播放条原来给每个按钮都套了
+   1px 边框 + 底色填充的 32×32 方框 —— 九个方疙瘩排一排，用户反馈"方方的有点割裂"。
+   现在：默认无边框无底色，悬停只变颜色（和 `.system-nav button:hover` 同一个强调色）；
+   主播放键靠**更大的图形 + 强调色**突出，不做方块。 */
 #player-bar button {
-  width: 32px;
-  height: 32px;
-  border: 1px solid var(--p-hair);
-  background: var(--p-field);
+  width: 30px;
+  height: 30px;
+  border: 0;
+  background: transparent;
   color: var(--p-ink);
+  opacity: 0.72;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1;
   transition:
-    background 0.18s,
     color 0.18s,
-    border-color 0.18s;
+    opacity 0.18s;
 }
 #player-bar button:hover {
-  background: var(--p-olive);
-  border-color: var(--p-olive);
-  color: #f1efdf;
+  background: transparent;
+  color: var(--p-accent);
+  opacity: 1;
 }
 #player-bar button svg {
   fill: currentColor;
   display: block;
 }
+/* 线描图标：和终端里那些字体符号（← ⌕ ◷ ↻ ♡ ＋ ☰）同一个笔画粗细，
+   不再是一坨实心三角。暂停态也是两条细线。 */
+#player-bar button svg.ico-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 #player-bar #p-play {
-  width: 36px;
-  height: 36px;
-  background: var(--p-strong);
-  border-color: var(--p-strong);
-  color: var(--p-strong-ink);
+  width: 34px;
+  height: 34px;
+  background: transparent;
+  border: 0;
+  color: var(--p-strong);
+  opacity: 1;
 }
 #player-bar #p-play:hover {
-  background: #4b4a3b;
-  border-color: #4b4a3b;
-  color: #f0eee5;
-}
-body.rhine-night #player-bar #p-play:hover {
-  background: #f7f5ef;
-  border-color: #f7f5ef;
-  color: #1d1f1a;
+  background: transparent;
+  color: var(--p-accent);
 }
 #player-bar button.lit {
   color: var(--p-accent);
