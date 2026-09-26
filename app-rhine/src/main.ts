@@ -29,6 +29,7 @@ import {
   togglePlay,
   hasSongs,
   songAt,
+  currentIndex,
   songDetailMarkup,
   mountSongDetail,
   songEditMarkup,
@@ -472,9 +473,9 @@ function replayBootAfterModal(forcePreview: boolean) {
   lastStep = "";
   setMode(prefs.reduced && !forcePreview ? "archive" : "boot");
   audio.restartBoot();
-  scene.select(0);
-  selected = 0;
-  updateSelection();
+  /* 重播开屏同样停在**当前这一首**的档案上：开屏结束时镜头推进的是这一档，
+     拉回第 0 档的话又会和播放条上的曲目对不上（与启动时同一处坑）。 */
+  select(currentIndex() >= 0 ? currentIndex() : 0);
   if (!forcePreview) audio.play("ui-tick");
 }
 function openFile() {
@@ -1086,7 +1087,12 @@ async function start() {
     bootApp0 = params.has("time") ? Number(params.get("time")) : BOOT_START_APP;
     bootSpeed = params.has("time") ? 1 : BOOT_SPEED;
     setMode("boot");
-    select(0);
+    /* ★ 开屏的"第一档"必须落在**当前这一首**上。启动时"恢复上次在听的那一首"只把播放条
+       填了出来（player 侧的 currentId），档案阵列却在这里被硬拉回第 0 档 ——
+       于是右侧档案信息写着 X-001、播放条上是另一首，用户反馈的
+       "刚打开时显示的档案信息与歌曲栏歌曲不匹配"就是这里。
+       曲库为空时才退回第 0 档。 */
+    select(currentIndex() >= 0 ? currentIndex() : 0);
     $("#loading").classList.add("loaded");
     setTimeout(() => $("#loading").remove(), 600);
     if (params.get("scene") === "archive") setMode("archive");

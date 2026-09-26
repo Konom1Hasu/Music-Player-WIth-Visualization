@@ -34,6 +34,7 @@ const desktop = (window as any).desktop as
       scanBiliCache?: () => Promise<any>;
       prepareBiliAudio?: (p: string, force?: boolean) => Promise<any>;
       readAudio?: (p: string) => Promise<any>;
+      on?: (channel: string, cb: (data: any) => void) => void;
     }
   | undefined;
 
@@ -644,6 +645,17 @@ export function togglePlay() {
     if (songs.length) playAt(0);
     return;
   }
+  const s = currentSong();
+  if (!s) return;
+  /* ★ 启动时"恢复上次在听的那一首"只把界面填出来 —— `currentId` 有了，但 `loadedId`
+     还是 null（音频没装进 <audio>）。以前这里直接 audio.play()，等于对着空元素喊播放：
+     一声不响，用户必须先点列表里的**别的**一首（走 playAt → 真的加载）才能播 ——
+     用户反馈的"刚打开必须切到下一首才能正常播放"就是这一句。
+     现在先确认"这一首真的装进去了"，没装就走完整条加载（playAt 会带着播放）。 */
+  if (loadedId !== s.id) {
+    playAt(currentIndex());
+    return;
+  }
   if (audio.paused) audio.play().catch(() => {});
   else audio.pause();
 }
@@ -676,6 +688,40 @@ export function playPrev() {
     return;
   }
   playAt((currentIndex() - 1 + songs.length) % songs.length);
+}
+/* ---------- 媒体键（耳机 / 键盘上的播放暂停、上一首、下一首） ----------
+   两条通路都要接住：
+     · 主进程用 globalShortcut 接系统媒体键，再通过 'media-key' 发过来（app/main.js 的 mediaAction）；
+     · navigator.mediaSession 的 action handler（系统媒体面板 / 部分蓝牙耳机自己走这条路）。
+   ★ 整合进终端时这两条一起丢了：按键下去在主进程有记录，渲染侧却没有任何监听，
+     所以耳机键完全没反应。旧实现在 app/index.html 的 handleMediaKey()，
+     两条通路可能同时触发，所以保留 300ms 防抖。 */
+let lastMediaKeyAt = 0;
+function handleMediaKey(action: string) {
+  if (typeof action !== "string") return;
+  const now = performance.now();
+  if (now - lastMediaKeyAt < 300) return;
+  lastMediaKeyAt = now;
+  if (action === "play" || action === "playpause") {
+    if (songs.length) togglePlay();
+  } else if (action === "pause") {
+    if (!audio.paused) audio.pause();
+  } else if (action === "next") {
+    playNext();
+  } else if (action === "prev") {
+    playPrev();
+  }
+}
+desktop?.on?.("media-key", handleMediaKey);
+if ("mediaSession" in navigator) {
+  try {
+    navigator.mediaSession.setActionHandler("play", () => handleMediaKey("play"));
+    navigator.mediaSession.setActionHandler("pause", () => handleMediaKey("pause"));
+    navigator.mediaSession.setActionHandler("nexttrack", () => handleMediaKey("next"));
+    navigator.mediaSession.setActionHandler("previoustrack", () => handleMediaKey("prev"));
+  } catch {
+    /* 个别环境不支持 mediaSession：不影响主进程那条通路 */
+  }
 }
 export function cycleMode() {
   const keys = ["list", "order", "single", "shuffle"];
