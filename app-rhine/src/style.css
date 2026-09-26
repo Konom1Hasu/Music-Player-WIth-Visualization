@@ -2651,6 +2651,37 @@ body.rhine-night #player-bar #p-play:hover {
   font-size: 11px;
   flex: none;
 }
+/* 排列顺序：和表头同一套线条语言（细边、无圆角、等宽数字） */
+.p-head .p-sort {
+  flex: none;
+  height: 22px;
+  margin-left: auto;
+  padding: 0 4px;
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.8px;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--p-hair);
+  border-radius: 0;
+  appearance: none;
+  cursor: pointer;
+}
+.p-head .p-sort:hover {
+  border-color: var(--p-strong);
+}
+.p-head .p-sort:focus-visible {
+  outline: 1px solid var(--p-strong);
+  outline-offset: 2px;
+}
+.p-head .p-sort option {
+  color: #171713;
+  background: #f2efe8;
+}
+body.rhine-night .p-head .p-sort option {
+  color: #eeeee6;
+  background: #22261d;
+}
 /* 表头 + 搜索框一起吸顶；重画只碰 #p-rows，所以搜索框不会丢焦点 */
 .p-sticky {
   position: sticky;

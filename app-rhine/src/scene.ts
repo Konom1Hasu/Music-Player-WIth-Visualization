@@ -122,6 +122,11 @@ export class ArchiveScene {
   private aoKernelSize = 32;
   onSelect?: (index: number, cell?: ArchiveCell) => void;
   onHover?: (index: number | null) => void;
+  /** 双击某一档：打开档案并播放（用户要求）。单击仍然只是 onSelect（选中）。 */
+  onActivate?: (index: number, cell?: ArchiveCell) => void;
+  /** 双击判定：上一次点到的档位与时间 */
+  private lastClickSlot = -1;
+  private lastClickAt = 0;
   constructor(
     private container: HTMLElement,
     private readonly selectionPulse = baselineSelectionWave,
@@ -890,6 +895,22 @@ export class ArchiveScene {
           ? fileAtCell(this.cells[hit.instanceId])
           : fileAtSlot(this.selectedSlot);
       if (!Number.isFinite(slot)) return;
+      const cellAt = () =>
+        hit.instanceId !== undefined
+          ? { ...this.cells[hit.instanceId] }
+          : { ...this.selectedCell };
+      /* ★ 双击 = 打开档案并播放（用户要求）。单击照旧只走 onSelect（选中），
+         两次点击落在**同一档**、间隔 < 400ms 才算双击。
+         这一段刻意放在下面"详情里点特写那张就早退"之前：特写那张被打开之后是暂停的，
+         双击它正是"打开并播放"最自然的入口，不能被那道闸挡掉。 */
+      const now = performance.now();
+      const dbl = this.lastClickSlot === slot && now - this.lastClickAt < 400;
+      this.lastClickAt = dbl ? 0 : now;
+      this.lastClickSlot = dbl ? -1 : slot;
+      if (dbl) {
+        this.onActivate?.(slot, cellAt());
+        return;
+      }
       /* ★ 详情展开期间不再整轮挡掉点击。原来这里带一句 `this.detail > 0.2` 就 return，
          于是"先在播放列表里点歌（详情跟着打开）、再去点别的档案"整轮没有反应 ——
          用户反馈的切换失灵。终端那边的 select() 本来就写了"详情里选中 → 退回阵列"，
@@ -898,12 +919,7 @@ export class ArchiveScene {
          ★ 比的是**曲目序号**：fileAtCell / fileAtSlot 返回的都是曲目序号，
          selectedSlot 是阵列槽位（lane*32+row），两者不是一回事。 */
       if (this.detail > 0.2 && slot === fileAtSlot(this.selectedSlot)) return;
-      this.onSelect?.(
-        slot,
-        hit.instanceId !== undefined
-          ? { ...this.cells[hit.instanceId] }
-          : { ...this.selectedCell },
-      );
+      this.onSelect?.(slot, cellAt());
     });
     canvas.addEventListener("pointercancel", () => (this.dragging = false));
     canvas.addEventListener("pointerleave", () => {

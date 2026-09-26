@@ -358,6 +358,76 @@ function syncRecords() {
   );
 }
 
+/* ---------- 排列顺序 ----------
+   用户要求"歌曲列表添加多种排列顺序"。曲目顺序就是档案阵列的顺序（records 由 songs 生成），
+   所以这里排的是**同一份数据**：列表与阵列一起变。
+   所有跨引用都走 id（播放头、下一首队列、正在播放的那首），重排不会串位；
+   但**下标**会变，所以排完必须把"当前这一首的新下标"告诉终端（见 applySort），
+   否则右侧档案信息／详情还停在旧下标上 —— 又是"显示的和正在播放的不符"那一类问题。 */
+const SORT_LABEL: Record<string, string> = {
+  import: "导入顺序",
+  title: "曲名",
+  artist: "艺术家",
+  album: "专辑",
+  duration: "时长",
+  plays: "播放次数",
+  recent: "最近添加",
+};
+const LS_SORT = "rhine-sort";
+let sortMode: string = (() => {
+  try {
+    const v = localStorage.getItem(LS_SORT);
+    return v && v in SORT_LABEL ? v : "import";
+  } catch {
+    return "import";
+  }
+})();
+function sortSongs() {
+  const cmpText = (a: string, b: string) => String(a || "").localeCompare(String(b || ""), "zh-Hans-CN");
+  if (sortMode === "title") songs.sort((a, b) => cmpText(a.title, b.title) || (a.order || 0) - (b.order || 0));
+  else if (sortMode === "artist")
+    songs.sort((a, b) => cmpText(a.artist, b.artist) || cmpText(a.title, b.title) || (a.order || 0) - (b.order || 0));
+  else if (sortMode === "album")
+    songs.sort((a, b) => cmpText(a.album, b.album) || cmpText(a.title, b.title) || (a.order || 0) - (b.order || 0));
+  else if (sortMode === "duration") songs.sort((a, b) => (a.duration || 0) - (b.duration || 0) || (a.order || 0) - (b.order || 0));
+  else if (sortMode === "plays") songs.sort((a, b) => (b.plays || 0) - (a.plays || 0) || (a.order || 0) - (b.order || 0));
+  else if (sortMode === "recent") songs.sort((a, b) => (b.order || 0) - (a.order || 0));
+  /* import（默认）：导入顺序，也就是 order 升序 */
+  else songs.sort((a, b) => (a.order || 0) - (b.order || 0));
+}
+function applySort(announce = false) {
+  sortSongs();
+  notify();
+  const i = currentIndex();
+  if (i >= 0) window.dispatchEvent(new CustomEvent("rhine-track", { detail: i }));
+  if (announce) toast(`排列顺序：${SORT_LABEL[sortMode]}`);
+}
+export function setSortMode(mode: string) {
+  if (!(mode in SORT_LABEL)) return;
+  sortMode = mode;
+  try {
+    localStorage.setItem(LS_SORT, mode);
+  } catch {
+    /* ignore */
+  }
+  /* ★ 重排放在下一轮任务里做，**不在 change 事件里同步重排整库**：
+     重排会重建档案记录、重画列表、刷新三维阵列（很重），而它是在
+     `<select>` 的原生 change 分发过程中被调用的 —— 无头环境里那条路径会卡住主线程，
+     真机上虽然没问题，但把"选完立刻做重活"拆开本来也更稳。 */
+  window.setTimeout(() => {
+    try {
+      applySort(true);
+    } catch {
+      /* ignore */
+    }
+  }, 0);
+}
+export function sortModeMarkup(): string {
+  return Object.entries(SORT_LABEL)
+    .map(([v, label]) => `<option value="${v}"${v === sortMode ? " selected" : ""}>${label}</option>`)
+    .join("");
+}
+
 /* ---------- 播放控制 ---------- */
 /* ============================ 用户偏好（播放行为） ============================
    都在"系统设置 → 播放行为"里可改，存 localStorage：
@@ -593,6 +663,20 @@ function followWithArchive(index: number) {
   if (index < 0 || !playbackPrefs.openOnPlay) return;
   closePlaylist();
   window.dispatchEvent(new CustomEvent("rhine-open-track", { detail: index }));
+}
+/** 把某一首设为"当前曲目"但**不播放**（打开档案时用）。
+    ★ 用户反馈"档案打开，右侧出现该档案的歌曲信息但和正在播放的不符"：
+      以前 openFile() 只切详情，播放器那边还在另一首上 —— 右侧写着这一档案、频谱却在放别的。
+      现在打开档案就把播放器切到这一首：播放条 / 详情 / 频谱指向同一首，
+      停在 0 秒等用户按播放（**不自动播放**，这条是之前明确要求的）。
+      返回是否真的换了曲目。 */
+export function focusTrack(index: number): boolean {
+  const s = songs[index];
+  if (!s) return false;
+  if (s.id === currentId && s.id === loadedId) return false; // 已经就是它，别重装音源
+  selectSong(s.id, false);
+  markRestored(false);
+  return true;
 }
 export function playAt(i: number) {
   if (!songs.length) return;
@@ -1565,7 +1649,7 @@ function buildUI() {
   /* 表头 + 搜索框放在一个 sticky 壳里，滚动时都留在顶上；
      曲目行单独放 #p-rows —— 重画只碰 #p-rows，搜索框不会因为重画丢焦点 / 丢输入。 */
   listEl.innerHTML =
-    `<div class="p-sticky"><div class="p-head"><b>ARCHIVE ARRAY ／ 播放列表</b><span id="p-count"></span><button class="p-theme" title="深色 / 浅色主题">◐</button></div>` +
+    `<div class="p-sticky"><div class="p-head"><b>ARCHIVE ARRAY ／ 播放列表</b><select id="p-sort" class="p-sort" title="排列顺序" aria-label="排列顺序">${sortModeMarkup()}</select><span id="p-count"></span><button class="p-theme" title="深色 / 浅色主题">◐</button></div>` +
     `<div class="p-search-row"><input id="p-search" type="search" placeholder="搜索曲名 / 艺术家 / 专辑" autocomplete="off" spellcheck="false" aria-label="搜索歌曲"/><button id="p-search-clear" title="清除搜索（ESC）" aria-label="清除搜索">✕</button></div></div>` +
     `<div id="p-rows"></div>`;
   root.appendChild(listEl);
@@ -1603,6 +1687,10 @@ function buildUI() {
     listQuery = "";
     renderList();
     searchEl.focus();
+  });
+  /* 排列顺序：改了就重排曲库（列表与档案阵列一起变），并记住选择 */
+  listEl.querySelector("#p-sort")?.addEventListener("change", (e) => {
+    setSortMode((e.target as HTMLSelectElement).value);
   });
 
   bar.querySelector("#p-import")!.addEventListener("click", () => {
@@ -2472,7 +2560,9 @@ function applyLibrary(saved: Song[]) {
     for (const s of songs) s.pos = 0;
   }
   if (VIZ_TEST) (window as any).__libraryLoaded = songs.length;
-  /* 曲库到位后顺手清一次历史重复（同一文件只留一条），再恢复播放条 / 阵列 / 列表 */
+  /* 曲库到位后：先按用户选的顺序排好（默认＝导入顺序），再清历史重复、恢复播放条，
+     最后刷阵列 / 列表 / 详情 */
+  applySort();
   const cleaned = dedupeLibrary();
   restorePlayhead();
   notify();

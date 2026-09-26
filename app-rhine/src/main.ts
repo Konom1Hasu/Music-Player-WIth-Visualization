@@ -27,6 +27,8 @@ import {
   onLibraryChange,
   getSongs,
   togglePlay,
+  playAt,
+  focusTrack,
   hasSongs,
   songAt,
   currentIndex,
@@ -37,6 +39,7 @@ import {
   applySongEdit,
   playbackSettingsMarkup,
   setPlaybackPref,
+  setSortMode,
   type PlaybackPrefs,
   toggleFavAt,
   importFiles,
@@ -483,6 +486,10 @@ function openFile() {
   /* 回车 / 点击只"读取档案"（进详情），**不自动播放** —— 起播交给用户：
      按播放键、点播放列表里的一行，或者按空格。 */
   closeModal(() => {
+    /* ★ 打开档案时把播放器切到这一首（**不自动播放**）：
+       否则右侧详情写的是这一档案的歌曲信息，播放条与频谱还在另一首上 ——
+       用户反馈的"档案打开，右侧出现该档案的歌曲信息但和正在播放的不符"。 */
+    focusTrack(selected);
     setMode("detail");
     audio.play("open");
   });
@@ -1059,6 +1066,17 @@ async function start() {
       if (mode === "boot") return;
       select(i, cell ? { cell } : undefined);
     };
+    /* ★ 双击档案 = 选中 → 打开档案 → 起播（用户要求"双击档案时打开档案并播放"）。
+       单击仍然只是选中；回车/PLAY TRACK 仍然只打开不播（那两条语义都没动）。 */
+    scene.onActivate = (i, cell) => {
+      if (mode === "boot") return;
+      select(i, cell ? { cell } : undefined);
+      playAt(i);
+      /* playAt 会按"起播即打开档案"（openOnPlay）打开详情；用户把这个开关关掉时
+         双击仍然要打开，所以这里再兜一次。已经在详情里就只换内容，不重放解密动画。 */
+      if (mode !== "detail") openFile();
+      else renderDetail();
+    };
     scene.onHover = (i) => {
       const label = $("#hover-label");
       if (i === null) {
@@ -1136,6 +1154,8 @@ Object.assign(window, {
     archive: () => setMode("archive"),
     detail: () => openFile(),
     select: (i: number) => select(i),
+    /* 排列顺序：与播放列表下拉框走同一条路（复核 / 脚本化核对用） */
+    sort: (mode: string) => setSortMode(mode),
     stats: () => ({
       ...scene?.getStats(),
       fps: Math.round(fps),
