@@ -466,7 +466,7 @@ function replayBoot(forcePreview = false) {
 }
 function replayBootAfterModal(forcePreview: boolean) {
   bootOrigin = performance.now() / 1000;
-  bootApp0 = 1.76;
+  bootApp0 = BOOT_START_APP;
   bootSpeed = BOOT_SPEED;
   frozenTime = null;
   lastStep = "";
@@ -984,15 +984,21 @@ let lastTime = 0,
   frameStart = performance.now(),
   fps = 0;
 /* ============================ 开屏时间轴 ============================
-   原片 25fps，app 时间 0 对应视频 5 秒（见 boot-motion.ts）。
-   参考片里白场扫过、`.boot-background` 归零发生在 appTime 21.88（视频 26.88 秒附近），
-   正常启动时 appTime 从 1.16 起（原代码把 bootStart 设成"现在 − 1.76 + 0.6"）。
-   用原速播的话要 20.7 秒才扫掉 —— 用户要求"黑块擦去控制在 7 秒以内"，
-   所以整条时间轴按 BOOT_SPEED 倍速播：
-       1.16 + (21.88 − 1.16) / 3 = 6.9 秒  ✓
-   倍速只作用在"已经过去多久"上，起始偏移（从哪一帧进）保持原样；
-   `?time=` / `?freeze=1` 的逐帧复核路径不受影响（frozenTime 直接给 appTime）。 */
-const BOOT_SPEED = 3;
+   原片 25fps，bootMotion() 里的 t 就是视频秒数（app 时间 0 对应视频 5 秒）。
+   参考片里白场扫过、`.boot-background` 归零发生在视频 26.16–26.88 秒
+   （= appTime 21.16–21.88）。
+
+   用户的两条要求是分开的：
+     · 开屏动画**按原速**（压成 3 倍速之后整段动作变快闪，太快了）；
+     · "挡住界面的那块"要在 7 秒以内被擦掉。
+   片子自己的节奏不能动，所以不压倍速，改成**从片子后半段进**：
+   从 appTime 15.2 起播 → 原速下 21.88 − 15.2 = 6.68 秒扫完 ✓（≤7 秒）
+   于是开头那段（ACCESS 文字、Logo 描画、ID 确认打字）不再播，从"START PROCESSING"
+   的鉴权打字进 → 扫描环 → WELCOME 黑底扫过 → 白场 → 档案阵列，全都是原速。
+   `?time=` / `rhine.seek()` 的逐帧复核仍是全片 1×（bootSpeed 单独存）。 */
+const BOOT_SPEED = 1;
+/** 正常启动从片子的哪一秒进（appTime，= 视频秒数 − 5） */
+const BOOT_START_APP = 15.2;
 /** 当前生效的倍速：正常启动用 BOOT_SPEED，逐帧复核（?time=）保持原速 1× */
 let bootSpeed = BOOT_SPEED;
 /** 当前该喂给 bootFrame 的 appTime（秒，原片时间轴） */
@@ -1075,10 +1081,9 @@ async function start() {
     ready = true;
     const params = new URLSearchParams(location.search);
     bootOrigin = performance.now() / 1000;
-    /* 起始 appTime：正常启动从 1.76 起，再减 0.6 让加载遮罩先收干净
-       （与旧代码的 `bootStart -= 1.76; bootStart += 0.6` 等价）；
-       带 ?time= 的逐帧复核按参数指定值起，不额外偏移。 */
-    bootApp0 = params.has("time") ? Number(params.get("time")) : 1.16;
+    /* 起始 appTime：正常启动从片子后半段进（BOOT_START_APP，见上面的说明）；
+       带 ?time= 的逐帧复核按参数指定值起。 */
+    bootApp0 = params.has("time") ? Number(params.get("time")) : BOOT_START_APP;
     bootSpeed = params.has("time") ? 1 : BOOT_SPEED;
     setMode("boot");
     select(0);

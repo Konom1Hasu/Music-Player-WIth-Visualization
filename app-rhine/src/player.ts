@@ -720,6 +720,27 @@ export function removeSong(id: string) {
 }
 
 /* ---------- 导入 ---------- */
+/** 曲目的"身份键"，用来判重（同一个文件不会被导入两次）。
+    优先级：B 站缓存的原始 .m4s 路径 → 本地文件绝对路径（Electron 里 File.path）
+    → 文件名 + 体积（浏览器里没有路径时的兜底）。
+    ★ 键必须来自**两边都有的同一份字段**：库里已有的曲目和正要导入的这一首，
+      用的是同一个函数算键，所以"同一个文件再导一次""同一个缓存文件夹再导一次"
+      都会命中。返回空串表示判不了身份，这种一律照旧导入（宁可重复也不误吞）。 */
+function songKey(s: Song): string {
+  if (s.srcUrl && s.path) return "bili:" + s.path.toLowerCase();
+  if (s.filePath) return "file:" + s.filePath.toLowerCase();
+  if (s.file) return "blob:" + s.file.name.toLowerCase() + "\u0001" + s.file.size;
+  return "";
+}
+/** 已经导入过的身份键集合（导入前取一次快照） */
+function existingKeys(): Set<string> {
+  const set = new Set<string>();
+  for (const s of songs) {
+    const k = songKey(s);
+    if (k) set.add(k);
+  }
+  return set;
+}
 async function addFiles(fileList: FileList | File[]) {
   const arr = [...fileList].filter(
     (f) => (f.type && f.type.startsWith("audio/")) || /\.(mp3|flac|wav|m4a|aac|ogg|opus|webm|aiff?|ncm)$/i.test(f.name),
@@ -730,6 +751,10 @@ async function addFiles(fileList: FileList | File[]) {
   }
   toast(`正在解析 ${arr.length} 首歌曲…`);
   let added = 0;
+  /* ★ 判重：同一个文件（同一路径，或同名同体积）不再重复导入。
+     集合在整个循环里累积 —— 一次拖进来两个相同文件时，第二个也会被跳过。 */
+  const seen = existingKeys();
+  let dup = 0;
   for (const f of arr) {
     let title = "",
       artist = "",
@@ -783,6 +808,16 @@ async function addFiles(fileList: FileList | File[]) {
     if (!artist) artist = fb.artist || "未知艺术家";
     if (!album) album = "未知专辑";
     if (cover) cover = await coverToDataUrl(cover);
+    /* 判重放在这一行的位置：标签已解析完，但还没建曲目、没落库 ——
+       ★ 必须早于 readTags / 封面读取之外的所有副作用，尤其不能先 persist 再判重。 */
+    const key = songKey({ file: audioFile, filePath, srcUrl: undefined, path: undefined, ncmPath } as Song);
+    if (key) {
+      if (seen.has(key)) {
+        dup++;
+        continue;
+      }
+      seen.add(key);
+    }
     const song: Song = {
       id: uid(),
       file: audioFile,
@@ -815,7 +850,9 @@ async function addFiles(fileList: FileList | File[]) {
   }
   notify();
   if (!currentId && songs.length) selectSong(songs[0].id);
-  toast(`导入完成：新增 ${added} 首`);
+  if (added && dup) toast(`导入完成：新增 ${added} 首，跳过重复 ${dup} 首`);
+  else if (!added && dup) toast(`这些曲目已经在曲库里了（跳过重复 ${dup} 首）`);
+  else toast(`导入完成：新增 ${added} 首`);
 }
 /* 探时长：B 站缓存那一路的 file:// 音源会被拦，失败时"确保副本 → 读字节转 blob"再测一次，
    否则列表里这一首的时长永远是 0:00。 */
@@ -957,7 +994,19 @@ export async function importBili() {
     return;
   }
   let added = 0;
+  /* 判重：同一个缓存文件夹再导入一次时，原始 .m4s 路径没变 → 全部命中，不再堆重复曲目。
+     集合在循环里累积，同一个文件夹里出现两条同源记录也只进一条。 */
+  const seen = existingKeys();
+  let dup = 0;
   for (const it of items) {
+    const key = it.audioPath ? "bili:" + String(it.audioPath).toLowerCase() : "";
+    if (key) {
+      if (seen.has(key)) {
+        dup++;
+        continue;
+      }
+      seen.add(key);
+    }
     const song: Song = {
       id: uid(),
       srcUrl: it.path,
@@ -978,7 +1027,9 @@ export async function importBili() {
   }
   notify();
   if (!currentId && songs.length) selectSong(songs[0].id);
-  toast(`B站缓存导入：新增 ${added} 首`);
+  if (added && dup) toast(`B站缓存导入：新增 ${added} 首，跳过重复 ${dup} 首`);
+  else if (!added && dup) toast(`这些 B 站缓存已经在曲库里了（跳过重复 ${dup} 首）`);
+  else toast(`B站缓存导入：新增 ${added} 首`);
 }
 
 /* ---------- UI（挂在 #stage 内，和终端共用一套网格与配色） ---------- */
@@ -2301,6 +2352,50 @@ function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
 async function loadLibrary(): Promise<Song[]> {
   return withTimeout(idb.all(), LIB_LOAD_TIMEOUT, []).catch(() => []);
 }
+/** 清理历史遗留的重复曲目（同一个文件 / 同一个 B 站缓存源只留一条）。
+    用户要"重复歌曲不再导入"，但库里可能已经堆了重复，所以启动时顺手清一次。
+    ★ 只认**硬的**身份键：`file:`（本地文件绝对路径）与 `bili:`（原始 .m4s 路径）——
+      同一路径必然是同一个文件。浏览器模式的 `blob:` 键（文件名 + 体积）判据不够硬，
+      不参与自动清理，宁可留着让用户自己删。
+    保哪一条：优先收藏过的，其次播放次数多的，再其次 order 最小的（最早导入的那条）；
+    被合并掉的那些把收藏与播放次数并进保留的那条。 */
+function dedupeLibrary(): number {
+  const byKey = new Map<string, Song[]>();
+  for (const s of songs) {
+    const k = songKey(s);
+    if (!k || (!k.startsWith("file:") && !k.startsWith("bili:"))) continue;
+    const list = byKey.get(k);
+    if (list) list.push(s);
+    else byKey.set(k, [s]);
+  }
+  const drop = new Set<string>();
+  let removed = 0;
+  for (const list of byKey.values()) {
+    if (list.length < 2) continue;
+    list.sort((a, b) =>
+      Number(b.fav) - Number(a.fav) || (b.plays || 0) - (a.plays || 0) || (a.order || 0) - (b.order || 0),
+    );
+    const keep = list[0];
+    for (const s of list.slice(1)) {
+      keep.fav = keep.fav || s.fav;
+      keep.plays = (keep.plays || 0) + (s.plays || 0);
+      drop.add(s.id);
+      removed++;
+    }
+    persist(keep);
+  }
+  if (!removed) return 0;
+  songs = songs.filter((s) => !drop.has(s.id));
+  for (const id of drop) {
+    idb.del(id).catch(() => {});
+    nextQueue = nextQueue.filter((x) => x !== id);
+  }
+  if (currentId && drop.has(currentId)) {
+    currentId = null;
+    loadedId = null;
+  }
+  return removed;
+}
 function applyLibrary(saved: Song[]) {
   if (saved.length) {
     songs = saved.sort((a, b) => (a.order || 0) - (b.order || 0));
@@ -2313,9 +2408,10 @@ function applyLibrary(saved: Song[]) {
     for (const s of songs) s.pos = 0;
   }
   if (VIZ_TEST) (window as any).__libraryLoaded = songs.length;
-  /* 曲库到位后，先按"上次在听的那首 + 上次的位置"把播放条恢复出来，
-     再把档案阵列 / 播放列表 / 详情区刷一遍 —— 启动后一眼能看出上次听到哪。 */
+  /* 曲库到位后顺手清一次历史重复（同一文件只留一条），再恢复播放条 / 阵列 / 列表 */
+  const cleaned = dedupeLibrary();
   restorePlayhead();
   notify();
   renderNow();
+  if (cleaned) window.setTimeout(() => toast(`已清理 ${cleaned} 首重复曲目`), 1200);
 }
