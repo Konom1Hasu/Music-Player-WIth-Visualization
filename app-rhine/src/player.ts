@@ -2415,6 +2415,7 @@ function dedupeLibrary(): number {
     else byKey.set(k, [s]);
   }
   const drop = new Set<string>();
+  const remap = new Map<string, string>(); // 被合并掉的 id → 保留下来的那条 id
   let removed = 0;
   for (const list of byKey.values()) {
     if (list.length < 2) continue;
@@ -2426,6 +2427,7 @@ function dedupeLibrary(): number {
       keep.fav = keep.fav || s.fav;
       keep.plays = (keep.plays || 0) + (s.plays || 0);
       drop.add(s.id);
+      remap.set(s.id, keep.id);
       removed++;
     }
     persist(keep);
@@ -2437,8 +2439,24 @@ function dedupeLibrary(): number {
     nextQueue = nextQueue.filter((x) => x !== id);
   }
   if (currentId && drop.has(currentId)) {
-    currentId = null;
+    currentId = remap.get(currentId) ?? null;
     loadedId = null;
+  }
+  /* ★ 播放头也得改指：它记的是"上次在听的那一首"。如果那一条正好是被合并掉的重复，
+     restorePlayhead() 会找不到这首直接 return —— 播放条空着（或停在第 0 档），
+     而用户记得的是"上次明明在听某一首"，也就是反馈的
+     "显示的曲目标题不是上次打开时最后播放的歌曲名"。改成指向保留的那条。 */
+  try {
+    const raw = localStorage.getItem(LS_PLAYHEAD);
+    if (raw) {
+      const ph = JSON.parse(raw) as { id?: string; pos?: number } | null;
+      const next = ph && ph.id ? remap.get(ph.id) : undefined;
+      if (next) {
+        localStorage.setItem(LS_PLAYHEAD, JSON.stringify({ ...ph, id: next }));
+      }
+    }
+  } catch {
+    /* ignore */
   }
   return removed;
 }

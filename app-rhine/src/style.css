@@ -2403,10 +2403,11 @@ body.rhine-night #player-playlist {
 #player-bar {
   position: absolute;
   left: 59px;
-  /* ★ 底边距 80 → 40：用户要"界面上下拉开一点，底部太空"。
-     80 是 2.1.1 按当时的版面定的；缩放到满高之后（fit() 允许横向过扫描），
-     再把播放条往窗口底边推 40，底部那一大块空白就收掉了。 */
-  bottom: 40px;
+  /* ★ 底边距必须让开底部那两行：`.system-footer` 在 bottom:35px、`.powered` 在 bottom:30px。
+     之前为了让"底部不那么空"压到 40px，播放条（高 134）把 SESSION AUTHORIZED / 时钟 /
+     REINITIALIZE 那一整行盖住了 —— 用户反馈的"全屏后下方存在遮挡"。
+     80 是 2.1.1 按版面核过、与页脚互不重叠的位置，这里回到 80。 */
+  bottom: 80px;
   width: 880px;
   height: 134px;
   display: flex;
@@ -2602,11 +2603,11 @@ body.rhine-night #player-bar #p-play:hover {
   cursor: pointer;
 }
 
-/* 播放列表：与终端弹窗同一套面板语言 */
+/* 播放列表：与终端弹窗同一套面板语言（底边距跟着播放条：80 + 134 + 24 = 238） */
 #player-playlist {
   position: absolute;
   left: 59px;
-  bottom: 198px;
+  bottom: 238px;
   width: 880px;
   max-height: 560px;
   overflow-y: auto;
