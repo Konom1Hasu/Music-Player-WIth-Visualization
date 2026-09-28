@@ -1,6 +1,6 @@
 /*
  * 频谱可视化：把 1.3.0 版独立播放器那套自研频谱（Hann 加窗 + Goertzel 对数频段 +
- * 峰值归一 + 对数压缩，120 条柱、鼓点泵动、14 级量化、峰值指示线）
+ * 峰值归一 + 对数压缩，120 个对数频段、鼓点泵动、14 级量化、峰值指示线）
  * 搬到莱茵生命终端的详情区画布上，并按用户反馈做了两处工程化修订（见下）。
  *
  * 为什么不是直接用 AnalyserNode.getByteFrequencyData：
@@ -20,8 +20,13 @@
  *      render() 不做二次插值，所以阶梯与抖动与 1.3.0 逐像素一致，只是重画次数更多。
  */
 
-export const SPECTRUM_BANDS = 120; // 对数频段数
-const BAR_N = 120; // 柱数
+export const SPECTRUM_BANDS = 120; // 对数频段数（分析侧，不动）
+/* 柱数是**显示侧**的采样密度，与 120 个分析频段解耦：bar i → 频段区间
+   floor(pow(i/BAR_N,0.8)*117)，区间内取平均。150 比 120 多约 1/4 根、每根窄约 1/5，
+   看着更细密；而频域里的塑形（细针中心 / 倾斜增益）算出来与 120 柱时逐位相同
+   （bassPeakBar 从 9 变成 11，落到同一个频段区间 [14,15)，needleCenter 仍是 14/119），
+   所以旧版导入的调音参数效果一个字没变。 */
+const BAR_N = 150; // 柱数
 const VIZ_LEVELS = 14; // 阶梯级数
 /* 分析窗长：★ 维持 1.3.0 的 1024 点（用户要求"参数完全参照 1.3.0"，窗长也是参数）。
    1024 点 Hann 窗在 42Hz 处的等效噪声带宽约 5Hz，正好护住低频那根"细针"的稳定度。 */
@@ -168,12 +173,15 @@ export class Spectrum {
   bandInfo() {
     const fMax = F_MAX_RATIO * (this.sampleRate / 2);
     const at = (b: number) => F_MIN * Math.pow(fMax / F_MIN, b / (SPECTRUM_BANDS - 1));
+    const [na, nb] = this.needleBands(this.bassPeakBar());
     return {
       sampleRate: this.sampleRate,
       firstHz: Math.round(at(0) * 10) / 10,
       lastHz: Math.round(at(SPECTRUM_BANDS - 1)),
       bassPeakHz: Math.round(at(Math.round(BASS_WIDE_CENTER * (SPECTRUM_BANDS - 1))) * 10) / 10,
       kickBands: `${KICK_BAND_FROM}–${KICK_BAND_TO}`,
+      bars: BAR_N,
+      needleBands: `${na}–${nb - 1}`,
     };
   }
   /** 换曲时把峰值线清掉，免得上一首的峰值留在屏幕上 */
@@ -237,6 +245,16 @@ export class Spectrum {
     }
     return 0;
   }
+  /** 低频"细针"压在哪些分析频段上：柱 → 频段用同一套 bandOf 映射，
+      返回 [a0, b0)，也就是第 a0 … b0−1 段（`bassPeakBar` 落在这一区间里）。
+      ★ 这里量的是**频域**，与显示侧柱数无关：柱数 120 → 150 时 peakBar 由 9 变 11，
+      区间仍是 [14,15)，细针中心仍是 14/119 —— 所以"细密一点"没动旧版导入的音色塑形。 */
+  private needleBands(peakBar: number): [number, number] {
+    const usable = Math.floor(SPECTRUM_BANDS * 0.98);
+    const bandOf = (i: number) => Math.floor(Math.pow(i / BAR_N, 0.8) * usable);
+    const a0 = bandOf(peakBar);
+    return [a0, Math.max(a0 + 1, bandOf(peakBar + 1))];
+  }
   private bassGainForTilt() {
     const bassPeakBar = this.bassPeakBar();
     const tilt = (50 - vizParams.tilt) / 50;
@@ -245,10 +263,7 @@ export class Spectrum {
   }
   private buildBandBoost() {
     const bassPeakBar = this.bassPeakBar();
-    const usable = Math.floor(SPECTRUM_BANDS * 0.98);
-    const bandOf = (i: number) => Math.floor(Math.pow(i / BAR_N, 0.8) * usable);
-    const a0 = bandOf(bassPeakBar);
-    const b0 = Math.max(a0 + 1, bandOf(bassPeakBar + 1));
+    const [a0, b0] = this.needleBands(bassPeakBar);
     // 细针中心对准"低频峰所在柱"的正中心：不对准的话峰高会被摊到相邻两根上，再窄也尖不起来
     const needleCenter = (a0 + b0 - 1) / 2 / (SPECTRUM_BANDS - 1);
     const needleSigma = vizParams.bassSigma * 0.1875;

@@ -607,11 +607,19 @@ function registerMediaHotkeys() {
   const f3 = tryReg('CommandOrControl+Alt+Left', () => mediaAction('prev', 'Ctrl+Alt+Left'));
   const f4 = tryReg('CommandOrControl+Alt+Up', () => mediaAction('volume-up', 'Ctrl+Alt+Up'));
   const f5 = tryReg('CommandOrControl+Alt+Down', () => mediaAction('volume-down', 'Ctrl+Alt+Down'));
+  /* 耳机上的**接听 / 挂断**那颗键（有线耳机线控上通常就是那一个多功能键）：
+     · 多数固件把它发成 MediaPlayPause / MediaStop，与上面的播放键同路 ✓ 已经在接管；
+     · 但也可能被别的东西抢走（Windows 的"手机连接 / Phone Link"、通讯软件、耳机自带软件）——
+       这时那颗键按下去在本程序里毫无反应。所以额外给一对接听/挂断语义的组合键，
+       耳机配套软件允许改键时直接绑这两个。
+     接听 = 播放 / 继续；挂断 = 暂停。 */
+  const f6 = tryReg('CommandOrControl+Alt+A', () => mediaAction('play', 'Ctrl+Alt+A（接听）'));
+  const f7 = tryReg('CommandOrControl+Alt+H', () => mediaAction('pause', 'Ctrl+Alt+H（挂断）'));
   // 别名（上一版方案），保持可用
   tryReg('CommandOrControl+Alt+P', () => mediaAction('play', 'Ctrl+Alt+P'));
   tryReg('CommandOrControl+Alt+N', () => mediaAction('next', 'Ctrl+Alt+N'));
   tryReg('CommandOrControl+Alt+B', () => mediaAction('prev', 'Ctrl+Alt+B'));
-  hotkeyState.fallback = f1 || f2 || f3 || f4 || f5;
+  hotkeyState.fallback = f1 || f2 || f3 || f4 || f5 || f6 || f7;
   /* 小窗控制键（游戏里鼠标拖不动时靠这些）——见下面 nudgeMini/scaleMini。
      ★ 位移从 Ctrl+Alt+方向键 改到 **Ctrl+Alt+Shift+方向键**：把 Ctrl+Alt+← / → 让给
      耳机的上一首 / 下一首（那是耳机软件最常绑的两个方向键）。 */

@@ -45,11 +45,16 @@ const spSrc = fs.readFileSync(path.join(SRC, "spectrum.ts"), "utf8");
 const expect = [
   ["ANALYSIS_WINDOW = 1024", /const ANALYSIS_WINDOW = 1024;/],
   ["VIZ_LEVELS = 14", /const VIZ_LEVELS = 14;/],
-  ["JITTER_AMP = 0.45*K", /const JITTER_AMP = 0\.45 \* JITTER_K;/],
-  ["JITTER_STEP = 0.03*K", /const JITTER_STEP = 0\.03 \* JITTER_K;/],
-  ["JITTER_WOBBLE = 0.055*K", /const JITTER_WOBBLE = 0\.055 \* JITTER_K;/],
-  ["TILT_STRENGTH = 55", /const TILT_STRENGTH = 55;/],
-  ["KICK_PUMP = 0.4", /const KICK_PUMP = 0\.4;/],
+  ["SPECTRUM_BANDS = 120", /export const SPECTRUM_BANDS = 120;/],
+  // 抖动 / 倾斜 / 泵动现在是运行时参数（vizParams），来源仍是 1.3.0 的原值：
+  // 幅度 0.45、相位步进 0.03、单边颤动 0.055，都乘 JITTER_K。这里按**函数形态**核对。
+  ["JITTER_AMP = 0.45*K", /const jitterAmp = \(\) => 0\.45 \* vizParams\.jitterK;/],
+  ["JITTER_FREQ = 0.1+0.2*(K-0.4)", /const jitterFreq = \(\) => 0\.1 \+ 0\.2 \* \(vizParams\.jitterK - 0\.4\);/],
+  ["JITTER_STEP = 0.03*K", /const jitterStep = \(\) => 0\.03 \* vizParams\.jitterK;/],
+  ["JITTER_WOBBLE = 0.055*K", /const jitterWobble = \(\) => 0\.055 \* vizParams\.jitterK;/],
+  ["VIZ_DEFAULTS.tilt = 55", /VIZ_DEFAULTS: VizParams = \{ tilt: 55,/],
+  ["VIZ_DEFAULTS.kickPump = 0.4", /kickPump: 0\.4,/],
+  ["BASS_WIDE_CENTER = 0.12", /const BASS_WIDE_CENTER = 0\.12;/],
 ];
 for (const [name, re] of expect) {
   if (!re.test(spSrc)) {
@@ -57,6 +62,15 @@ for (const [name, re] of expect) {
     process.exit(2);
   }
 }
+/* 柱数是**显示侧**密度（可以随"细密一点"这类要求调整），所以不写死值：
+   这里只要求它是显式常量，后面所有频段切片都按实际柱数换算，改柱数不用改本脚本。 */
+const barNMatch = /const BAR_N = (\d+);/.exec(spSrc);
+if (!barNMatch) {
+  console.error("参数自检失败：src/spectrum.ts 里没有 `const BAR_N = <整数>;`");
+  process.exit(2);
+}
+const SRC_BAR_N = Number(barNMatch[1]);
+
 const plSrc = fs.readFileSync(path.join(SRC, "player.ts"), "utf8");
 if (!/const VIZ_NOISE_HP = 0\.55;/.test(plSrc)) {
   console.error("参数自检失败：src/player.ts 里的 VIZ_NOISE_HP 不是 0.55");
@@ -108,6 +122,13 @@ const sp = new Spectrum(canvasStub, SR);
 sp.setMode("mix");
 const td = new Float32Array(N);
 const STATS = { rough: [], max: [], pegged: [], mean: [], shimmer: [], low: [], mid: [], high: [] };
+/* 低 / 中 / 高频取样区间按实际柱数换算（原来写死 0-12 / 45-72 / 90-120 是 120 柱时定的）：
+   低频前 10%、中频 37.5%~60%、高频后 25%，换柱数后分档含义不变。 */
+const LOW_TO = Math.round(SRC_BAR_N * 0.1);
+const MID_FROM = Math.round(SRC_BAR_N * 0.375);
+const MID_TO = Math.round(SRC_BAR_N * 0.6);
+const HIGH_FROM = Math.round(SRC_BAR_N * 0.75);
+const meanOf = (v, from, to) => v.slice(from, to).reduce((a, b) => a + b, 0) / Math.max(1, to - from);
 let prev = null;
 let pumpFrame = 0;
 const FRAMES = Math.round(SECONDS * 30); // 分析节拍 30Hz
@@ -132,16 +153,47 @@ for (let f = 0; f < FRAMES; f++) {
   STATS.mean.push(mean);
   STATS.pegged.push(v.filter((x) => x > 0.98).length);
   STATS.shimmer.push(shr / v.length);
-  STATS.low.push(v.slice(0, 12).reduce((a, b) => a + b, 0) / 12);
-  STATS.mid.push(v.slice(45, 72).reduce((a, b) => a + b, 0) / 27);
-  STATS.high.push(v.slice(90, 120).reduce((a, b) => a + b, 0) / 30);
+  STATS.low.push(meanOf(v, 0, LOW_TO));
+  STATS.mid.push(meanOf(v, MID_FROM, MID_TO));
+  STATS.high.push(meanOf(v, HIGH_FROM, SRC_BAR_N));
 }
 const avg = (a) => a.reduce((x, y) => x + y, 0) / a.length;
 const q = (a, p) => { const s = a.slice().sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(s.length * p))]; };
 const f3 = (x) => x.toFixed(3);
 
+/* ---------- 3b. 绘制侧：按详情区那块画布的真实宽度再画一帧，数柱与柱宽 ----------
+   柱数变了以后"看着细密"落在这里：柱宽 = 画布宽 / 柱数 × 0.7（填充率）。
+   画布桩原来只吞掉调用，这里临时换成会计数的版本，画完再还原。 */
+const DRAW_W = 636; // 详情区频谱画布的 CSS 宽度（与 DESIGN 里那块一致）
+const draw = { rects: 0, barWidths: new Map() };
+const origFillRect = ctxStub.fillRect;
+ctxStub.fillRect = (x, y, w, h) => {
+  draw.rects++;
+  if (h > 2) draw.barWidths.set(w, (draw.barWidths.get(w) || 0) + 1); // h = 2 是峰值线
+};
+canvasStub.width = DRAW_W;
+canvasStub.height = 174;
+sp.render(0.033);
+ctxStub.fillRect = origFillRect;
+const barW = Math.round((DRAW_W / SRC_BAR_N) * 0.7 * 100) / 100;
+
 console.log("=== 频谱离线观测（合成信号 " + SECONDS + " 秒，分析 " + FRAMES + " 帧，样本 " + STATS.rough.length + "） ===");
-console.log("柱数 = " + sp.levels.length + "，级数 = 14，分析窗 = " + N + "，采样率 = " + SR);
+console.log("柱数 = " + sp.levels.length + "（源码 BAR_N = " + SRC_BAR_N + "），级数 = 14，分析窗 = " + N + "，采样率 = " + SR);
+{ // 频域塑形摘要：柱数变了这里**不应该**变（细针区间 / 低频峰频率 / 鼓点段位）
+  const b = sp.bandInfo();
+  console.log("频域：首段 " + b.firstHz + "Hz，末段 " + b.lastHz + "Hz，低频峰 " + b.bassPeakHz
+    + "Hz，细针频段 " + b.needleBands + "，鼓点 " + b.kickBands + " 段");
+}
+if (sp.levels.length !== SRC_BAR_N) {
+  console.error("柱数与源码 BAR_N 不一致：" + sp.levels.length + " != " + SRC_BAR_N);
+  process.exit(3);
+}
+console.log("");
+console.log("绘制（画布 " + DRAW_W + "×174，最后一帧）：");
+console.log("  一帧 fillRect 共 " + draw.rects + " 次；柱宽 = " + DRAW_W + " / " + SRC_BAR_N + " × 0.7 = "
+  + barW + "px（120 柱时是 " + (Math.round((DRAW_W / 120) * 0.7 * 100) / 100) + "px）");
+console.log("  实际画出的柱（高度 > 2px）宽度取值：" + [...draw.barWidths.entries()]
+  .map(([w, n]) => w + "px×" + n).join("、"));
 console.log("");
 console.log("最终柱高（最后一帧，每 10 根取一根）=");
 const last = Array.from(sp.levels);
@@ -151,8 +203,10 @@ console.log("");
 console.log("整段统计：");
 console.log("  平均最高柱 = " + f3(avg(STATS.max)) + "（越低越不「顶满」）");
 console.log("  平均柱高 = " + f3(avg(STATS.mean)));
-console.log("  顶到 0.98 以上的柱子数（平均每帧）= " + avg(STATS.pegged).toFixed(1) + " / 120");
-console.log("  低频（前 12 根）平均 = " + f3(avg(STATS.low)) + "  中频（45–72）=" + f3(avg(STATS.mid)) + "  高频（90–120）=" + f3(avg(STATS.high)));
+console.log("  顶到 0.98 以上的柱子数（平均每帧）= " + avg(STATS.pegged).toFixed(1) + " / " + SRC_BAR_N);
+console.log("  低频（前 " + LOW_TO + " 根）平均 = " + f3(avg(STATS.low))
+  + "  中频（" + MID_FROM + "–" + MID_TO + "）=" + f3(avg(STATS.mid))
+  + "  高频（" + HIGH_FROM + "–" + SRC_BAR_N + "）=" + f3(avg(STATS.high)));
 console.log("  相邻柱高差（越小越平整）= " + f3(avg(STATS.rough)) + "（中位 " + f3(q(STATS.rough, 0.5)) + "，p90 " + f3(q(STATS.rough, 0.9)) + "）");
 console.log("  逐帧抖动（相邻两帧柱高变化）= " + avg(STATS.shimmer).toFixed(4) + "  ← 1.3.0 参数下的固有值（行波抖动 + 14 级量化）");
 console.log("");
@@ -163,7 +217,7 @@ const maxAvg = avg(STATS.max);
 const pegAvg = avg(STATS.pegged);
 const flat = Math.max(...last) - Math.min(...last);
 let verdict;
-if (maxAvg > 0.999 && pegAvg > 60) verdict = "✗ 又顶满了（本帧峰值归一后整排贴 1.0，等于每根柱都是满高）";
+if (maxAvg > 0.999 && pegAvg > SRC_BAR_N * 0.5) verdict = "✗ 又顶满了（本帧峰值归一后整排贴 1.0，等于每根柱都是满高）";
 else if (flat < 0.25) verdict = "✗ 太平（柱高没有层次，看不出频谱形状）";
 else verdict = "✓ 有层次（低频厚、高频薄、随鼓点起伏），与 1.3.0 的参数一致；"
   + "抖动 " + avg(STATS.shimmer).toFixed(4) + " / 相邻柱高差 " + f3(avg(STATS.rough)) + " 就是那一版的固有观感，未做额外平滑";
