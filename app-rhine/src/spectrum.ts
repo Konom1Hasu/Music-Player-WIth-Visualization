@@ -50,7 +50,7 @@ export interface VizParams {
   tilt: number; // 频谱平衡 0~100（越大左侧整体越高）
   bassSigma: number; // 左峰宽丘的 σ（0.020~0.080，越小越窄）
   jitterK: number; // 抖动倍率（0.40~2.00）
-  kickPump: number; // 鼓点泵动深度（0~0.60，0 = 左峰一直顶满）
+  kickPump: number; // 鼓点泵动深度（KICK_PUMP_MIN~0.60，0 = 左峰一直顶满 —— 见下面的闸门）
   peakTarget: number; // 左峰静态高度目标（0.55~1.45）
 }
 export const VIZ_DEFAULTS: VizParams = { tilt: 55, bassSigma: 0.048, jitterK: 1.0, kickPump: 0.4, peakTarget: 1.05 };
@@ -70,6 +70,20 @@ export function clampVizParams(p: Partial<VizParams>): Partial<VizParams> {
   if (typeof p.jitterK === "number") out.jitterK = Math.max(0.4, Math.min(2, p.jitterK));
   if (typeof p.kickPump === "number") out.kickPump = Math.max(0, Math.min(0.6, p.kickPump));
   if (typeof p.peakTarget === "number") out.peakTarget = Math.max(0.55, Math.min(1.45, p.peakTarget));
+  return out;
+}
+/* ★ 左峰"留余量"闸门（用户 2026-09-28："可视化左侧不要一直顶满"）。
+   根因就是这里的 kickPump：它的定义是"鼓点之间把左峰压多低"，
+   取 0 等于关掉泵动 —— 左峰被频段增益顶到天花板之后就再也不下来，
+   量化后看着就是一排死顶满的柱子（离线观测：左峰 100% 的帧贴着 0.98、起伏 σ 0.001）。
+   旧版播放器面板上"鼓点"能拉到 0，用户的旧设置正是 0，导入后就成了这样。
+   1.3.0 的默认值是 0.40（"鼓点顶满、拍间回落"），所以把它当成硬下限：
+   左峰照样能顶到最高（峰值高度没动），但拍与拍之间会掉下来，不再一直顶满。 */
+export const KICK_PUMP_MIN = 0.4;
+/** 把"会一直顶满"的参数夹回有起伏的区间（旧版导入的值可能落在顶满区，见 KICK_PUMP_MIN） */
+export function clampHeadroom(p: Partial<VizParams>): Partial<VizParams> {
+  const out: Partial<VizParams> = { ...p };
+  if (typeof out.kickPump === "number" && out.kickPump < KICK_PUMP_MIN) out.kickPump = KICK_PUMP_MIN;
   return out;
 }
 /** 抖动三件套都随 jitterK 缩放（1.3.0 的做法） */

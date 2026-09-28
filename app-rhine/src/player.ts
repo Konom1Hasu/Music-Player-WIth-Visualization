@@ -11,6 +11,8 @@ import {
   vizParams,
   setVizParams,
   clampVizParams,
+  clampHeadroom,
+  KICK_PUMP_MIN,
   type VizParams,
   type SpectrumPalette,
   type SpectrumMode,
@@ -28,7 +30,13 @@ function loadVizParams() {
   try {
     const raw = localStorage.getItem(LS_VIZ);
     if (!raw) return;
-    setVizParams(clampVizParams(JSON.parse(raw) as Partial<VizParams>));
+    const stored = clampVizParams(JSON.parse(raw) as Partial<VizParams>);
+    const head = clampHeadroom(stored);
+    setVizParams(head);
+    /* 已经导入过旧设置的机器（存储里是 鼓点 0）会一直"左峰顶满"，
+       这里夹回 KICK_PUMP_MIN 并把结果写回存储，免得每次启动都要再夹一遍。
+       ★ 只写一次就收敛：head 与 stored 一致时不再写。 */
+    if (head.kickPump !== stored.kickPump) saveVizParams();
   } catch {
     /* ignore */
   }
@@ -70,10 +78,12 @@ export async function importLegacyVizSettings(): Promise<boolean> {
   const jit = int("mp_jit2", 40, 200);
   if (jit !== null) next.jitterK = jit / 100; // 抖动倍率
   const kick = int("mp_kick", 0, 60);
-  if (kick !== null) next.kickPump = kick / 100; // 鼓点泵动（0 = 左峰一直顶满）
+  if (kick !== null) next.kickPump = kick / 100; // 鼓点泵动（0 = 左峰一直顶满，下面会被闸门夹到 KICK_PUMP_MIN）
   const peak = int("mp_peakh", 55, 145);
   if (peak !== null) next.peakTarget = peak / 100; // 峰高（左峰静态高度目标）
-  const applied = clampVizParams(next);
+  /* 夹一道"留余量"闸门：旧版的 鼓点 0 / 峰高 ≥1.25 都会让左峰一直顶满（原版面板自己也这么标注），
+     用户明确要求"可视化左侧不要一直顶满"，所以这两项不再照搬旧值。 */
+  const applied = clampVizParams(clampHeadroom(next));
   if (!Object.keys(applied).length) return false;
   setVizParams(applied);
   saveVizParams();
@@ -91,7 +101,12 @@ export async function importLegacyVizSettings(): Promise<boolean> {
     `鼓点 ${(vizParams.kickPump * 100).toFixed(0)}`,
     `峰高 ${vizParams.peakTarget.toFixed(2)}`,
   ].join(" / ");
-  toast(`已导入旧版调音设置：${brief}`);
+  /* 夹过闸门要说一句：用户看到"鼓点 40"而不是旧版的 0，得知道为什么 */
+  const kickRaw = next.kickPump;
+  const note = typeof kickRaw === "number" && kickRaw < KICK_PUMP_MIN
+    ? `（旧版 鼓点 ${(kickRaw * 100).toFixed(0)} 会让左峰一直顶满，已按原版留余量的 ${(KICK_PUMP_MIN * 100).toFixed(0)} 收住）`
+    : "";
+  toast(`已导入旧版调音设置：${brief}${note}`);
   return true;
 }
 
