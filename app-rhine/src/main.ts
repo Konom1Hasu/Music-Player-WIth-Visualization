@@ -369,6 +369,20 @@ window.addEventListener("rhine-back-archive", () => {
     audio.play("back");
   }
 });
+/* 点播放条上的**曲名那一块** = 打开当前这首歌的档案（用户要求"点击歌曲名打开对应的歌曲档案"）。
+   只切画面与选中态，**不碰播放状态** —— 歌本来就在放，点名字只是想看它的档案。 */
+window.addEventListener("rhine-open-current", () => {
+  if (!ready || mode === "boot" || viewer?.isOpen || editing) return;
+  const index = currentIndex();
+  if (index < 0 || !records[index]) return;
+  const enter = () => {
+    if (index !== selected) focusArchive(index);
+    if (mode !== "detail") setMode("detail");
+    audio.play("open");
+  };
+  if (modal) closeModal(enter);
+  else enter();
+});
 
 function setMode(next: Mode) {
   const previousMode = mode;

@@ -868,8 +868,10 @@ function closePlaylist() {
      不收起的话"先在列表里点歌、再去点别的档案"会被它整块吃掉 —— 用户反馈的"切换失灵"。
    （事件只在 player 这一侧派发，终端收到后自己决定进不进详情：开屏、弹窗、编辑态、
      360° 查看器占着画面时不抢。） */
-function followWithArchive(index: number) {
-  if (index < 0 || !playbackPrefs.openOnPlay) return;
+function followWithArchive(index: number, force = false) {
+  /* force = true：无视 openOnPlay 偏好，一定要打开 —— 用户"点歌曲名"就是这个意思：
+     名字点下去要看到那一首的档案（用户反馈"点击歌曲名没有打开对应的歌曲档案"）。 */
+  if (index < 0 || (!force && !playbackPrefs.openOnPlay)) return;
   closePlaylist();
   window.dispatchEvent(new CustomEvent("rhine-open-track", { detail: index }));
 }
@@ -1564,6 +1566,9 @@ let workerMsAvg = 0; // worker 单次分析耗时（诊断用）
 let workerSentAt = 0;
 let workerRttAvg = 0;
 let dataAgeMs = 0; // 诊断：屏幕上这份频谱数据是多久之前喂进去的
+/* 分析节拍：**1.3.0 的 30Hz**（每 33ms 一帧）。这个值是 1.3.0 的参数，不是"性能取舍"——
+   流水线里的抖动相位、一阶跟随系数、鼓点参考电平都是按帧给的，改了节拍等于改了它们。 */
+const VIZ_ANALYSIS_MS = 33;
 function initSpectrumWorker() {
   try {
     const src = `
@@ -1779,11 +1784,14 @@ function vizFrame(ts: number) {
       analyserNode.getFloatTimeDomainData(timeData);
       /* 频谱在 Web Worker 里算（1.3.0 的做法）：Goertzel 放主线程会和三维场景抢帧 ——
          用户在 1.4.5 反馈"可视化帧率很低"就是这条。
-         ★ 节拍 = 每个渲染帧（≈60Hz），不再用 33ms 节流 —— 那 33ms 直接变成
-         "屏幕上的柱高比声音慢一帧半"的延迟（用户反馈"频谱和音频存在延迟"）。
+         ★ 分析节拍回到 **1.3.0 的 30Hz（每 33ms 一帧）**：流水线里所有系数都是**按帧**给的
+         （抖动相位每帧 +0.03、一阶跟随 0.70−0.20·i/n / 0.58+0.22·i/n、鼓点参考电平每帧 ×0.05），
+         把分析提到 60Hz 等于把它们全部加倍 —— 表现就是"顶端锯齿太严重、高度差不如原来夸张"。
+         帧率本来也不影响感受：分析窗本身就有 1024 点 ≈ 21ms 的积分时间。
+         （曾经为了"降低延迟"改成每帧，那一步已按用户反馈撤回。）
          worker 起不来时退回同步计算。 */
       if (spectrumWorker && workerEver) {
-        {
+        if (ts - workerSentAt >= VIZ_ANALYSIS_MS) {
           const n = analysisWindow(timeData);
           let buf = tdBufs.length ? (tdBufs[tdRotate++ % tdBufs.length] as Float32Array) : null;
           if (!buf || buf.length !== n) buf = new Float32Array(n);
@@ -2139,7 +2147,14 @@ function buildUI() {
       removeSong(del);
       return;
     }
-    if (row) playAt(Number(row.getAttribute("data-i")));
+    if (row) {
+      const at = Number(row.getAttribute("data-i"));
+      playAt(at);
+      /* ★ 点的是**曲名那一段**（.p-meta）：除了播放，还要把这一首的档案打开 ——
+         而且无视 openOnPlay 偏好（用户明确要求"点歌曲名就要打开对应的歌曲档案"）。
+         点行内其它空白处只播放，保持原来的行为。 */
+      if (t.closest(".p-meta")) followWithArchive(at, true);
+    }
   });
   /* 抽屉点外面就收起。它是压在左侧三维档案阵列上的浮层（880×560），
      一直开着的话，点在阵列卡片上的那一下会被它整块吃掉、什么都不会发生 ——
@@ -2151,18 +2166,20 @@ function buildUI() {
     if (!(t instanceof Element) || t.closest("#player-playlist") || t.closest("#p-list")) return;
     closePlaylist();
   });
-  /* ★ 点播放条（按钮 / 进度条 / 音量条之外的区域）＝ **回到档案阵列**。
-     用户要求"添加点击播放栏重新回到档案功能"：详情打开之后想回去，原来只能按 ESC
-     或点左上角那个返回键；现在点播放条本身就行 —— 曲名 / 艺术家 / 频谱那一块都算。
-     控件区里的点击照旧走各自的处理（按钮、range 输入都不拦，交给它们自己冒泡处理）。 */
+  /* ★ 点播放条的两块区域，两件事：
+       · **曲名 / 艺术家那一块（.p-now）** → 打开当前这首歌的档案
+         （用户反馈"点击歌曲名没有打开对应的歌曲档案"）
+       · **其余空白处（频谱那一块等）** → 回到档案阵列（之前那条需求）
+     控件区（按钮 / 进度条 / 音量条 / 列表开关）的点击照旧走各自的处理。 */
   bar.addEventListener("click", (e) => {
     const t = e.target;
     if (!(t instanceof Element)) return;
     if (t.closest("button, input, select, label")) return;
-    window.dispatchEvent(new CustomEvent("rhine-back-archive"));
+    if (t.closest(".p-now")) window.dispatchEvent(new CustomEvent("rhine-open-current"));
+    else window.dispatchEvent(new CustomEvent("rhine-back-archive"));
   });
   const nowBlock = bar.querySelector<HTMLElement>(".p-now");
-  if (nowBlock) nowBlock.title = "点击播放条回到档案阵列（ESC 同效）";
+  if (nowBlock) nowBlock.title = "点击曲名打开这一首的档案；点播放条其它位置回到档案阵列";
   renderNow();
   paintTicks();
 }
