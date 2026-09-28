@@ -1,7 +1,7 @@
 // 音乐播放器：把本地音乐库映射成"档案"，驱动三维档案阵列，并提供传输控制。
 // 后端能力（NCM 解密 / B 站缓存 / 读封面 / 歌词 / 读音频）复用 Electron 的 window.desktop。
 import { setRecords, type ArchiveRecord } from "./data";
-import { Spectrum, analysisWindow, SPECTRUM_WINDOW, SPECTRUM_BANDS, type SpectrumPalette } from "./spectrum";
+import { Spectrum, analysisWindow, SPECTRUM_WINDOW, SPECTRUM_BANDS, SPECTRUM_F_MIN, SPECTRUM_F_MAX_RATIO, type SpectrumPalette } from "./spectrum";
 
 export interface Song {
   id: string;
@@ -1475,6 +1475,9 @@ function initSpectrumWorker() {
   try {
     const src = `
       const N = ${SPECTRUM_WINDOW}, B = ${SPECTRUM_BANDS}, LOG101 = Math.log10(101);
+      /* 频段映射照 1.3.0：fMin = 20Hz、fMax = 0.45 × Nyquist（随采样率变）；
+         鼓点 onset 取第 2–16 带共 15 段 —— 这两条以前都和原版不一致。 */
+      const F_MIN = ${SPECTRUM_F_MIN}, F_MAX_RATIO = ${SPECTRUM_F_MAX_RATIO};
       const hann = new Float32Array(N);
       for (let i = 0; i < N; i++) hann[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (N - 1)));
       let bandK = null, sr = 0, kickRef = 0;
@@ -1485,7 +1488,8 @@ function initSpectrumWorker() {
         if (!bandK || rate !== sr) {
           sr = rate;
           bandK = new Float32Array(B);
-          for (let b = 0; b < B; b++) bandK[b] = (42 * Math.pow(16000 / 42, b / (B - 1)) / sr) * N;
+          const fMax = F_MAX_RATIO * (sr / 2);
+          for (let b = 0; b < B; b++) bandK[b] = (F_MIN * Math.pow(fMax / F_MIN, b / (B - 1)) / sr) * N;
         }
         const mags = new Float32Array(B);
         let mx = 1e-9;
@@ -1499,9 +1503,10 @@ function initSpectrumWorker() {
         }
         const out = new Float32Array(B + 1);
         for (let b = 0; b < B; b++) out[b] = Math.log10(1 + 100 * Math.min(1, mags[b] / mx)) / LOG101;
+        /* 鼓点：1.3.0 用第 2–16 带共 15 段（旧实现误用 2–8 共 7 段，泵动跟不上拍子） */
         let low = 0;
-        for (let b = 2; b <= 8; b++) low += mags[b];
-        low /= 7;
+        for (let b = 2; b < 17; b++) low += mags[b];
+        low /= 15;
         if (kickRef <= 0) kickRef = low;
         const rise = (low - kickRef) / Math.max(kickRef, 1e-6);
         out[B] = Math.max(0, Math.min(1, (rise - 0.08) * 2.2));
@@ -1621,12 +1626,14 @@ async function ensureAnalyser(): Promise<AnalyserNode | null> {
   }
   return analyserNode;
 }
-/* 播放条的 52 格刻度直接取频谱柱（跟着渲染节拍走，且只在高度真的变了才写 DOM） */
+/* 播放条的 52 格刻度直接取频谱柱（跟着渲染节拍走，且只在高度真的变了才写 DOM）。
+   ★ 去掉原来的 30ms 节流：那会让播放条上的频谱比详情区那一大块慢半拍以上，
+     用户反馈的"频谱和音频存在延迟"在看播放条这一条时就是它（DOM 写入按"高度变了才写"
+     已经足够便宜，不需要再降频）。 */
 let tickLast = 0;
 function paintTicks(now = 0) {
   if (!specEl || !spectrum) return;
-  if (now && now - tickLast < 30) return;
-  tickLast = now;
+  if (now) tickLast = now;
   const bars = spectrum.levels;
   const kids = specEl.children;
   const step = bars.length / kids.length;
@@ -1726,6 +1733,15 @@ function vizFrame(ts: number) {
   d.rttMs = Math.round(workerRttAvg * 100) / 100;
   d.workerOn = Boolean(spectrumWorker && workerEver);
   d.dataAgeMs = Math.round(dataAgeMs * 100) / 100;
+  /* 频段映射摘要：核对"是不是 20Hz ~ 0.45×Nyquist、低频峰 ≈42Hz、鼓点取 2–16 带" */
+  if (spectrum) {
+    const bi = spectrum.bandInfo();
+    d.bandHzFirst = bi.firstHz;
+    d.bandHzLast = bi.lastHz;
+    d.bassPeakHz = bi.bassPeakHz;
+    d.kickBands = bi.kickBands;
+    d.sampleRate = bi.sampleRate;
+  }
   vizRaf = requestAnimationFrame(vizFrame);
 }
 function vizStop() {

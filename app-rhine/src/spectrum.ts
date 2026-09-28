@@ -45,8 +45,18 @@ const JITTER_FREQ = 0.1 + 0.2 * (JITTER_K - 0.4);
 const JITTER_STEP = 0.03 * JITTER_K;
 const JITTER_WOBBLE = 0.055 * JITTER_K;
 const LOG101 = Math.log10(101);
-const F_MIN = 42;
-const F_MAX = 16000;
+/* ★ 频段映射必须照 1.3.0 的原式（见 app\index.html 的 buildBandCache）：
+     fMin = 20Hz、fMax = 0.45 × Nyquist（**随采样率变**），对数等分 120 段。
+   这里曾经写死成 42Hz ~ 16000Hz —— 48kHz 下低频峰（归一化位置 0.12）落到 ≈86Hz，
+   而原版是 ≈43Hz：低频那根"细针"与鼓点响应整体错位一倍，
+   用户反馈的"原先的频谱算法好像并没有完全实现""频谱和音频存在延迟"就有这一条。 */
+const F_MIN = 20;
+const F_MAX_RATIO = 0.45;
+export { F_MIN as SPECTRUM_F_MIN, F_MAX_RATIO as SPECTRUM_F_MAX_RATIO };
+/** 鼓点 onset 用的低频段：1.3.0 是**第 2–16 带共 15 段**（旧实现只用了 2–8 共 7 段） */
+const KICK_BAND_FROM = 2;
+const KICK_BAND_TO = 16;
+const KICK_BAND_N = KICK_BAND_TO - KICK_BAND_FROM + 1;
 
 export type SpectrumMode = "mix" | "timbre" | "bars" | "ring" | "wave";
 
@@ -97,11 +107,12 @@ export class Spectrum {
     this.setSampleRate(sampleRate);
     this.bandBoost = this.buildBandBoost();
   }
-  /** 频段中心 → Goertzel 的 k（采样率变了要重建） */
+  /** 频段中心 → Goertzel 的 k（采样率变了要重建）。fMax 随采样率走，见 F_MIN/F_MAX_RATIO 的注释 */
   setSampleRate(sampleRate: number) {
     this.sampleRate = sampleRate || 48000;
+    const fMax = F_MAX_RATIO * (this.sampleRate / 2);
     for (let b = 0; b < SPECTRUM_BANDS; b++) {
-      const f = F_MIN * Math.pow(F_MAX / F_MIN, b / (SPECTRUM_BANDS - 1));
+      const f = F_MIN * Math.pow(fMax / F_MIN, b / (SPECTRUM_BANDS - 1));
       this.bandK[b] = (f / this.sampleRate) * ANALYSIS_WINDOW;
     }
   }
@@ -119,6 +130,19 @@ export class Spectrum {
   /** 诊断用：归一化后的频段 + 柱高快照 */
   snapshot() {
     return { freq: Array.from(this.freq), bars: Array.from(this.bars), show: Array.from(this.bars) };
+  }
+  /** 频段映射摘要（Hz）：首段 / 末段 / 低频峰中心。核对"映射是不是 20Hz ~ 0.45×Nyquist"用，
+      几个数、不分配数组，可以每帧塞进诊断对象。 */
+  bandInfo() {
+    const fMax = F_MAX_RATIO * (this.sampleRate / 2);
+    const at = (b: number) => F_MIN * Math.pow(fMax / F_MIN, b / (SPECTRUM_BANDS - 1));
+    return {
+      sampleRate: this.sampleRate,
+      firstHz: Math.round(at(0) * 10) / 10,
+      lastHz: Math.round(at(SPECTRUM_BANDS - 1)),
+      bassPeakHz: Math.round(at(Math.round(BASS_WIDE_CENTER * (SPECTRUM_BANDS - 1))) * 10) / 10,
+      kickBands: `${KICK_BAND_FROM}–${KICK_BAND_TO}`,
+    };
   }
   /** 换曲时把峰值线清掉，免得上一首的峰值留在屏幕上 */
   resetPeaks() {
@@ -156,9 +180,11 @@ export class Spectrum {
       this.freq[b] = Math.log10(1 + 100 * Math.min(1, this.bands[b] / mx)) / LOG101;
     }
     // 鼓点：用【未归一化】的低频原始幅度做 onset（归一化后的低频恒等于 1，取差分永远为 0）
+    /* ★ 段位照 1.3.0：第 2–16 带共 15 段（这里曾误用 2–8 共 7 段）——
+       段数变了 onset 的灵敏度和频率范围都会变，鼓点泵动就跟不上拍子。 */
     let low = 0;
-    for (let b = 2; b <= 8; b++) low += this.bands[b];
-    low /= 7;
+    for (let b = KICK_BAND_FROM; b <= KICK_BAND_TO; b++) low += this.bands[b];
+    low /= KICK_BAND_N;
     if (this.kickRef <= 0) this.kickRef = low;
     const rise = (low - this.kickRef) / Math.max(this.kickRef, 1e-6);
     const kick = Math.max(0, Math.min(1, (rise - 0.08) * 2.2));
