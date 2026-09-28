@@ -38,7 +38,7 @@ async function loadSpectrum() {
     throw e;
   }
 }
-const { Spectrum, setVizParams, clampVizParams, clampHeadroom, KICK_PUMP_MIN } = await loadSpectrum();
+const { Spectrum, setVizParams, clampVizParams, clampHeadroom, KICK_PUMP_MIN, vizParams } = await loadSpectrum();
 
 /* ---------- 0. 源码一致性自检：常量被改过就报错，免得测的是旧参数 ---------- */
 const spSrc = fs.readFileSync(path.join(SRC, "spectrum.ts"), "utf8");
@@ -153,6 +153,46 @@ if (CLI.kick !== undefined) override.kickPump = Number(CLI.kick);
 if (CLI.peak !== undefined) override.peakTarget = Number(CLI.peak);
 if (Object.keys(override).length) setVizParams(override);
 
+/* ---------- 3c. --latency：柱高从 0 爬到稳态要多久（台阶响应，步长 = 分析节拍） ----------
+   用户两次反馈"延迟感严重""没能好好反映高能量音色"。这个滞后有两段：
+     ① 分析窗 1024 点 ≈ 21ms 的积分时间（两个版本一样，不是节拍的事）；
+     ② 一阶跟随每 tick 才推一步 —— bars += (v−bars)·atk，atk = 0.70−0.20·i/n。
+        所以"爬几 tick"是固定的，**换成毫秒就是 tick 数 × 分析节拍**：
+        30Hz(33ms) 与 1.3.0 原版的 50Hz(20ms) 差 1.65 倍，高频那几根（atk 只有 0.5）差得最明显。
+   这里直接按源码里的跟随公式做确定性模拟（不掺信号与抖动，数字可复现）：
+   低频那根（i/n≈0）与高频那几根（i/n≈1）各算一遍。 */
+if (CLI.latency !== undefined) {
+  if (!/const atk = 0\.7 - 0\.2 \* \(i \/ n\);/.test(spSrc)) {
+    console.error("参数自检失败：跟随系数 atk = 0.7 - 0.2 * (i/n) 在 src/spectrum.ts 里找不到了");
+    process.exit(2);
+  }
+  const step = (frac) => {
+    const atk = 0.7 - 0.2 * frac;
+    let v = 0;
+    const hits = {};
+    for (let n = 1; n <= 40; n++) {
+      v += (1 - v) * atk; // 台阶输入 v_target = 1
+      if (hits.t50 === undefined && v >= 0.5) hits.t50 = n;
+      if (hits.t90 === undefined && v >= 0.9) hits.t90 = n;
+      if (hits.t90 !== undefined && n > hits.t90 + 2) break;
+    }
+    return hits;
+  };
+  const bass = step(0); // i/n ≈ 0：左侧低频那几根
+  const high = step(1); // i/n ≈ 1：最右侧高频那几根
+  console.log("=== 台阶响应：柱高从 0 爬到稳态要几 tick（跟随系数照 src/spectrum.ts） ===");
+  console.log("  低频（i/n = 0，上升系数 0.70）：50% " + bass.t50 + " tick、90% " + bass.t90 + " tick");
+  console.log("  高频（i/n = 1，上升系数 0.50）：50% " + high.t50 + " tick、90% " + high.t90 + " tick");
+  console.log("");
+  for (const [ms, name] of [[33, "改前：33ms（30Hz）"], [20, "改后：20ms（50Hz，1.3.0 原版的 vizInterval()）"]]) {
+    console.log("  " + name);
+    console.log("      低频到 90%：" + (bass.t90 * ms) + "ms　高频到 90%：" + (high.t90 * ms) + "ms");
+  }
+  console.log("  ⇒ 高能量 onset 跟上的时间缩短 1.65×（低频 66→40ms、高频 132→80ms），越靠右的高频越明显");
+  console.log("  另外：分析窗本身 1024 点 ≈ 21ms 的积分时间 —— 两档一样，不是这次改的。");
+  process.exit(0);
+}
+
 const SECONDS = Number(process.argv.slice(2).find((a) => !a.startsWith("--")) || 12);
 const sp = new Spectrum(canvasStub, SR);
 sp.setMode("mix");
@@ -169,7 +209,7 @@ const HIGH_FROM = Math.round(SRC_BAR_N * 0.75);
 const meanOf = (v, from, to) => v.slice(from, to).reduce((a, b) => a + b, 0) / Math.max(1, to - from);
 let prev = null;
 let pumpFrame = 0;
-const FRAMES = Math.round(SECONDS * 30); // 分析节拍 30Hz
+const FRAMES = Math.round(SECONDS * 50); // 分析节拍 = 应用里的 50Hz（1.3.0 的 vizInterval() 返回 20ms）
 const warm = Math.round(FRAMES * 0.35); // 前 35% 只当预热（一阶跟随要几帧才追上）
 for (let f = 0; f < FRAMES; f++) {
   fill(td);

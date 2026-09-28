@@ -1565,12 +1565,11 @@ function renderNow() {
   renderList();
 }
 
-/* 频谱计算搬到 Web Worker：120 段 × 512 点的 Goertzel 每次约 6 万次乘加，
-   放主线程会跟三维场景抢帧。worker 失败就退回同步计算（见 vizFrame）。
-   ★ 分析节拍 = **渲染节拍（≈60Hz）**，不再节流到 30Hz：
+/* 频谱计算搬到 Web Worker：120 段 × 1024 点的 Goertzel 每次约 12 万次乘加，
+   放主线程会跟三维场景抢帧。worker 失败就退回同步计算（见 analysisTick）。
+   ★ 分析节拍 = **1.3.0 的 50Hz**（见下面 VIZ_ANALYSIS_MS 的注释）：
      原来 `ts - workerSentAt >= 33` 让屏幕上的柱高最多滞后一帧半 + worker 往返，
-     用户反馈"频谱和音频存在延迟"。分析在 worker 里做，postMessage 很便宜，
-     所以每帧都喂；剩下的滞后就只剩 FFT 窗口本身（SPECTRUM_WINDOW 点）。
+     用户反馈"频谱和音频存在延迟"。现在分析与重画分开：分析 20ms 一 tick、rAF 只重画。
    缓冲在两侧轮流用、靠 transfer 归还，避免每帧 new 出垃圾。 */
 let spectrumWorker: Worker | null = null;
 let workerEver = false;
@@ -1581,9 +1580,16 @@ let workerMsAvg = 0; // worker 单次分析耗时（诊断用）
 let workerSentAt = 0;
 let workerRttAvg = 0;
 let dataAgeMs = 0; // 诊断：屏幕上这份频谱数据是多久之前喂进去的
-/* 分析节拍：**1.3.0 的 30Hz**（每 33ms 一帧）。这个值是 1.3.0 的参数，不是"性能取舍"——
-   流水线里的抖动相位、一阶跟随系数、鼓点参考电平都是按帧给的，改了节拍等于改了它们。 */
-const VIZ_ANALYSIS_MS = 33;
+/* 分析节拍：**1.3.0 的是 50Hz（每 20ms 一 tick）**，不是 30Hz。
+   依据在原版代码里：`vizInterval()` 在播放中 `return 20`，而 `drawViz()` 每个 tick 都做两件事 ——
+   `requestSpectrum()`（把时域数据喂给 worker，**没有任何节流**）与 `computeBars()`
+   （跑一阶跟随 + 正弦抖动 + 14 级量化）。所以"流水线节拍 = 50Hz"本身就是 1.3.0 的参数：
+   抖动相位每 tick +0.03、一阶跟随 0.70−0.20·i/n、鼓点参考电平每 tick ×0.05 全按这个节拍给。
+   ★ 曾经把这里误记成 30Hz 并节流到 33ms —— 结果是柱高最多滞后一帧半、数据平均 16.7ms 才更新，
+   用户两次反馈"延迟感严重""没能好好反映高能量音色"就是它，这次按原版改回 20ms。
+   节拍由**自己这条定时器**驱动，不挂在 rAF 上：rAF 的 16.7ms 步长会把 20ms 的门变成 33ms。
+   rAF 那条循环只负责重画。 */
+const VIZ_ANALYSIS_MS = 20;
 function initSpectrumWorker() {
   try {
     const src = `
@@ -1640,6 +1646,13 @@ function initSpectrumWorker() {
       pendingFreq = new Float32Array(d);
       pendingSentAt = workerSentAt;
       workerEver = true;
+      /* ★ 回包**立刻**出图，不等下一帧 rAF：原来在渲染循环里消费 pendingFreq，
+         平均要多等半帧（≈8ms）、最坏一帧（16.7ms）。50Hz 的节拍下这一等就是可见的滞后。 */
+      if (spectrum && pendingFreq) {
+        spectrum.applyBands(pendingFreq);
+        dataAgeMs = Math.max(0, performance.now() - pendingSentAt);
+        pendingFreq = null;
+      }
       if (VIZ_TEST) (window as any).__workerHits = ((window as any).__workerHits || 0) + 1;
     };
     spectrumWorker.onerror = () => {
@@ -1662,7 +1675,77 @@ let timeData: Float32Array<ArrayBuffer> | null = null;
 let vizDenied = false;
 let vizRaf = 0;
 let vizLast = 0;
+/* 分析节拍（20ms，1.3.0 的 50Hz）的定时器句柄。rAF 只管重画，分析由它驱动 ——
+   见 VIZ_ANALYSIS_MS 的注释：挂在 rAF 上会被 16.7ms 的步长量化成 33ms。 */
+let vizTimer: ReturnType<typeof setTimeout> | null = null;
+let vizTickCount = 0; // 诊断：一秒内的分析 tick 数 → vizTickFps
+let vizTickT0 = 0;
+let vizTickFps = 0;
 let spectrum: Spectrum | null = null;
+/* 这一 tick 要分析吗：播放中、或 ?viztest 的合成信号。暂停后不需要分析
+   （柱高回落由 rAF 那条循环的 decay() 负责）。 */
+function vizAnalysing() {
+  return VIZ_TEST || (Boolean(analyserNode) && !audio.paused);
+}
+/** 起分析定时器（幂等：已经在跑就不重复起） */
+function armVizAnalysis() {
+  if (vizTimer !== null || !vizAnalysing()) return;
+  vizTimer = setTimeout(analysisTick, VIZ_ANALYSIS_MS);
+}
+function stopVizAnalysis() {
+  if (vizTimer !== null) clearTimeout(vizTimer);
+  vizTimer = null;
+}
+/* 一个分析 tick：取时域 → 喂 worker（或同步算）→ 出图。
+   ★ 原版 drawViz() 就是每 20ms 做这一件事（requestSpectrum + computeBars），这里保持一致。 */
+function analysisTick() {
+  vizTimer = null;
+  if (!vizAnalysing()) return;
+  /* 诊断：分析 tick 的实测频率（应 ≈50Hz；被节流 / 起不来时这里立刻看出来） */
+  vizTickCount++;
+  const nowMs = performance.now();
+  if (!vizTickT0) vizTickT0 = nowMs;
+  if (nowMs - vizTickT0 >= 1000) {
+    vizTickFps = Math.round((vizTickCount * 1000) / (nowMs - vizTickT0));
+    vizTickCount = 0;
+    vizTickT0 = nowMs;
+  }
+  if (VIZ_TEST) {
+    if (!spectrum) return;
+    if (!timeData) timeData = new Float32Array(1024);
+    vizTestTimeData(timeData);
+    spectrum.update(timeData, actx?.sampleRate);
+  } else if (analyserNode && spectrum) {
+    if (!timeData) timeData = new Float32Array(analyserNode.fftSize);
+    analyserNode.getFloatTimeDomainData(timeData);
+    if (spectrumWorker && workerEver) {
+      const n = analysisWindow(timeData);
+      let buf = tdBufs.length ? (tdBufs[tdRotate++ % tdBufs.length] as Float32Array) : null;
+      if (!buf || buf.length !== n) buf = new Float32Array(n);
+      buf.set(timeData.subarray(timeData.length - n));
+      workerSentAt = performance.now();
+      spectrumWorker.postMessage({ td: buf, sr: actx?.sampleRate ?? 48000 }, [buf.buffer]);
+      /* 回包在 worker 的 onmessage 里立刻出图（不再等 rAF） */
+    } else {
+      /* worker 不可用（或还没热起来）：主线程同步算 —— 原版没有 worker 时也是这样 */
+      spectrum.update(timeData, actx?.sampleRate);
+    }
+  } else if (spectrum) {
+    spectrum.decay();
+  }
+  if (spectrumWorker) armSpectrumWatchdog();
+  armVizAnalysis();
+}
+/* 首帧同步兜底 + 看门狗：worker 起不来（策略拦截等）就退回主线程同步算。
+   原版是 800ms 内没回包就 terminate；这里按 tick 数算（20ms × 40 ≈ 800ms）。 */
+function armSpectrumWatchdog() {
+  if (!spectrumWorker) return;
+  if (workerEver) return;
+  if (++workerFrames > 40) {
+    try { spectrumWorker.terminate(); } catch (e) { /* ignore */ }
+    spectrumWorker = null;
+  }
+}
 /* ?viztest=1：不播音乐，用合成信号跑频谱 —— 用来在无音频的环境里核对频谱观感。
    信号要有**真实音乐的频谱形状**：粉噪打底（每倍频程 −3dB，高频自然衰减）＋ 一条低频
    基音与它的谐波 ＋ 每 4 秒一次的鼓点包络。
@@ -1775,7 +1858,9 @@ function vizFrame(ts: number) {
   /* 渲染节拍：播放中 60fps（16ms 预算），暂停后 15fps（只画收起动画）。
      分析节拍另算 —— worker 每 33ms 才喂一次数据，中间这些帧靠 Spectrum.render()
      把显示值朝目标值插值，所以柱高是连续滑动的。
-     1.4.7 之前这里是 33ms 的整帧预算，等于把渲染也锁在 30fps，那才是"帧率不够"。 */
+     1.4.7 之前这里是 33ms 的整帧预算，等于把渲染也锁在 30fps，那才是"帧率不够"。
+     ★ 分析（Goertzel + 一阶跟随 + 抖动）**不在这一条循环里**：由 analysisTick() 每 20ms 驱动
+     （1.3.0 的 50Hz，见 VIZ_ANALYSIS_MS 的注释）；rAF 只负责重画与回落。 */
   const dt = vizLast ? Math.min(0.1, (ts - vizLast) / 1000) : 0.033;
   const budget = VIZ_TEST || !audio.paused ? 15 : 64;
   if (ts - vizLast < budget) {
@@ -1787,52 +1872,10 @@ function vizFrame(ts: number) {
      停掉的话暂停瞬间画面会僵在最后一帧。 */
   const busy = VIZ_TEST || !audio.paused;
   if (spectrum) {
-    let advance = false;
-    if (VIZ_TEST) {
-      // 时域缓冲由循环自己保证（不依赖 ensureAnalyser —— 没有音频上下文时也要能跑）
-      if (!timeData) timeData = new Float32Array(1024);
-      vizTestTimeData(timeData);
-      spectrum.update(timeData, actx?.sampleRate);
-      advance = true;
-    } else if (analyserNode) {
-      if (!timeData) timeData = new Float32Array(analyserNode.fftSize);
-      analyserNode.getFloatTimeDomainData(timeData);
-      /* 频谱在 Web Worker 里算（1.3.0 的做法）：Goertzel 放主线程会和三维场景抢帧 ——
-         用户在 1.4.5 反馈"可视化帧率很低"就是这条。
-         ★ 分析节拍回到 **1.3.0 的 30Hz（每 33ms 一帧）**：流水线里所有系数都是**按帧**给的
-         （抖动相位每帧 +0.03、一阶跟随 0.70−0.20·i/n / 0.58+0.22·i/n、鼓点参考电平每帧 ×0.05），
-         把分析提到 60Hz 等于把它们全部加倍 —— 表现就是"顶端锯齿太严重、高度差不如原来夸张"。
-         帧率本来也不影响感受：分析窗本身就有 1024 点 ≈ 21ms 的积分时间。
-         （曾经为了"降低延迟"改成每帧，那一步已按用户反馈撤回。）
-         worker 起不来时退回同步计算。 */
-      if (spectrumWorker && workerEver) {
-        if (ts - workerSentAt >= VIZ_ANALYSIS_MS) {
-          const n = analysisWindow(timeData);
-          let buf = tdBufs.length ? (tdBufs[tdRotate++ % tdBufs.length] as Float32Array) : null;
-          if (!buf || buf.length !== n) buf = new Float32Array(n);
-          buf.set(timeData.subarray(timeData.length - n));
-          workerSentAt = ts;
-          spectrumWorker.postMessage({ td: buf, sr: actx?.sampleRate ?? 48000 }, [buf.buffer]);
-        }
-        if (pendingFreq) {
-          spectrum.applyBands(pendingFreq);
-          /* 诊断：这份数据显示出来时，它对应的时域数据是多久之前喂进去的 */
-          dataAgeMs = Math.max(0, performance.now() - pendingSentAt);
-          pendingFreq = null;
-        }
-      } else {
-        spectrum.update(timeData, actx?.sampleRate);
-        if (spectrumWorker && ++workerFrames > 120) {
-          // 等了 120 帧还没有回包（worker 被策略挡住等）→ 停掉它，永久走同步路径
-          try { spectrumWorker.terminate(); } catch (e) { /* ignore */ }
-          spectrumWorker = null;
-        }
-      }
-      advance = true;
-    }
-    if (!advance) spectrum.decay();
+    if (!busy) spectrum.decay();
     spectrum.render(dt);
   }
+  armVizAnalysis();
   paintTicks(ts);
   const d = vizDiag as any;
   d.frames++;
@@ -1845,6 +1888,8 @@ function vizFrame(ts: number) {
     if (d.intervals.length > 240) d.intervals.shift();
   }
   d.worker = Boolean(spectrumWorker);
+  d.cadenceMs = VIZ_ANALYSIS_MS; // 分析节拍（1.3.0 是 20ms / 50Hz，探针核对这个值）
+  d.tickFps = vizTickFps; // 实测的分析 tick 频率（应 ≈50）
   d.workerMs = Math.round(workerMsAvg * 100) / 100;
   d.rttMs = Math.round(workerRttAvg * 100) / 100;
   d.workerOn = Boolean(spectrumWorker && workerEver);
@@ -1863,12 +1908,14 @@ function vizFrame(ts: number) {
 function vizStop() {
   if (vizRaf) cancelAnimationFrame(vizRaf);
   vizRaf = 0;
+  stopVizAnalysis();
 }
 async function startViz() {
   const node = await ensureAnalyser();
   if (!node) return;
   if (actx && actx.state !== "running") await actx.resume().catch(() => {});
   if (!vizRaf) vizRaf = requestAnimationFrame(vizFrame);
+  armVizAnalysis();
 }
 /* 窗口最小化 / 隐藏时停掉频谱循环：Electron 里关掉了背景节流，
    不主动停就等于一直在算没人看的帧。 */
@@ -2400,6 +2447,7 @@ export function mountSongEdit(root: ParentNode) {
     const live = (analyserNode && !audio.paused) || VIZ_TEST;
     if (live || spectrum) vizRaf = requestAnimationFrame(vizFrame);
   }
+  armVizAnalysis();
 }
 /** 选一张本地图片当封面（隐藏的 file input，选中后自动清理） */
 function pickCoverImage() {
@@ -2587,6 +2635,7 @@ export function mountSongDetail(root: ParentNode) {
   if (vizRaf) return;
   const live = (analyserNode && !audio.paused) || VIZ_TEST;
   if (live) vizRaf = requestAnimationFrame(vizFrame);
+  armVizAnalysis();
 }
 
 /* 播放失败自愈（B 站缓存这一路）：副本被会话清理、头没剥干净、file:// 被拦时，
