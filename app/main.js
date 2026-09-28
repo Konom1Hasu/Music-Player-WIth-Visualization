@@ -1129,6 +1129,45 @@ ipcMain.handle('bili-keep', (_e, originalPath) => {
   }
 });
 
+/* ================= 旧版设置导入 =================
+   旧版独立播放器跑在 **file:// 域**，新版跑在 **http://127.0.0.1:41739 域** ——
+   localStorage 按 origin 隔离，新版**读不到**旧版存的那几个调音滑块值：
+     mp_tilt（平衡）/ mp_bassw2（峰宽）/ mp_jit2（抖动）/ mp_kick（鼓点）/ mp_peakh（峰高）
+     / mp_viz（可视化模式）…
+   所以这里开一个**隐藏的 file:// 窗口**（空白页，不加载旧界面、不跑旧代码），
+   让 Chromium 自己去读那份存储，再把值交给渲染进程去应用。 */
+const LEGACY_SETTING_KEYS = [
+  'mp_tilt', 'mp_bassw2', 'mp_jit2', 'mp_kick', 'mp_peakh', 'mp_viz',
+  'mp_speed', 'mp_sort', 'mp_theme', 'mp_lyr', 'mp_drawer', 'mp_cover3d', 'mp_state'
+];
+ipcMain.handle('import-legacy-settings', async () => {
+  let win = null;
+  try {
+    ensureSessionTmp();
+    const page = path.join(SESSION_TMP, 'legacy-read.html');
+    fs.writeFileSync(page, '<!doctype html><meta charset="utf-8"><title>legacy</title>', 'utf8');
+    win = new BrowserWindow({
+      show: false,
+      width: 240,
+      height: 160,
+      webPreferences: { contextIsolation: true, nodeIntegration: false, spellcheck: false }
+    });
+    await win.loadFile(page);
+    const out = await win.webContents.executeJavaScript(
+      '(() => { const keys = ' + JSON.stringify(LEGACY_SETTING_KEYS) + ';' +
+      ' const o = {}; for (const k of keys) { try { const v = localStorage.getItem(k); if (v !== null) o[k] = String(v); } catch (e) {} } return o; })()'
+    );
+    const count = out ? Object.keys(out).length : 0;
+    audit('import-legacy-settings', { src: 'file://', result: 'ok', bytes: count });
+    return { ok: true, origin: 'file://', values: out || {} };
+  } catch (e) {
+    audit('import-legacy-settings', { src: 'file://', result: 'failed' });
+    return { error: String((e && e.message) || e) };
+  } finally {
+    try { if (win && !win.isDestroyed()) win.destroy(); } catch (e) { /* ignore */ }
+  }
+});
+
 /* 本地保留副本的占用情况（设置面板里显示"本地副本 N 个 · X MB"） */
 ipcMain.handle('local-audio-info', () => {
   try {

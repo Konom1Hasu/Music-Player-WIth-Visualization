@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld('desktop', {
   keepBiliAudio: (originalPath) => ipcRenderer.invoke('bili-keep', originalPath),
   // 本地保留副本的占用情况 → { ok, count, bytes, dir } | { error }
   localAudioInfo: () => ipcRenderer.invoke('local-audio-info'),
+  // 读取旧版（file:// 域）存在 localStorage 里的设置 → { ok, values } | { error }
+  importLegacySettings: () => ipcRenderer.invoke('import-legacy-settings'),
   // 读音频字节，用于 blob 兜底播放 → { bytes, mime, size } | { error }
   readAudio: (p) => ipcRenderer.invoke('read-audio', p),
   // 全局快捷键注册状态（媒体键是否被游戏占用）→ { media, fallback, detail }

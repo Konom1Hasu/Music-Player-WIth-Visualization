@@ -355,6 +355,20 @@ window.addEventListener("rhine-open-track", (event) => {
   setMode("detail");
   audio.play("open");
 });
+/* 点播放条（按钮之外的区域）= 回到档案阵列。
+   用户要求"添加点击播放栏重新回到档案功能"：在详情里想回去，原来只能按 ESC 或点左上角
+   返回键，现在点播放条本身就行。弹窗开着时先把弹窗收掉（和上一次点击的意图一致）。 */
+window.addEventListener("rhine-back-archive", () => {
+  if (!ready || mode === "boot") return;
+  if (modal) {
+    closeModal();
+    return;
+  }
+  if (mode === "detail") {
+    setMode("archive");
+    audio.play("back");
+  }
+});
 
 function setMode(next: Mode) {
   const previousMode = mode;

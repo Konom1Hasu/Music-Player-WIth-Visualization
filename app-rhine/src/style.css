@@ -2408,6 +2408,9 @@ body.rhine-night #player-playlist {
 #player-bar {
   position: absolute;
   left: 59px;
+  /* 点播放条（按钮 / 进度条 / 音量条之外的区域）= 回到档案阵列，
+     见 player.ts 里 bar 的 click 处理，所以整条给 pointer 光标。 */
+  cursor: pointer;
   /* ★ 底边距必须让开底部那两行：`.system-footer` 在 bottom:35px、`.powered` 在 bottom:30px。
      之前为了让"底部不那么空"压到 40px，播放条（高 134）把 SESSION AUTHORIZED / 时钟 /
      REINITIALIZE 那一整行盖住了 —— 用户反馈的"全屏后下方存在遮挡"。

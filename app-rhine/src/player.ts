@@ -1,7 +1,99 @@
 // 音乐播放器：把本地音乐库映射成"档案"，驱动三维档案阵列，并提供传输控制。
 // 后端能力（NCM 解密 / B 站缓存 / 读封面 / 歌词 / 读音频）复用 Electron 的 window.desktop。
 import { setRecords, type ArchiveRecord } from "./data";
-import { Spectrum, analysisWindow, SPECTRUM_WINDOW, SPECTRUM_BANDS, SPECTRUM_F_MIN, SPECTRUM_F_MAX_RATIO, type SpectrumPalette } from "./spectrum";
+import {
+  Spectrum,
+  analysisWindow,
+  SPECTRUM_WINDOW,
+  SPECTRUM_BANDS,
+  SPECTRUM_F_MIN,
+  SPECTRUM_F_MAX_RATIO,
+  vizParams,
+  setVizParams,
+  clampVizParams,
+  type VizParams,
+  type SpectrumPalette,
+  type SpectrumMode,
+} from "./spectrum";
+
+/* ---------- 可视化参数：默认 1.3.0 原值，启动时可从旧版导入一次 ----------
+   旧版播放器的调音面板把 平衡/峰宽/抖动/鼓点/峰高 存在 localStorage 的 mp_* 里，
+   但那份存储属于 **file:// 域**，新版是 http://127.0.0.1:41739 域 —— 同源策略下读不到，
+   所以走主进程开隐藏页去读（app/main.js 的 import-legacy-settings）。
+   用户调过的值（例如 平衡 63、峰高 1.45）就是他习惯的观感，比"原版默认值"更该用。 */
+const LS_VIZ = "rhine-viz-params";
+const LS_VIZ_IMPORTED = "rhine-viz-imported";
+let vizModePref = "mix";
+function loadVizParams() {
+  try {
+    const raw = localStorage.getItem(LS_VIZ);
+    if (!raw) return;
+    setVizParams(clampVizParams(JSON.parse(raw) as Partial<VizParams>));
+  } catch {
+    /* ignore */
+  }
+}
+function saveVizParams() {
+  try {
+    localStorage.setItem(LS_VIZ, JSON.stringify({ ...vizParams }));
+  } catch {
+    /* ignore */
+  }
+}
+loadVizParams();
+/** 一次性把旧版调音参数导进来（导入成功后写进 rhine-viz-params，不再重复导入）。 */
+export async function importLegacyVizSettings(): Promise<boolean> {
+  let already = false;
+  try {
+    already = localStorage.getItem(LS_VIZ_IMPORTED) === "1";
+  } catch {
+    /* ignore */
+  }
+  if (already || !desktop?.importLegacySettings) return false;
+  let res: any = null;
+  try {
+    res = await desktop.importLegacySettings();
+  } catch {
+    return false;
+  }
+  if (!res || res.error || !res.values) return false;
+  const v = res.values as Record<string, string>;
+  const int = (k: string, lo: number, hi: number) => {
+    const n = parseInt(String(v[k] ?? ""), 10);
+    return isFinite(n) && n >= lo && n <= hi ? n : null;
+  };
+  const next: Partial<VizParams> = {};
+  const tilt = int("mp_tilt", 0, 100);
+  if (tilt !== null) next.tilt = tilt; // 频谱平衡（越大左侧整体越高）
+  const bw = int("mp_bassw2", 20, 80);
+  if (bw !== null) next.bassSigma = bw / 1000; // 峰宽（σ = 值/1000）
+  const jit = int("mp_jit2", 40, 200);
+  if (jit !== null) next.jitterK = jit / 100; // 抖动倍率
+  const kick = int("mp_kick", 0, 60);
+  if (kick !== null) next.kickPump = kick / 100; // 鼓点泵动（0 = 左峰一直顶满）
+  const peak = int("mp_peakh", 55, 145);
+  if (peak !== null) next.peakTarget = peak / 100; // 峰高（左峰静态高度目标）
+  const applied = clampVizParams(next);
+  if (!Object.keys(applied).length) return false;
+  setVizParams(applied);
+  saveVizParams();
+  if (typeof v.mp_viz === "string" && /^(mix|timbre|bars|ring|wave)$/.test(v.mp_viz)) vizModePref = v.mp_viz;
+  try {
+    localStorage.setItem(LS_VIZ_IMPORTED, "1");
+  } catch {
+    /* ignore */
+  }
+  if (spectrum) spectrum.applyParams();
+  const brief = [
+    `平衡 ${Math.round(vizParams.tilt)}`,
+    `峰宽 ${(vizParams.bassSigma * 1000).toFixed(0)}`,
+    `抖动 ${(vizParams.jitterK * 100).toFixed(0)}`,
+    `鼓点 ${(vizParams.kickPump * 100).toFixed(0)}`,
+    `峰高 ${vizParams.peakTarget.toFixed(2)}`,
+  ].join(" / ");
+  toast(`已导入旧版调音设置：${brief}`);
+  return true;
+}
 
 export interface Song {
   id: string;
@@ -36,6 +128,7 @@ const desktop = (window as any).desktop as
       prepareBiliAudio?: (p: string, force?: boolean) => Promise<any>;
       keepBiliAudio?: (p: string) => Promise<any>;
       localAudioInfo?: () => Promise<any>;
+      importLegacySettings?: () => Promise<any>;
       readAudio?: (p: string) => Promise<any>;
       on?: (channel: string, cb: (data: any) => void) => void;
       getHotkeyStatus?: () => Promise<any>;
@@ -2023,8 +2116,7 @@ function buildUI() {
     }
   });
   bar.querySelector("#p-seek")!.addEventListener("input", (e) => {
-    if (audio.duration) audio.currentTime = (Number((e.target as HTMLInputElement).value) / 1000) * audio.duration;
-  });
+    if (audio.duration) audio.currentTime = (Number((e.target as HTMLInputElement).value) / 1000) * audio.duration;  });
   listEl.addEventListener("click", (e) => {
     const t = e.target as HTMLElement;
     if (t.classList.contains("p-theme")) {
@@ -2059,6 +2151,18 @@ function buildUI() {
     if (!(t instanceof Element) || t.closest("#player-playlist") || t.closest("#p-list")) return;
     closePlaylist();
   });
+  /* ★ 点播放条（按钮 / 进度条 / 音量条之外的区域）＝ **回到档案阵列**。
+     用户要求"添加点击播放栏重新回到档案功能"：详情打开之后想回去，原来只能按 ESC
+     或点左上角那个返回键；现在点播放条本身就行 —— 曲名 / 艺术家 / 频谱那一块都算。
+     控件区里的点击照旧走各自的处理（按钮、range 输入都不拦，交给它们自己冒泡处理）。 */
+  bar.addEventListener("click", (e) => {
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+    if (t.closest("button, input, select, label")) return;
+    window.dispatchEvent(new CustomEvent("rhine-back-archive"));
+  });
+  const nowBlock = bar.querySelector<HTMLElement>(".p-now");
+  if (nowBlock) nowBlock.title = "点击播放条回到档案阵列（ESC 同效）";
   renderNow();
   paintTicks();
 }
@@ -2257,7 +2361,7 @@ export function mountSongEdit(root: ParentNode) {
   if (cv) {
     spectrum = new Spectrum(cv, actx?.sampleRate ?? 48000);
     spectrum.setPalette(spectrumPalette());
-    spectrum.setMode("mix");
+    spectrum.setMode(vizModePref as SpectrumMode);
     if (VIZ_TEST || DIAG) (window as any).__rhineViz = vizDiag;
   }
   if (!vizRaf) {
@@ -2430,7 +2534,7 @@ export function mountSongDetail(root: ParentNode) {
     // 面板每次重绘都是新画布，因此频谱实例跟着重建（画布尺寸决定柱宽与渐变）
     spectrum = new Spectrum(cv, actx?.sampleRate ?? 48000);
     spectrum.setPalette(spectrumPalette());
-    spectrum.setMode("mix");
+    spectrum.setMode(vizModePref as SpectrumMode);
     // 诊断开关：?viztest=1 时把实例与帧率对象挂到 window 上，便于自动化核对（见功能说明）
     if (VIZ_TEST || DIAG) {
       (window as any).__audioEl = audio;
@@ -2720,6 +2824,9 @@ export async function initPlayer() {
      读得慢就整轮当空库，那一轮所有曲目都进不来。 */
   void loadLibrary().then(applyLibrary);
   void repairTags();
+  /* 旧版的调音参数（平衡/峰宽/抖动/鼓点/峰高）导一次：新版读不到 file:// 域那份存储，
+     交给主进程开隐藏页去读（见 app/main.js 的 import-legacy-settings）。 */
+  void importLegacyVizSettings();
 }
 
 /** 读库兜底：库打开 / 读数据都不返回时按空库继续，开屏不会被卡住。
