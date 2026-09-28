@@ -20,8 +20,9 @@ export interface Song {
   pos: number;
   lrc?: string;
   order: number;
-  /* B 站缓存专用：s.path 是原始 .m4s 路径；triedBlob 记住"这一首已用 blob 播过"，
-     避免播放失败时反复重建副本 / 反复读字节。都不落库（落库的只有持久字段）。 */
+  /* B 站缓存专用：s.path 是原始 .m4s 路径；s.localPath 是**导入时复制进曲库目录的本地副本**
+     （与源缓存解耦，源删了也能播）。triedBlob / triedHeal 是本次会话内的重试标记，不落库。 */
+  localPath?: string;
   triedBlob?: boolean;
   triedHeal?: boolean;
 }
@@ -33,6 +34,8 @@ const desktop = (window as any).desktop as
       findLyrics?: (p: string, t: string, a: string) => Promise<string | null>;
       scanBiliCache?: () => Promise<any>;
       prepareBiliAudio?: (p: string, force?: boolean) => Promise<any>;
+      keepBiliAudio?: (p: string) => Promise<any>;
+      localAudioInfo?: () => Promise<any>;
       readAudio?: (p: string) => Promise<any>;
       on?: (channel: string, cb: (data: any) => void) => void;
     }
@@ -512,18 +515,21 @@ export function playbackSettingsMarkup(): string {
     .join("");
 }
 /* ---------- B 站缓存的音源（"导入的放不出来"就是这里断的） ----------
-   库里存的是【原始 .m4s 路径】（s.path，导入时由 bili.js 的 audioPath 写入）。要能播，两件事都得做：
+   库里存的是【原始 .m4s 路径】（s.path，导入时由 bili.js 的 audioPath 写入）。
+   另外导入时会把"可播放副本"复制一份到 <userData>\library\audio（s.localPath）——
+   这是**与源缓存解耦**的那一份，源文件夹被删掉/移走也能照常播放。
+
+   要能播，两件事都得做：
 
    ① 主进程按需生成"可播放副本"（prepare-bili-audio → bili.ensureM4a）：
       电脑端缓存会在 mp4 前面塞 9 字节自定义头，Chromium 的解复用器不认，直接 MediaError 4。
-      副本剥掉头才认。副本落在**会话临时目录**，退出即销毁 —— 所以每次启动都得重新生成。
+      副本剥掉头才认。会话副本落在**临时目录**（退出即销毁），所以源还在时每次启动都要重建；
+      源没了就只能靠 s.localPath 那份本地副本。
    ② UI 挂在本机静态服务上（http://127.0.0.1:41739），`file://` 音源会被 Chromium 拦掉
       （Not allowed to load local resource）→ 必须用 read-audio 读回字节转成 blob 再喂给 <audio>。
 
-   旧界面 app/index.html 一直靠"启动 ensureAllPlayable + 播放失败自愈 + blob 兜底"这三条撑住，
-   终端界面重写时整段丢了：只把按钮搬了过来，音源这一路是坏的 —— 于是"导入的不能放"。
-   现在改成播放前**按需**备好（不搞启动时全库重建，那是几十 MB 的白写）：先确保副本，
-   能读字节就用 blob，读不到才退回 file:// 碰碰运气。 */
+   取音源的优先级：**本地保留副本（s.localPath）→ 会话副本（从源缓存现做）→ 源缓存本身**。
+   三样都没有时给一条明确的提示（"源缓存已被删除，本地副本也不在"），而不是静默无声。 */
 function fileUrlToPath(url: string): string {
   try {
     return decodeURIComponent(String(url || "").replace(/^file:\/\/\//i, "").replace(/^file:\/\//i, ""));
@@ -531,26 +537,52 @@ function fileUrlToPath(url: string): string {
     return "";
   }
 }
+/** 上一次"取音源"失败的原因（源文件不存在 / 生成副本失败），供报错提示用 */
+let lastSourceError = "";
+/** 取"现在能读的音频文件路径"：
+    ① 本地保留副本（与源缓存解耦）—— 有就直接用；
+    ② 会话副本：让主进程从源缓存现做（源还在时才可能成功）；
+    ③ 都拿不到 → 返回空串，并把原因记在 lastSourceError 里。
+    force = true 时跳过 ①（播放报错后的自愈：强制从源重建）。 */
+async function playablePathOf(s: Song, force = false): Promise<string> {
+  if (s.localPath && !force) return s.localPath;
+  if (s.path && desktop?.prepareBiliAudio) {
+    try {
+      const r = await desktop.prepareBiliAudio(s.path, !!force);
+      if (r && r.ok && r.path) {
+        s.srcUrl = r.url || s.srcUrl;
+        lastSourceError = "";
+        return r.path;
+      }
+      lastSourceError = (r && r.error) || "生成可播放副本失败";
+    } catch (e) {
+      lastSourceError = String((e as any)?.message || e);
+    }
+  }
+  if (s.localPath) return s.localPath;
+  lastSourceError = lastSourceError || "这一首没有可用的本地副本";
+  return "";
+}
 /** 让主进程备好可播放副本并把新地址写回 s.srcUrl；返回"地址变了没有"。
     幂等：副本已经正确时主进程直接返回原路径，几乎零开销。 */
 async function ensurePlayableSource(s: Song, force = false): Promise<boolean> {
-  if (!s || !s.path || !desktop?.prepareBiliAudio) return false;
-  try {
-    const r = await desktop.prepareBiliAudio(s.path, !!force);
-    if (r && r.ok && r.url) {
-      const changed = s.srcUrl !== r.url;
-      s.srcUrl = r.url;
-      return changed;
-    }
-  } catch {
-    /* ignore */
+  /* 本地保留副本优先：它有就不必再动源缓存（源删了也照样能播） */
+  if (!force && s.localPath && s.srcUrl !== s.localPath) {
+    s.srcUrl = s.localPath;
+    return true;
   }
-  return false;
+  const p = await playablePathOf(s, force);
+  if (!p) return false;
+  const changed = s.srcUrl !== p;
+  s.srcUrl = p;
+  return changed;
 }
-/** 把音频文件读成 blob 地址（绕开 file:// 限制）。读不到返回空串。 */
-async function blobUrlOf(s: Song): Promise<string> {
-  const p = fileUrlToPath(s.srcUrl || "") || s.path || "";
-  if (!p || !desktop?.readAudio) return "";
+/** 把音频文件读成 blob 地址（绕开 file:// 限制）。读不到返回空串。
+    force = true：跳过本地保留副本，强制从源缓存重建会话副本（自愈路径）。 */
+async function blobUrlOf(s: Song, force = false): Promise<string> {
+  if (!desktop?.readAudio) return "";
+  const p = (await playablePathOf(s, force)) || fileUrlToPath(s.srcUrl || "") || s.path || "";
+  if (!p) return "";
   try {
     const res = await desktop.readAudio(p);
     if (res && res.bytes && res.bytes.byteLength) {
@@ -558,6 +590,7 @@ async function blobUrlOf(s: Song): Promise<string> {
       s.triedBlob = true;
       return url;
     }
+    lastSourceError = (res && res.error) || "读不到音频字节";
   } catch {
     /* ignore */
   }
@@ -613,6 +646,34 @@ export function coverToolsMarkup(): string {
     `没有本地文件路径的曲目（浏览器模式导入的）会跳过</span></div>` +
     `<button type="button" class="edit-mini" data-action="reread-covers" style="pointer-events:auto">重新读取全部封面</button></label>`
   );
+}
+/** 系统设置里的"本地音频副本"一行：只显示占用（导入 B 站缓存时复制进来的那些）。
+    这一行是给用户看盘占用的，不需要按钮 —— 副本删了就播不了，所以不做一键清空。 */
+export function localAudioMarkup(): string {
+  return (
+    `<label><div><strong>LOCAL AUDIO COPIES</strong><span>` +
+    `导入 B 站缓存时会把"可播放副本"复制一份到曲库目录（<code>%APPDATA%\\music-player\\library\\audio</code>），` +
+    `这样**源缓存文件夹被删掉/移走之后仍然能播**。这里显示的是它占了多少盘</span></div>` +
+    `<span id="local-audio-info" class="settings-value">读取中…</span></label>`
+  );
+}
+/** 填充 localAudioMarkup() 里那个占位（打开设置面板后异步取一次） */
+export async function fillLocalAudioInfo() {
+  const el = document.querySelector<HTMLElement>("#local-audio-info");
+  if (!el) return;
+  if (!desktop?.localAudioInfo) {
+    el.textContent = "需在桌面版使用";
+    return;
+  }
+  try {
+    const r = await desktop.localAudioInfo();
+    if (r && r.ok) {
+      const mb = (Number(r.bytes) || 0) / 1024 / 1024;
+      el.textContent = `${r.count} 个 · ${mb >= 1024 ? (mb / 1024).toFixed(2) + " GB" : mb.toFixed(1) + " MB"}`;
+    } else el.textContent = "读取失败";
+  } catch {
+    el.textContent = "读取失败";
+  }
 }
 /** 一键重新读取全部封面。
     · 逐首走主进程的 read-cover（NCM / MP3 / FLAC / M4A / WAV / OGG / APE…），
@@ -1182,6 +1243,8 @@ export async function importBili() {
      集合在循环里累积，同一个文件夹里出现两条同源记录也只进一条。 */
   const seen = existingKeys();
   let dup = 0;
+  let kept = 0;
+  toast(`正在把 ${items.length} 首缓存复制进曲库…`);
   for (const it of items) {
     const key = it.audioPath ? "bili:" + String(it.audioPath).toLowerCase() : "";
     if (key) {
@@ -1191,10 +1254,26 @@ export async function importBili() {
       }
       seen.add(key);
     }
+    /* ★ 与源缓存解耦：把"可播放副本"复制一份到曲库目录（<userData>\library\audio）。
+       用户反馈"把 B 站缓存文件夹删掉/移走之后就不能播了" —— 以前副本只在会话临时目录里，
+       源一没就再也重建不出来。这一步失败不影响导入（播放时还能从源现做副本）。 */
+    let localPath = "";
+    if (desktop?.keepBiliAudio && it.audioPath) {
+      try {
+        const kr = await desktop.keepBiliAudio(String(it.audioPath));
+        if (kr && kr.ok && kr.path) {
+          localPath = kr.path;
+          kept++;
+        }
+      } catch {
+        /* ignore */
+      }
+    }
     const song: Song = {
       id: uid(),
       srcUrl: it.path,
       path: it.audioPath || "",
+      localPath: localPath || undefined,
       title: (it.title || "").trim() || "未知歌曲",
       artist: (it.artist || "").trim() || "未知艺术家",
       album: it.album || "B站缓存",
@@ -1211,9 +1290,9 @@ export async function importBili() {
   }
   notify();
   if (!currentId && songs.length) selectSong(songs[0].id);
-  if (added && dup) toast(`B站缓存导入：新增 ${added} 首，跳过重复 ${dup} 首`);
+  if (added && dup) toast(`B站缓存导入：新增 ${added} 首（本地副本 ${kept} 份），跳过重复 ${dup} 首`);
   else if (!added && dup) toast(`这些 B 站缓存已经在曲库里了（跳过重复 ${dup} 首）`);
-  else toast(`B站缓存导入：新增 ${added} 首`);
+  else toast(`B站缓存导入：新增 ${added} 首（已复制 ${kept} 份本地副本，源文件夹删掉也能播）`);
 }
 
 /* ---------- UI（挂在 #stage 内，和终端共用一套网格与配色） ---------- */
@@ -1281,15 +1360,20 @@ function renderNow() {
 
 /* 频谱计算搬到 Web Worker：120 段 × 512 点的 Goertzel 每次约 6 万次乘加，
    放主线程会跟三维场景抢帧。worker 失败就退回同步计算（见 vizFrame）。
-   分析节拍固定 30Hz（worker 每 33ms 一帧），缓冲在两侧轮流用、靠 transfer 归还，
-   避免每帧 new 出垃圾；渲染循环本身跑满 60fps（见 vizFrame 的时间预算）。 */
+   ★ 分析节拍 = **渲染节拍（≈60Hz）**，不再节流到 30Hz：
+     原来 `ts - workerSentAt >= 33` 让屏幕上的柱高最多滞后一帧半 + worker 往返，
+     用户反馈"频谱和音频存在延迟"。分析在 worker 里做，postMessage 很便宜，
+     所以每帧都喂；剩下的滞后就只剩 FFT 窗口本身（SPECTRUM_WINDOW 点）。
+   缓冲在两侧轮流用、靠 transfer 归还，避免每帧 new 出垃圾。 */
 let spectrumWorker: Worker | null = null;
 let workerEver = false;
 let workerFrames = 0;
 let pendingFreq: Float32Array | null = null;
+let pendingSentAt = 0;
 let workerMsAvg = 0; // worker 单次分析耗时（诊断用）
 let workerSentAt = 0;
 let workerRttAvg = 0;
+let dataAgeMs = 0; // 诊断：屏幕上这份频谱数据是多久之前喂进去的
 function initSpectrumWorker() {
   try {
     const src = `
@@ -1339,6 +1423,7 @@ function initSpectrumWorker() {
         return;
       }
       pendingFreq = new Float32Array(d);
+      pendingSentAt = workerSentAt;
       workerEver = true;
       if (VIZ_TEST) (window as any).__workerHits = ((window as any).__workerHits || 0) + 1;
     };
@@ -1497,9 +1582,11 @@ function vizFrame(ts: number) {
       analyserNode.getFloatTimeDomainData(timeData);
       /* 频谱在 Web Worker 里算（1.3.0 的做法）：Goertzel 放主线程会和三维场景抢帧 ——
          用户在 1.4.5 反馈"可视化帧率很低"就是这条。
-         分析节拍固定 30Hz（= 每 33ms 一帧，足够跟上鼓点），worker 起不来时退回同步。 */
+         ★ 节拍 = 每个渲染帧（≈60Hz），不再用 33ms 节流 —— 那 33ms 直接变成
+         "屏幕上的柱高比声音慢一帧半"的延迟（用户反馈"频谱和音频存在延迟"）。
+         worker 起不来时退回同步计算。 */
       if (spectrumWorker && workerEver) {
-        if (ts - workerSentAt >= 33) {
+        {
           const n = analysisWindow(timeData);
           let buf = tdBufs.length ? (tdBufs[tdRotate++ % tdBufs.length] as Float32Array) : null;
           if (!buf || buf.length !== n) buf = new Float32Array(n);
@@ -1509,6 +1596,8 @@ function vizFrame(ts: number) {
         }
         if (pendingFreq) {
           spectrum.applyBands(pendingFreq);
+          /* 诊断：这份数据显示出来时，它对应的时域数据是多久之前喂进去的 */
+          dataAgeMs = Math.max(0, performance.now() - pendingSentAt);
           pendingFreq = null;
         }
       } else {
@@ -1539,6 +1628,7 @@ function vizFrame(ts: number) {
   d.workerMs = Math.round(workerMsAvg * 100) / 100;
   d.rttMs = Math.round(workerRttAvg * 100) / 100;
   d.workerOn = Boolean(spectrumWorker && workerEver);
+  d.dataAgeMs = Math.round(dataAgeMs * 100) / 100;
   vizRaf = requestAnimationFrame(vizFrame);
 }
 function vizStop() {
@@ -2267,7 +2357,10 @@ audio.addEventListener("error", async () => {
       toast(`${name}${why}，正在重建可播放副本…`);
       await ensurePlayableSource(s, true); // force = 强制重建
       if (currentId === s.id) {
-        const blob = await blobUrlOf(s);
+        let blob = await blobUrlOf(s, true); // force：跳过本地副本，先从源缓存重建
+        /* 源缓存已经被删掉时上面会失败 —— 退回本地保留副本再试一次，
+           用户反馈的"把缓存文件夹删了就不能播"正需要这条兜底。 */
+        if (!blob && s.localPath) blob = await blobUrlOf(s, false);
         if (blob) {
           if (currentUrl && currentUrl !== blob) URL.revokeObjectURL(currentUrl);
           currentUrl = blob;
@@ -2286,7 +2379,9 @@ audio.addEventListener("error", async () => {
     }
     playbackErrorHandling = false;
   }
-  toast(`${name}无法播放：${why}${code ? `（MediaError ${code}）` : ""}`);
+  /* 提示里带上真实原因：源缓存被删掉时会写"原始文件不存在：<路径>"，
+     这正是"改过缓存文件夹之后放不出来"的那种情况，用户一眼就能看懂。 */
+  toast(`${name}无法播放：${why}${code ? `（MediaError ${code}）` : ""}${lastSourceError ? ` ／ ${lastSourceError}` : ""}`);
 });
 
 /* ---------- 事件 ---------- */

@@ -35,6 +35,15 @@ const APP_VERSION = (function () {
 const SESSION_ID = crypto.randomBytes(6).toString('hex');
 const SESSION_TMP = path.join(os.tmpdir(), 'mp-session-' + SESSION_ID);
 const SESSION_AUDIO_DIR = path.join(SESSION_TMP, 'audio');
+/* 本地保留副本目录：导入 B 站缓存时把"可播放副本"留一份在这里，播放就不再依赖源缓存。
+   用户反馈"B站缓存在把文件删除/移动进文件夹后就不能播了，没有做到本地音频的解耦" ——
+   根因是副本只写在会话临时目录里（退出即销毁），源一没就再也重建不出来。
+   这份副本放在 userData 下、跨启动长期保留；删哪一首都可以在设置里看到占用。 */
+const LIBRARY_AUDIO_DIR = path.join(app.getPath('userData'), 'library', 'audio');
+function ensureLibraryAudio() {
+  try { fs.mkdirSync(LIBRARY_AUDIO_DIR, { recursive: true }); } catch (e) { /* ignore */ }
+  return LIBRARY_AUDIO_DIR;
+}
 
 let sessionTmpReady = false;
 function ensureSessionTmp() {
@@ -1080,6 +1089,41 @@ ipcMain.handle('prepare-bili-audio', (_e, originalPath, force) => {
     const size = fs.statSync(out).size;
     audit('bili-extract', { src: originalPath, bytes: size, ext: 'm4a', result: 'ok' });
     return { ok: true, path: out, url: require('url').pathToFileURL(out).href, size: size };
+  } catch (e) {
+    return { error: String((e && e.message) || e) };
+  }
+});
+
+/* 把"可播放副本"留一份到曲库目录（与源缓存解耦）。导入 B 站缓存时逐首调用。
+   幂等：同一个源算出的目标文件名固定，已存在就直接返回，不重复占盘。
+   源缓存被删掉之后调用会失败（原始文件不存在）—— 这时渲染侧会明确提示，而不是静默无声。 */
+ipcMain.handle('bili-keep', (_e, originalPath) => {
+  try {
+    if (!originalPath || typeof originalPath !== 'string') return { error: '缺少原始路径' };
+    if (!fs.existsSync(originalPath)) return { error: '原始文件不存在：' + originalPath };
+    ensureLibraryAudio();
+    const out = bili.ensureM4a(originalPath, LIBRARY_AUDIO_DIR, false);
+    if (!out) return { error: '生成本地副本失败' };
+    const size = fs.statSync(out).size;
+    audit('bili-keep', { src: originalPath, bytes: size, ext: 'm4a', result: 'ok' });
+    return { ok: true, path: out, url: require('url').pathToFileURL(out).href, size: size };
+  } catch (e) {
+    return { error: String((e && e.message) || e) };
+  }
+});
+
+/* 本地保留副本的占用情况（设置面板里显示"本地副本 N 个 · X MB"） */
+ipcMain.handle('local-audio-info', () => {
+  try {
+    ensureLibraryAudio();
+    let count = 0, bytes = 0;
+    for (const name of fs.readdirSync(LIBRARY_AUDIO_DIR)) {
+      try {
+        const st = fs.statSync(path.join(LIBRARY_AUDIO_DIR, name));
+        if (st.isFile()) { count++; bytes += st.size; }
+      } catch (e) { /* ignore */ }
+    }
+    return { ok: true, count: count, bytes: bytes, dir: LIBRARY_AUDIO_DIR };
   } catch (e) {
     return { error: String((e && e.message) || e) };
   }

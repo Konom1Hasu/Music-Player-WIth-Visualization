@@ -42,6 +42,8 @@ import {
   setSortMode,
   coverToolsMarkup,
   rereadAllCovers,
+  localAudioMarkup,
+  fillLocalAudioInfo,
   type PlaybackPrefs,
   toggleFavAt,
   importFiles,
@@ -599,6 +601,8 @@ function openModal(kind: NonNullable<typeof modal>) {
   filter = categories[0];
   audio.play("page-open");
   renderModal();
+  /* 设置面板里那行"本地副本占用"要异步问主进程要一次（模板里只能先放占位） */
+  if (kind === "settings") void fillLocalAudioInfo();
 }
 function closeModal(afterClose?: () => void) {
   if (afterClose) {
@@ -701,7 +705,7 @@ function updateQualitySummary() {
   summary.textContent = `实际渲染 ${canvas.width} × ${canvas.height} · ${prefs.rendering.antialias === "smaa" ? "SMAA" : "原始抗锯齿"} · 纹理 ${metrics.anisotropy ?? 1}×${metrics.limited ? " · 已达到缓冲上限" : ""}`;
 }
 function settingsMarkup() {
-  return `<h2>SYSTEM SETTINGS<small>终端偏好设置</small></h2><p class="settings-intro"><span class="operator-name">${getOperator()}</span> <span>·</span> SESSION AUTHORIZED</p><div class="settings-list"><label class="operator-field" for="operator-input"><div><strong>OPERATOR ID</strong><span>开屏「ID CONFIRMED」与页脚显示的身份标识</span></div><input type="text" id="operator-input" maxlength="40" value="${escapeHtml(getOperator())}" autocomplete="off" spellcheck="false"/></label>${audioSettingsMarkup(prefs)}<label><div><strong>REDUCED MOTION</strong><span>减少镜头移动和过渡动效</span></div><input type="checkbox" data-pref="reduced" ${prefs.reduced ? "checked" : ""}/><i class="toggle"></i></label>${playbackSettingsMarkup()}${coverToolsMarkup()}</div>${qualityMarkup(prefs.rendering)}<div class="settings-shortcuts"><span>KEYBOARD CONTROLS</span><p><kbd>←</kbd><kbd>→</kbd> 切列 <kbd>↑</kbd><kbd>↓</kbd> 选档 <kbd>ENTER</kbd> 读取 <kbd>/</kbd> 检索 <kbd>ESC</kbd> 返回</p></div><div class="settings-bottom"><button data-action="fullscreen">FULLSCREEN <span>↗</span></button><button data-action="restart">REINITIALIZE SYSTEM <span>↻</span></button></div><div class="modal-bottom"><span>ANALYSIS OS / 1.0 · 使用 MiSans 字体（小米） <a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">字体许可</a></span><span>POWERED BY RHINE LAB</span></div>`;
+  return `<h2>SYSTEM SETTINGS<small>终端偏好设置</small></h2><p class="settings-intro"><span class="operator-name">${getOperator()}</span> <span>·</span> SESSION AUTHORIZED</p><div class="settings-list"><label class="operator-field" for="operator-input"><div><strong>OPERATOR ID</strong><span>开屏「ID CONFIRMED」与页脚显示的身份标识</span></div><input type="text" id="operator-input" maxlength="40" value="${escapeHtml(getOperator())}" autocomplete="off" spellcheck="false"/></label>${audioSettingsMarkup(prefs)}<label><div><strong>REDUCED MOTION</strong><span>减少镜头移动和过渡动效</span></div><input type="checkbox" data-pref="reduced" ${prefs.reduced ? "checked" : ""}/><i class="toggle"></i></label>${playbackSettingsMarkup()}${coverToolsMarkup()}${localAudioMarkup()}</div>${qualityMarkup(prefs.rendering)}<div class="settings-shortcuts"><span>KEYBOARD CONTROLS</span><p><kbd>←</kbd><kbd>→</kbd> 切列 <kbd>↑</kbd><kbd>↓</kbd> 选档 <kbd>ENTER</kbd> 读取 <kbd>/</kbd> 检索 <kbd>ESC</kbd> 返回</p></div><div class="settings-bottom"><button data-action="fullscreen">FULLSCREEN <span>↗</span></button><button data-action="restart">REINITIALIZE SYSTEM <span>↻</span></button></div><div class="modal-bottom"><span>ANALYSIS OS / 1.0 · 使用 MiSans 字体（小米） <a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">字体许可</a></span><span>POWERED BY RHINE LAB</span></div>`;
 }
 
 document.addEventListener("input", (e) => {

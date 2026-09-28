@@ -18,6 +18,10 @@ contextBridge.exposeInMainWorld('desktop', {
   scanBiliDir: (dir) => ipcRenderer.invoke('bili-scan-dir', dir),
   // 把 B 站缓存的原始 .m4s 变成可播放副本（去掉自定义头 / 建硬链接）→ { ok, path, url, size } | { error }
   prepareBiliAudio: (originalPath, force) => ipcRenderer.invoke('prepare-bili-audio', originalPath, force),
+  // 把可播放副本留一份到曲库目录（与源缓存解耦：源删了也能播）→ { ok, path, url, size } | { error }
+  keepBiliAudio: (originalPath) => ipcRenderer.invoke('bili-keep', originalPath),
+  // 本地保留副本的占用情况 → { ok, count, bytes, dir } | { error }
+  localAudioInfo: () => ipcRenderer.invoke('local-audio-info'),
   // 读音频字节，用于 blob 兜底播放 → { bytes, mime, size } | { error }
   readAudio: (p) => ipcRenderer.invoke('read-audio', p),
   // 全局快捷键注册状态（媒体键是否被游戏占用）→ { media, fallback, detail }
