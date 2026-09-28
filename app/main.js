@@ -556,10 +556,13 @@ if (!gotLock) {
   });
 }
 
-/* 媒体键动作：统一转给渲染进程处理（渲染侧带防抖，避免两条通路各触发一次） */
-function mediaAction(action) {
+/* 媒体键动作：统一转给渲染进程处理（渲染侧带防抖，避免两条通路各触发一次）。
+   ★ 一定带上 source（就是那个键名）：渲染侧要把它显示在「设置 → HEADPHONE / MEDIA KEYS」
+   那一行里 —— 有线耳机的按键到底被系统认成哪一个媒体键，只有按下时看这一行才知道。 */
+function mediaAction(action, source) {
   if (!mainWin || mainWin.isDestroyed()) return;
-  mainWin.webContents.send('media-key', action);
+  hotkeyState.last = { action: action, source: source || 'hotkey', at: Date.now() };
+  mainWin.webContents.send('media-key', { action: action, source: hotkeyState.last.source });
 }
 
 /* ================= 全局快捷键 =================
@@ -568,7 +571,7 @@ function mediaAction(action) {
    是**静默返回 false** 的 —— 旧代码完全没检查返回值，所以"耳机键突然没用了"
    在程序里毫无痕迹。现在：记录每个键的注册结果、失败就周期性重试（游戏退出/切窗口
    后可能就能拿回来）、并把状态报给界面（首次失败时提示可用的备用键）。 */
-const hotkeyState = { media: false, fallback: false, detail: {} };
+const hotkeyState = { media: false, fallback: false, detail: {}, last: null };
 let hotkeyRetryTimer = null;
 function regHotkey(key, fn) {
   let ok = false;
@@ -582,26 +585,40 @@ function registerMediaHotkeys() {
      【已被本程序占用】的键会返回 false（GlobalShortcutListener 里有 IsRegistered 检查）——
      于是重试反而把正常状态改写成"失败"：界面误报"被占用"、重试也永不停止。 */
   const tryReg = (key, fn) => (d[key] === true ? true : regHotkey(key, fn));
-  // 耳机/键盘媒体键：单击=播放暂停、双击=下一首、三击=上一首（系统映射为媒体键）
-  const m1 = tryReg('MediaPlayPause', () => mediaAction('play'));
-  const m2 = tryReg('MediaNextTrack', () => mediaAction('next'));
-  const m3 = tryReg('MediaPreviousTrack', () => mediaAction('prev'));
+  /* 有线耳机 / 键盘的媒体键：单击=播放暂停、双击=下一首、三击=上一首（系统把它们映射成媒体键）。
+     不同耳机固件发的不一样，所以能注册的几种全注册上 —— 每个都把**键名**当 source 传下去，
+     方便用户在设置面板里看出"我的那个键被认成了哪个"。 */
+  const m1 = tryReg('MediaPlayPause', () => mediaAction('play', 'MediaPlayPause'));
+  const m2 = tryReg('MediaNextTrack', () => mediaAction('next', 'MediaNextTrack'));
+  const m3 = tryReg('MediaPreviousTrack', () => mediaAction('prev', 'MediaPreviousTrack'));
   // 部分耳机/驱动发的是单独的"播放 / 暂停 / 停止"媒体键，而不是 MediaPlayPause，一并接住
-  const m4 = tryReg('MediaStop', () => mediaAction('pause'));
-  const m5 = tryReg('MediaPlay', () => mediaAction('play'));
-  const m6 = tryReg('MediaPause', () => mediaAction('pause'));
+  const m4 = tryReg('MediaStop', () => mediaAction('pause', 'MediaStop'));
+  const m5 = tryReg('MediaPlay', () => mediaAction('play', 'MediaPlay'));
+  const m6 = tryReg('MediaPause', () => mediaAction('pause', 'MediaPause'));
   hotkeyState.media = m1 || m2 || m3 || m4 || m5 || m6;
-  // 备用组合键：媒体键被游戏占走时用这些（Ctrl+Alt+空格 比字母键更不容易撞车）
-  const f1 = tryReg('CommandOrControl+Alt+P', () => mediaAction('play'));
-  const f2 = tryReg('CommandOrControl+Alt+N', () => mediaAction('next'));
-  const f3 = tryReg('CommandOrControl+Alt+B', () => mediaAction('prev'));
-  const f4 = tryReg('CommandOrControl+Alt+Space', () => mediaAction('play'));
-  hotkeyState.fallback = f1 || f2 || f3 || f4;
-  // 小窗控制键（游戏里鼠标拖不动时靠这些）——见下面 nudgeMini/scaleMini
-  regHotkey('CommandOrControl+Alt+Left', () => nudgeMini(-MINI_STEP, 0));
-  regHotkey('CommandOrControl+Alt+Right', () => nudgeMini(MINI_STEP, 0));
-  regHotkey('CommandOrControl+Alt+Up', () => nudgeMini(0, -MINI_STEP));
-  regHotkey('CommandOrControl+Alt+Down', () => nudgeMini(0, MINI_STEP));
+  /* 有线耳机的备用方案：媒体键是**独占资源**，被游戏/别的播放器占走时上面那几个会静默失败。
+     不少有线耳机的配套软件（USB 声卡的那种）允许把按键**映射成任意组合键**，
+     所以这里留一套"耳机按键可以直接绑"的组合键，语义与耳机三键一致：
+       上一首 = Ctrl+Alt+←      播放/暂停 = Ctrl+Alt+空格（或 Ctrl+Alt+P）
+       下一首 = Ctrl+Alt+→      音量 ±  = Ctrl+Alt+↑ / ↓
+     另外保留 Ctrl+Alt+N / Ctrl+Alt+B 作为上一版方案的别名，老用户不用改习惯。 */
+  const f1 = tryReg('CommandOrControl+Alt+Space', () => mediaAction('play', 'Ctrl+Alt+Space'));
+  const f2 = tryReg('CommandOrControl+Alt+Right', () => mediaAction('next', 'Ctrl+Alt+Right'));
+  const f3 = tryReg('CommandOrControl+Alt+Left', () => mediaAction('prev', 'Ctrl+Alt+Left'));
+  const f4 = tryReg('CommandOrControl+Alt+Up', () => mediaAction('volume-up', 'Ctrl+Alt+Up'));
+  const f5 = tryReg('CommandOrControl+Alt+Down', () => mediaAction('volume-down', 'Ctrl+Alt+Down'));
+  // 别名（上一版方案），保持可用
+  tryReg('CommandOrControl+Alt+P', () => mediaAction('play', 'Ctrl+Alt+P'));
+  tryReg('CommandOrControl+Alt+N', () => mediaAction('next', 'Ctrl+Alt+N'));
+  tryReg('CommandOrControl+Alt+B', () => mediaAction('prev', 'Ctrl+Alt+B'));
+  hotkeyState.fallback = f1 || f2 || f3 || f4 || f5;
+  /* 小窗控制键（游戏里鼠标拖不动时靠这些）——见下面 nudgeMini/scaleMini。
+     ★ 位移从 Ctrl+Alt+方向键 改到 **Ctrl+Alt+Shift+方向键**：把 Ctrl+Alt+← / → 让给
+     耳机的上一首 / 下一首（那是耳机软件最常绑的两个方向键）。 */
+  regHotkey('CommandOrControl+Alt+Shift+Left', () => nudgeMini(-MINI_STEP, 0));
+  regHotkey('CommandOrControl+Alt+Shift+Right', () => nudgeMini(MINI_STEP, 0));
+  regHotkey('CommandOrControl+Alt+Shift+Up', () => nudgeMini(0, -MINI_STEP));
+  regHotkey('CommandOrControl+Alt+Shift+Down', () => nudgeMini(0, MINI_STEP));
   regHotkey('CommandOrControl+Alt+0', () => scaleMini(20, 20));
   regHotkey('CommandOrControl+Alt+9', () => scaleMini(-20, -20));
   regHotkey('CommandOrControl+Alt+L', () => setMiniLock(!miniLocked));

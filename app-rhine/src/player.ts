@@ -38,6 +38,7 @@ const desktop = (window as any).desktop as
       localAudioInfo?: () => Promise<any>;
       readAudio?: (p: string) => Promise<any>;
       on?: (channel: string, cb: (data: any) => void) => void;
+      getHotkeyStatus?: () => Promise<any>;
     }
   | undefined;
 
@@ -896,11 +897,27 @@ export function playPrev() {
      所以耳机键完全没反应。旧实现在 app/index.html 的 handleMediaKey()，
      两条通路可能同时触发，所以保留 300ms 防抖。 */
 let lastMediaKeyAt = 0;
-function handleMediaKey(action: string) {
-  if (typeof action !== "string") return;
+/** 最近一次收到的键控动作（设置面板那行要显示"刚才那个键被认成了什么"） */
+let lastMediaKey: { action: string; source: string; at: number } | null = null;
+const MEDIA_LABEL: Record<string, string> = {
+  play: "播放 / 暂停",
+  pause: "暂停",
+  next: "下一首",
+  prev: "上一首",
+  "volume-up": "音量 +",
+  "volume-down": "音量 −",
+  playpause: "播放 / 暂停",
+};
+/** 接受两种形态：老的是纯字符串动作，新的是 {action, source}（主进程会带上键名） */
+function handleMediaKey(payload: string | { action?: string; source?: string }) {
+  const action = typeof payload === "string" ? payload : String(payload?.action || "");
+  const source = typeof payload === "string" ? "mediaSession" : String(payload?.source || "hotkey");
+  if (!action) return;
   const now = performance.now();
   if (now - lastMediaKeyAt < 300) return;
   lastMediaKeyAt = now;
+  lastMediaKey = { action, source, at: Date.now() };
+  paintMediaKeyStatus();
   if (action === "play" || action === "playpause") {
     if (songs.length) togglePlay();
   } else if (action === "pause") {
@@ -909,18 +926,98 @@ function handleMediaKey(action: string) {
     playNext();
   } else if (action === "prev") {
     playPrev();
+  } else if (action === "volume-up") {
+    nudgeVolume(0.05);
+  } else if (action === "volume-down") {
+    nudgeVolume(-0.05);
+  }
+}
+/** 音量 ±：耳机上的音量键（若被绑成组合键）走这条。同步音量条与 localStorage。 */
+function nudgeVolume(delta: number) {
+  const v = Math.max(0, Math.min(1, (audio.volume || 0) + delta));
+  audio.volume = v;
+  const volEl = document.querySelector<HTMLInputElement>("#p-vol");
+  if (volEl) volEl.value = String(Math.round(v * 100));
+  try {
+    localStorage.setItem("rhine-volume", String(v));
+  } catch {
+    /* ignore */
   }
 }
 desktop?.on?.("media-key", handleMediaKey);
 if ("mediaSession" in navigator) {
   try {
-    navigator.mediaSession.setActionHandler("play", () => handleMediaKey("play"));
-    navigator.mediaSession.setActionHandler("pause", () => handleMediaKey("pause"));
-    navigator.mediaSession.setActionHandler("nexttrack", () => handleMediaKey("next"));
-    navigator.mediaSession.setActionHandler("previoustrack", () => handleMediaKey("prev"));
+    navigator.mediaSession.setActionHandler("play", () => handleMediaKey({ action: "play", source: "mediaSession" }));
+    navigator.mediaSession.setActionHandler("pause", () => handleMediaKey({ action: "pause", source: "mediaSession" }));
+    navigator.mediaSession.setActionHandler("nexttrack", () => handleMediaKey({ action: "next", source: "mediaSession" }));
+    navigator.mediaSession.setActionHandler("previoustrack", () => handleMediaKey({ action: "prev", source: "mediaSession" }));
   } catch {
     /* 个别环境不支持 mediaSession：不影响主进程那条通路 */
   }
+}
+/* ---------- 设置面板 → HEADPHONE / MEDIA KEYS：自检行 ----------
+   旧界面有一行"媒体键自检"，终端界面重写时丢了 —— 于是耳机键失效时界面上毫无痕迹
+   （被游戏抢走注册是**静默失败**）。这里补回，并加一条"最近一次"：
+   按下耳机键时这一行会写"播放 / 暂停 · 来源 MediaPlayPause"，
+   用户就能直接看出"我这个键被系统认成了哪个" —— 有线耳机固件各不相同，这一步最有用。 */
+export function mediaKeyStatusMarkup(): string {
+  return (
+    `<label><div><strong>HEADPHONE / MEDIA KEYS</strong><span id="hotkey-status">读取中…</span></div>` +
+    `<span id="media-key-last" class="settings-value">还没收到过按键</span></label>`
+  );
+}
+let hotkeyWatch: number | undefined;
+/** 打开设置面板时调一次：读一次注册状态，并起一个轻量轮询刷新"最近一次" */
+export async function startMediaKeyWatch() {
+  await paintHotkeyStatus();
+  if (hotkeyWatch) return;
+  hotkeyWatch = window.setInterval(() => {
+    if (!document.querySelector("#media-key-last")) {
+      window.clearInterval(hotkeyWatch);
+      hotkeyWatch = undefined;
+      return;
+    }
+    void paintHotkeyStatus();
+    paintMediaKeyStatus();
+  }, 700);
+}
+async function paintHotkeyStatus() {
+  const el = document.querySelector<HTMLElement>("#hotkey-status");
+  if (!el) return;
+  if (!desktop?.getHotkeyStatus) {
+    el.textContent = "需在桌面版使用";
+    return;
+  }
+  try {
+    const st = await desktop.getHotkeyStatus();
+    if (!st) {
+      el.textContent = "读取失败";
+      return;
+    }
+    const media = st.media ? "✓ 已接管" : "✕ 被占用";
+    const fb = st.fallback ? "✓ 备用组合键可用" : "✕ 备用组合键也被占";
+    const failed = Object.entries(st.detail || {})
+      .filter(([, ok]) => !ok)
+      .map(([k]) => k);
+    el.textContent =
+      `媒体键 ${media} · ${fb}` +
+      (failed.length ? `；未拿到：${failed.join(" / ")}（关闭抢键的程序后会自动重试）` : "");
+  } catch {
+    el.textContent = "读取失败";
+  }
+}
+function paintMediaKeyStatus() {
+  const el = document.querySelector<HTMLElement>("#media-key-last");
+  if (!el) return;
+  if (!lastMediaKey) {
+    el.textContent = "还没收到过按键";
+    return;
+  }
+  const t = new Date(lastMediaKey.at);
+  const hh = String(t.getHours()).padStart(2, "0");
+  const mm = String(t.getMinutes()).padStart(2, "0");
+  const ss = String(t.getSeconds()).padStart(2, "0");
+  el.textContent = `${MEDIA_LABEL[lastMediaKey.action] || lastMediaKey.action} · 来源 ${lastMediaKey.source} · ${hh}:${mm}:${ss}`;
 }
 export function cycleMode() {
   const keys = ["list", "order", "single", "shuffle"];
