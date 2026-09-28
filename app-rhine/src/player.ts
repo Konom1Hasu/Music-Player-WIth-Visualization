@@ -2839,7 +2839,7 @@ export async function initPlayer() {
      读回来之后再通过 notify() 补一次 —— 空库时显示的"导入音乐"占位档案会被真实曲目替换。
      这同时修掉了旧写法的一个真实故障：原来是 1.5 秒的 Promise.race 超时，
      读得慢就整轮当空库，那一轮所有曲目都进不来。 */
-  void loadLibrary().then(applyLibrary);
+  void loadLibraryWithRetry();
   void repairTags();
   /* 旧版的调音参数（平衡/峰宽/抖动/鼓点/峰高）导一次：新版读不到 file:// 域那份存储，
      交给主进程开隐藏页去读（见 app/main.js 的 import-legacy-settings）。 */
@@ -2866,11 +2866,32 @@ function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
     p.then(finish, () => finish(fallback));
   });
 }
-/** 读曲库。库大 + 磁盘忙时打开就要好几秒（实测 7 秒以上），
-    所以超时预算给到 8 秒；以前是固定 1.5 秒的 Promise.race，
+/** 读曲库。库大 + 磁盘忙时打开就要好几秒（实测 397 首的库 getAll 要 2.9 秒，
+    冷盘上更久），所以超时预算给到 8 秒；以前是固定 1.5 秒的 Promise.race，
     读得慢就整轮当空库、所有曲目都进不来 —— 那就是用户看到的"曲库像空的"。 */
-async function loadLibrary(): Promise<Song[]> {
-  return withTimeout(idb.all(), LIB_LOAD_TIMEOUT, []).catch(() => []);
+async function loadLibrary(budget = LIB_LOAD_TIMEOUT): Promise<Song[]> {
+  return withTimeout(idb.all(), budget, []).catch(() => []);
+}
+/** ★ 读库的"空结果"不能当成"曲库是空的"：
+    `withTimeout` 超时也会返回空数组，而大库冷启动（3.5 GB 的 blob、刚清过系统缓存）
+    完全可能超过 8 秒 —— 表现就是用户反馈的"一打开之前导入的歌曲全不见了"
+    （数据其实一条都没少，只是这一轮没读回来，而且**不会重试**）。
+    所以：首轮超时（拿到空数组）时提示一句"还在读"，再给 30 秒重读一次，
+    真拿到了就补上；两次都空才认。 */
+async function loadLibraryWithRetry() {
+  const first = await loadLibrary();
+  if (first.length) {
+    applyLibrary(first);
+    return;
+  }
+  toast("正在读取曲库…（曲库较大时第一次打开会慢一些）");
+  const second = await loadLibrary(30000);
+  if (second.length) {
+    applyLibrary(second);
+    toast(`曲库已读取：${second.length} 首`);
+  } else {
+    applyLibrary([]);
+  }
 }
 /** 清理历史遗留的重复曲目（同一个文件 / 同一个 B 站缓存源只留一条）。
     用户要"重复歌曲不再导入"，但库里可能已经堆了重复，所以启动时顺手清一次。

@@ -2625,7 +2625,9 @@ body.rhine-night #player-playlist {
 #player-playlist {
   position: absolute;
   left: 59px;
-  bottom: 238px;
+  /* 用户："歌曲栏再往下调一点" —— 从 238 下移到 222（离播放条顶边 214 留 8px，
+     原来留 24px 显得悬在半空）。 */
+  bottom: 222px;
   width: 880px;
   max-height: 560px;
   overflow-y: auto;
