@@ -3,7 +3,7 @@ import { DocumentDecryption } from "./document-decryption";
 import "./document-decryption.css";
 import "./decryption.css";
 import { escapeHtml } from "./html";
-import { normalizeQuality, qualityPresets, type QualityPreset, type RenderQuality } from "./render-quality";
+import { normalizeQuality, matchingPreset, presetLabels, qualityPresets, type QualityPreset, type RenderQuality } from "./render-quality";
 import { qualityMarkup, syncQualityUI } from "./quality-settings";
 import "@kitlangton/rolling-number/styles.css";
 import "./style.css";
@@ -736,7 +736,12 @@ function updateQualitySummary() {
   if (!summary || !scene) return;
   const canvas = scene.renderer.domElement;
   const metrics = JSON.parse(canvas.parentElement?.dataset.renderQuality ?? "{}");
-  summary.textContent = `实际渲染 ${canvas.width} × ${canvas.height} · ${prefs.rendering.antialias === "smaa" ? "SMAA" : "原始抗锯齿"} · 纹理 ${metrics.anisotropy ?? 1}×${metrics.limited ? " · 已达到缓冲上限" : ""}`;
+  /* ★ 帧率也显示在这里：频谱与三维场景共用同一个 rAF，
+     场景的帧率就是频谱的帧率 —— 用户"觉得帧率很低"时，这一行能给出确切的数。 */
+  const fpsTxt = measuredFps > 0
+    ? ` · 实测帧率 ${Math.round(measuredFps)} fps${measuredFps < 50 ? "（偏低：把上面的预设调到「性能」能明显改善）" : ""}`
+    : " · 实测帧率 采集中…";
+  summary.textContent = `实际渲染 ${canvas.width} × ${canvas.height} · ${prefs.rendering.antialias === "smaa" ? "SMAA" : "原始抗锯齿"} · 纹理 ${metrics.anisotropy ?? 1}×${metrics.limited ? " · 已达到缓冲上限" : ""}${fpsTxt}`;
 }
 function settingsMarkup() {
   return `<h2>SYSTEM SETTINGS<small>终端偏好设置</small></h2><p class="settings-intro"><span class="operator-name">${getOperator()}</span> <span>·</span> SESSION AUTHORIZED</p><div class="settings-list"><label class="operator-field" for="operator-input"><div><strong>OPERATOR ID</strong><span>开屏「ID CONFIRMED」与页脚显示的身份标识</span></div><input type="text" id="operator-input" maxlength="40" value="${escapeHtml(getOperator())}" autocomplete="off" spellcheck="false"/></label>${audioSettingsMarkup(prefs)}<label><div><strong>REDUCED MOTION</strong><span>减少镜头移动和过渡动效</span></div><input type="checkbox" data-pref="reduced" ${prefs.reduced ? "checked" : ""}/><i class="toggle"></i></label>${playbackSettingsMarkup()}${mediaKeyStatusMarkup()}${coverToolsMarkup()}${localAudioMarkup()}</div>${qualityMarkup(prefs.rendering)}<div class="settings-shortcuts"><span>KEYBOARD CONTROLS</span><p><kbd>←</kbd><kbd>→</kbd> 切列 <kbd>↑</kbd><kbd>↓</kbd> 选档 <kbd>ENTER</kbd> 读取 <kbd>/</kbd> 检索 <kbd>ESC</kbd> 返回</p></div><div class="settings-bottom"><button data-action="fullscreen">FULLSCREEN <span>↗</span></button><button data-action="restart">REINITIALIZE SYSTEM <span>↻</span></button></div><div class="modal-bottom"><span>ANALYSIS OS / 1.0 · 使用 MiSans 字体（小米） <a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">字体许可</a></span><span>POWERED BY RHINE LAB</span></div>`;
@@ -776,10 +781,12 @@ document.addEventListener("change", (e) => {
   }
   if (el.id === "quality-preset" && Object.hasOwn(qualityPresets, el.value)) {
     prefs.rendering = { ...qualityPresets[el.value as QualityPreset] };
+    qualityTouched = true; // 用户自己选了画质 → 本次会话不再自动降档
     savePrefs();
   } else if (el.dataset.quality) {
     const key = el.dataset.quality as keyof RenderQuality;
     prefs.rendering = normalizeQuality({ ...prefs.rendering, [key]: key === "antialias" ? el.value : Number(el.value) });
+    qualityTouched = true;
     savePrefs();
   }
   if (el.dataset.pref) {
@@ -1048,6 +1055,58 @@ let lastTime = 0,
   frameCount = 0,
   frameStart = performance.now(),
   fps = 0;
+/* ---------- 帧率测量与自动降画质（用户："感觉帧率很低导致有延迟感"） ----------
+   频谱画布和三维场景跑在同一个 rAF 队列里：**场景掉到 30fps，频谱就只有 30fps**，
+   看起来就是"频谱慢半拍"。所以这里把实测帧率量出来，并在明显偏低时把渲染画质降一档
+   （只降一次，而且只降预设；用户自己动过画质就不再干预），同时在设置页把帧率显示出来。 */
+let measuredFps = 0;
+/* 每帧要写 DOM 的那几处缓存起来（顺便把"值没变就不写"的比较状态放在一起） */
+const detailContentEl = document.getElementById("detail-content") as HTMLElement;
+const stageEl = document.getElementById("stage") as HTMLElement;
+let lastDetailVis = -1;
+let lastDetailInert: boolean | null = null;
+let lastShade = -1;
+let qualityTouched = false; // 用户本次会话里手动改过画质 → 不再自动降
+let autoQualityDone = false;
+let lowestWarned = false;
+const fpsSamples: number[] = [];
+/** 每攒满 5 个采样（≈5 秒）判断一次；开屏与首次载入本身偏慢，不能据此降画质。
+    只有真的降了档才收手（`autoQualityDone`），否则下一个窗口继续观察 ——
+    本机是 Intel UHD 核显（见功能说明 §10.4），默认的「原始」档对它偏重。 */
+function noteFpsForQuality(v: number) {
+  if (autoQualityDone || qualityTouched) return;
+  if (mode === "boot" || !ready) return;
+  if (!(v > 0)) return;
+  fpsSamples.push(v);
+  if (fpsSamples.length < 5) return;
+  const samples = fpsSamples.slice();
+  fpsSamples.length = 0;
+  const sorted = samples.slice().sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  if (median >= 50) return; // 够顺，什么都不动
+  const preset = matchingPreset(prefs.rendering);
+  const order: QualityPreset[] = ["ultra", "high", "original", "performance"];
+  const at = order.indexOf(preset as QualityPreset);
+  if (at < 0 || preset === "performance") {
+    /* 已经是性能档（或自定义）还掉帧：只能是分辨率/硬件的问题，不再动画质，只提示一次 */
+    if (!lowestWarned) {
+      lowestWarned = true;
+      notify(`实测帧率约 ${Math.round(median)} fps（已是最低画质档）；可在系统设置 → 渲染画质里再调渲染比例`);
+    }
+    return;
+  }
+  const next = order[at + 1];
+  autoQualityDone = true;
+  prefs.rendering = { ...qualityPresets[next] };
+  scene?.setQuality(prefs.rendering);
+  viewer?.setQuality(prefs.rendering);
+  syncQualityUI(prefs.rendering);
+  savePrefs();
+  updateQualitySummary();
+  notify(
+    `实测帧率约 ${Math.round(median)} fps，已把渲染画质从「${presetLabels[preset as QualityPreset]}」降到「${presetLabels[next]}」让画面跟得上；想改回：系统设置 → RENDER QUALITY`,
+  );
+}
 /* ============================ 开屏时间轴 ============================
    原片 25fps，bootMotion() 里的 t 就是视频秒数（app 时间 0 对应视频 5 秒）。
    参考片里白场扫过、`.boot-background` 归零发生在视频 26.16–26.88 秒
@@ -1082,16 +1141,30 @@ function frame(ms: number) {
   viewer?.update(time);
   if (scene && mode === "detail") {
     documentDecryption.update(time, scene.decryptionFrame, prefs.reduced);
-    $("#detail-content").style.opacity = String(scene.detailVisibility);
-    $("#detail-content").style.transform =
-      `translateY(${(1 - scene.detailVisibility) * 18}px)`;
-    $("#detail-content").inert = scene.detailVisibility < 0.1;
-    if (pendingDetailFocus && scene.detailVisibility >= 0.1 && !modal && !viewer?.isOpen) {
-      $("#detail-content").focus({ preventScroll: true });
+    /* ★ 只在数值真的变了才写 DOM。原来每帧都写 opacity / transform / inert，
+       等于每帧把详情页（频谱就在这一页）整片样式标脏 —— 帧率越低越明显。
+       阈值 0.002 肉眼看不出来，但省掉了绝大多数帧的样式重算。 */
+    const vis = scene.detailVisibility;
+    if (Math.abs(vis - lastDetailVis) > 0.002) {
+      lastDetailVis = vis;
+      detailContentEl.style.opacity = String(vis);
+      detailContentEl.style.transform = `translateY(${(1 - vis) * 18}px)`;
+    }
+    const inert = vis < 0.1;
+    if (inert !== lastDetailInert) {
+      lastDetailInert = inert;
+      detailContentEl.inert = inert;
+    }
+    if (pendingDetailFocus && vis >= 0.1 && !modal && !viewer?.isOpen) {
+      detailContentEl.focus({ preventScroll: true });
       pendingDetailFocus = false;
     }
   }
-  $("#stage").style.setProperty("--detail-shade", String(mode === "boot" ? 0 : scene?.detailVisibility ?? 0));
+  const shade = mode === "boot" ? 0 : scene?.detailVisibility ?? 0;
+  if (Math.abs(shade - lastShade) > 0.002) {
+    lastShade = shade;
+    stageEl.style.setProperty("--detail-shade", String(shade));
+  }
   if (scene) inspectionOverlay.render(scene.decryptionFrame,
     (x, y) => scene.projectCard(x, y), Boolean(cinema));
   if (Math.floor(time) !== lastTime) {
@@ -1103,8 +1176,12 @@ function frame(ms: number) {
     fps = (frameCount * 1000) / (ms - frameStart);
     frameStart = ms;
     frameCount = 0;
+    measuredFps = fps;
     $("#three-scene").dataset.fps = String(Math.round(fps));
     $("#three-scene").dataset.renderStats = JSON.stringify(scene?.getStats());
+    noteFpsForQuality(fps);
+    /* 设置面板开着时把帧率一并刷出来（每秒一次，成本可忽略） */
+    if (document.getElementById("quality-summary")) updateQualitySummary();
   }
   requestAnimationFrame(frame);
 }
