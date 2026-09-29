@@ -1069,21 +1069,33 @@ let lastShade = -1;
 let qualityTouched = false; // 用户本次会话里手动改过画质 → 不再自动降
 let autoQualityDone = false;
 let lowestWarned = false;
+let lowWindows = 0; // 连续几个"偏低"的窗口（要连续两次才动手，避免一次抖动就降档）
 const fpsSamples: number[] = [];
 /** 每攒满 5 个采样（≈5 秒）判断一次；开屏与首次载入本身偏慢，不能据此降画质。
-    只有真的降了档才收手（`autoQualityDone`），否则下一个窗口继续观察 ——
+    判据故意保守：
+      · 只统计**窗口可见**时的采样 —— 最小化 / 被别的窗口盖住时 rAF 会被系统压慢，
+        拿那种数字降画质是误判；
+      · 单个采样低于 15fps 视为"被节流/被挡住"，整窗作废；
+      · 要**连续两个**偏低窗口才降档；
+      · **只对本次会话生效、不落盘** —— 猜错的代价只是这一次；下次启动仍用你自己选的档位。
     本机是 Intel UHD 核显（见功能说明 §10.4），默认的「原始」档对它偏重。 */
 function noteFpsForQuality(v: number) {
   if (autoQualityDone || qualityTouched) return;
   if (mode === "boot" || !ready) return;
-  if (!(v > 0)) return;
+  if (document.visibilityState !== "visible") return;
+  if (!(v >= 15)) return;
   fpsSamples.push(v);
   if (fpsSamples.length < 5) return;
   const samples = fpsSamples.slice();
   fpsSamples.length = 0;
   const sorted = samples.slice().sort((a, b) => a - b);
   const median = sorted[Math.floor(sorted.length / 2)];
-  if (median >= 50) return; // 够顺，什么都不动
+  if (median >= 50) {
+    lowWindows = 0; // 够顺，什么都不动
+    return;
+  }
+  lowWindows++;
+  if (lowWindows < 2) return; // 再看一个窗口
   const preset = matchingPreset(prefs.rendering);
   const order: QualityPreset[] = ["ultra", "high", "original", "performance"];
   const at = order.indexOf(preset as QualityPreset);
@@ -1101,10 +1113,11 @@ function noteFpsForQuality(v: number) {
   scene?.setQuality(prefs.rendering);
   viewer?.setQuality(prefs.rendering);
   syncQualityUI(prefs.rendering);
-  savePrefs();
+  /* ★ 这里**故意不 savePrefs()**：自动降档只对本次会话生效 —— 它是个猜测，
+     不该替用户把设置改掉（真要留下，用户在设置里自己选一次就会落盘）。 */
   updateQualitySummary();
   notify(
-    `实测帧率约 ${Math.round(median)} fps，已把渲染画质从「${presetLabels[preset as QualityPreset]}」降到「${presetLabels[next]}」让画面跟得上；想改回：系统设置 → RENDER QUALITY`,
+    `实测帧率约 ${Math.round(median)} fps，已把渲染画质从「${presetLabels[preset as QualityPreset]}」降到「${presetLabels[next]}」（仅本次运行）；想固定下来：系统设置 → RENDER QUALITY`,
   );
 }
 /* ============================ 开屏时间轴 ============================

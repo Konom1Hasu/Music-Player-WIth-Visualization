@@ -1600,6 +1600,10 @@ function initSpectrumWorker() {
       const hann = new Float32Array(N);
       for (let i = 0; i < N; i++) hann[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (N - 1)));
       let bandK = null, sr = 0, kickRef = 0;
+      /* ★ 加窗后的缓冲：每 tick 只乘一遍（复用同一块，不产生垃圾）。
+         原来 \`td[i] * hann[i]\` 写在每个频段的内层循环里 —— 120 段 × 1024 点
+         等于同一件事被算 12 万次、还多读 12 万次 hann 数组。乘积顺序不变，结果逐位相同。 */
+      const tw = new Float32Array(N);
       onmessage = (e) => {
         const t0 = performance.now();
         const td = e.data.td;
@@ -1610,12 +1614,13 @@ function initSpectrumWorker() {
           const fMax = F_MAX_RATIO * (sr / 2);
           for (let b = 0; b < B; b++) bandK[b] = (F_MIN * Math.pow(fMax / F_MIN, b / (B - 1)) / sr) * N;
         }
+        for (let i = 0; i < N; i++) tw[i] = td[i] * hann[i];
         const mags = new Float32Array(B);
         let mx = 1e-9;
         for (let b = 0; b < B; b++) {
           const k = bandK[b], co = 2 * Math.cos(2 * Math.PI * k / N);
           let s1 = 0, s2 = 0;
-          for (let i = 0; i < N; i++) { const s0 = td[i] * hann[i] + co * s1 - s2; s2 = s1; s1 = s0; }
+          for (let i = 0; i < N; i++) { const s0 = tw[i] + co * s1 - s2; s2 = s1; s1 = s0; }
           const m = Math.sqrt(Math.max(0, s1 * s1 + s2 * s2 - co * s1 * s2)) / (N / 4);
           mags[b] = m;
           if (m > mx) mx = m;
@@ -2441,6 +2446,7 @@ export function mountSongEdit(root: ParentNode) {
     spectrum = new Spectrum(cv, actx?.sampleRate ?? 48000);
     spectrum.setPalette(spectrumPalette());
     spectrum.setMode(vizModePref as SpectrumMode);
+    spectrum.setAdvanceInterval(VIZ_ANALYSIS_MS); // 绘制侧的插值跨度 = 分析节拍
     if (VIZ_TEST || DIAG) (window as any).__rhineViz = vizDiag;
   }
   if (!vizRaf) {
@@ -2615,6 +2621,7 @@ export function mountSongDetail(root: ParentNode) {
     spectrum = new Spectrum(cv, actx?.sampleRate ?? 48000);
     spectrum.setPalette(spectrumPalette());
     spectrum.setMode(vizModePref as SpectrumMode);
+    spectrum.setAdvanceInterval(VIZ_ANALYSIS_MS); // 绘制侧的插值跨度 = 分析节拍
     // 诊断开关：?viztest=1 时把实例与帧率对象挂到 window 上，便于自动化核对（见功能说明）
     if (VIZ_TEST || DIAG) {
       (window as any).__audioEl = audio;

@@ -100,6 +100,40 @@ if (!/const VIZ_NOISE_HP = 0\.55;/.test(plSrc)) {
   process.exit(2);
 }
 
+/* ---------- 0c. 两处"看起来只是优化/平滑"的改动，用确定性检查盯住 ---------- */
+
+/* (1) 加窗预计算：Goertzel 的输入从"每个频段现乘一遍 Hann"改成"先乘一遍存起来"，
+       必须**逐位相同**（参考实现：每个频段现乘；两份代码在同一份数据上跑）。 */
+{
+  const N = 1024;
+  const hann = new Float32Array(N);
+  for (let i = 0; i < N; i++) hann[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (N - 1)));
+  const td = new Float32Array(N);
+  let seed = 12345; // 自带 LCG：不依赖 Math.random，两次运行必须一模一样
+  for (let i = 0; i < N; i++) {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    td[i] = (seed / 0x3fffffff - 1) * 0.9;
+  }
+  const goertzel = (input, k) => {
+    const co = 2 * Math.cos((2 * Math.PI * k) / N);
+    let s1 = 0, s2 = 0;
+    for (let i = 0; i < N; i++) { const s0 = input[i] + co * s1 - s2; s2 = s1; s1 = s0; }
+    return [s1, s2];
+  };
+  const refInput = new Float32Array(N);
+  for (let i = 0; i < N; i++) refInput[i] = td[i] * hann[i]; // 旧写法：每个频段现乘
+  const tw = new Float32Array(N);
+  for (let i = 0; i < N; i++) tw[i] = td[i] * hann[i]; // 新写法：先乘一遍
+  const ks = [3.7, 12.5, 55.25, 190.75];
+  const same = ks.every((k) => {
+    const a = goertzel(refInput, k), b = goertzel(tw, k);
+    return a[0] === b[0] && a[1] === b[1];
+  });
+  console.log("加窗预计算（120 段不再各乘一遍 Hann）：逐位相同 " + (same ? "✓" : "✗ 不一致！"));
+}
+
+/* (2) 绘制插值的检查放在下面画布桩之后（需要 canvasStub）。 */
+
 /* ---------- 1. 最小画布桩：只实现 Spectrum.draw() 用到的几个方法 ---------- */
 const ctxStub = {
   clearRect() {},
@@ -113,6 +147,46 @@ const ctxStub = {
   fillStyle: "", strokeStyle: "", globalAlpha: 1, lineWidth: 1,
 };
 const canvasStub = { width: 954, height: 716, getContext: () => ctxStub };
+
+/* ---------- 2b. 绘制插值：分析 20ms 一 tick、画布 60fps 重画 ----------
+   两者不成整数倍时，屏幕上会出现"有时隔一帧才动、有时隔两帧才动"的错拍，看起来就是卡
+   （用户："怎么还更卡"）。这里用**可控时钟**验两件事：
+   ① 一个 tick 之内每一帧画出来的值都在变（所以 60fps 显示器上是连续的）；
+   ② 下一个 tick 到来时收敛到当前柱高（不是滞后一个节拍）。 */
+{
+  const sp = new Spectrum(canvasStub, 48000);
+  sp.setMode("mix");
+  sp.applyParams();
+  sp.setAdvanceInterval(20);
+  const loud = new Float32Array(1024);
+  for (let i = 0; i < 1024; i++) {
+    const t = i / 48000;
+    loud[i] = 0.5 * (Math.sin(2 * Math.PI * 55 * t) + 0.4 * Math.sin(2 * Math.PI * 110 * t));
+  }
+  const silence = new Float32Array(1024);
+  let clock = 1000;
+  const realNow = performance.now;
+  performance.now = () => clock;
+  try {
+    for (let i = 0; i < 8; i++) { sp.update(loud, 48000); clock += 20; } // 先把柱高拉起来
+    sp.update(silence, 48000); // 一次阶跃：柱高该往下掉
+    const frames = [];
+    for (const dt of [5, 5, 5]) { clock += dt; sp.render(0.016); frames.push(sp.snapshot().show[3]); }
+    clock += 5;
+    sp.render(0.016);
+    const atTick = sp.snapshot().show[3]; // 正好一个节拍（20ms）之后
+    const target = sp.snapshot().bars[3];
+    const everyFrame = frames.every((v, i) => i === 0 || v !== frames[i - 1]);
+    const converged = Math.abs(atTick - target) < 1e-6;
+    console.log("绘制插值（20ms 分析 / 60fps 重画）：一个节拍内每帧都在变 " + (everyFrame ? "✓" : "✗")
+      + "　节拍到时收敛到当前柱高 " + (converged ? "✓" : "✗")
+      + "　样例 " + frames.map((v) => v.toFixed(3)).join(" → ") + " → " + atTick.toFixed(3)
+      + "（目标 " + target.toFixed(3) + "）");
+    console.log("");
+  } finally {
+    performance.now = realNow;
+  }
+}
 
 /* ---------- 2. 合成信号：与 player.ts 的 vizTestTimeData 同一套参数 ---------- */
 const VIZ_NOISE_HP = 0.55;

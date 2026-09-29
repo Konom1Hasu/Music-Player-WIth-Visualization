@@ -15,9 +15,12 @@
  *      泵动 0.40、幂次 2.1、一阶跟随系数 0.7−0.2·(i/n) / 0.58+0.22·(i/n)。
  *      2.0.0 曾按"毛刺感太严重"做过一轮去毛刺（慢速随机抖动、[1,2,1] 平滑、512 点窗），
  *      已按用户要求整体撤回 —— 屏幕上看到的就是 1.3.0 那条流水线的输出。
- *   2. 只动**架构、不动观感**：Goertzel 从主线程搬进 Web Worker（每 33ms 一帧，
- *      与 1.3.0 的 30Hz 分析节拍一致），主线程只负责按 60fps 重画同一份 bars。
- *      render() 不做二次插值，所以阶梯与抖动与 1.3.0 逐像素一致，只是重画次数更多。
+ *   2. 只动**架构、不动观感**：Goertzel 从主线程搬进 Web Worker（每 20ms 一 tick，
+ *      与 1.3.0 的 `vizInterval()` 50Hz 一致），主线程只负责按 60fps 重画。
+ *      ★ 绘制读的是 `display` —— 相邻两次分析之间的**线性插值**（见 render()）：
+ *      20ms 的分析节拍与 60fps 的重画节拍不成整数倍，不插值就会出现
+ *      "有时隔一帧才动、有时隔两帧才动"的错拍（用户："怎么还更卡"）。
+ *      柱高**数值**仍完全来自 1.3.0 那条流水线（诊断与播放条读的 `levels` 就是它）。
  */
 
 export const SPECTRUM_BANDS = 120; // 对数频段数（分析侧，不动）
@@ -134,6 +137,12 @@ export class Spectrum {
   /* bars = 每根柱的当前值（1.3.0 只有这一个数组，绘制直接读它） */
   private bars = new Float32Array(BAR_N);
   private peaks = new Float32Array(BAR_N);
+  /* 显示用：上一次分析时的柱高（prevBars）与"两次分析之间插值出来的"绘制值（display）。
+     意义见 render()：分析 20ms 一 tick，而画布 60fps 重画，两者不做插值就会错拍发卡。 */
+  private prevBars = new Float32Array(BAR_N);
+  private display = new Float32Array(BAR_N);
+  private lastAdvanceAt = 0;
+  private advanceIntervalMs = 20;
   /* 按量化级分桶用的容器（每帧复用，避免每帧新建数组） */
   private buckets: number[][] = Array.from({ length: VIZ_LEVELS }, () => []);
   private jitterPhase = 0;
@@ -178,9 +187,14 @@ export class Spectrum {
   get levels() {
     return this.bars;
   }
+  /** 分析节拍（毫秒）：告诉绘制侧"相邻两次分析之间插多久"，让插值跨度与实际节拍一致。
+      由 player.ts 用 `VIZ_ANALYSIS_MS` 调一次即可。 */
+  setAdvanceInterval(ms: number) {
+    if (isFinite(ms) && ms > 0) this.advanceIntervalMs = ms;
+  }
   /** 诊断用：归一化后的频段 + 柱高快照 */
   snapshot() {
-    return { freq: Array.from(this.freq), bars: Array.from(this.bars), show: Array.from(this.bars) };
+    return { freq: Array.from(this.freq), bars: Array.from(this.bars), show: Array.from(this.display) };
   }
   /** 频段映射摘要（Hz）：首段 / 末段 / 低频峰中心。核对"映射是不是 20Hz ~ 0.45×Nyquist"用，
       几个数、不分配数组，可以每帧塞进诊断对象。 */
@@ -202,17 +216,26 @@ export class Spectrum {
   resetPeaks() {
     this.peaks.fill(0);
     this.bars.fill(0);
+    /* 插值的两端一起清掉：否则屏幕上的旧柱高会"滑"到 0（那是另一首曲子的形状） */
+    this.prevBars.fill(0);
+    this.display.fill(0);
     this.kickRef = 0;
     this.kickEnergy = 0;
   }
 
   /* ---------- 分析：Hann 加窗 + Goertzel ---------- */
-  private goertzelBin(td: Float32Array, k: number, from: number, n: number) {
+  /** 加窗后的时域缓冲（每 tick 只算一次）。
+      ★ 原来 `td[i]*HANN[i]` 写在每个频段的内层循环里 —— 120 个频段 × 1024 点
+      等于同一件事被算了 12 万次，还多读 12 万次 HANN 数组。乘积顺序不变，
+      所以结果逐位相同（只是不再重复算）。 */
+  private windowed = new Float32Array(ANALYSIS_WINDOW);
+  private goertzelBin(k: number, n: number) {
     const co = 2 * Math.cos((2 * Math.PI * k) / n);
+    const tw = this.windowed;
     let s1 = 0;
     let s2 = 0;
     for (let i = 0; i < n; i++) {
-      const s0 = td[from + i] * HANN[i] + co * s1 - s2;
+      const s0 = tw[i] + co * s1 - s2;
       s2 = s1;
       s1 = s0;
     }
@@ -222,9 +245,11 @@ export class Spectrum {
   private analyze(td: Float32Array) {
     const n = analysisWindow(td);
     const from = td.length - n;
+    if (this.windowed.length < n) this.windowed = new Float32Array(n);
+    for (let i = 0; i < n; i++) this.windowed[i] = td[from + i] * HANN[i];
     let mx = 1e-9;
     for (let b = 0; b < SPECTRUM_BANDS; b++) {
-      let mag = this.goertzelBin(td, this.bandK[b], from, n);
+      let mag = this.goertzelBin(this.bandK[b], n);
       if (!isFinite(mag)) mag = 0;
       this.bands[b] = mag;
       if (mag > mx) mx = mag;
@@ -308,6 +333,8 @@ export class Spectrum {
     const n = BAR_N;
     const tilt = (50 - vizParams.tilt) / 50;
     const bars = this.bars;
+    /* 插值的起点：这一 tick 之前屏幕上是多少（见 render() 的说明） */
+    this.prevBars.set(bars);
     for (let i = 0; i < n; i++) {
       let v = this.sampleBand(i, n);
       v *= Math.pow(5, tilt * (1 - i / n)); // 倾斜补偿（低频端最高 5×）
@@ -333,6 +360,7 @@ export class Spectrum {
       this.peaks[i] = Math.max(this.peaks[i] * 0.97, bars[i]);
     }
     this.jitterPhase += jitterStep();
+    this.lastAdvanceAt = performance.now();
   }
 
   /* ---------- 绘制 ---------- */
@@ -352,7 +380,7 @@ export class Spectrum {
     const gap = w / BAR_N;
     const bw = Math.max(1, gap * 0.7);
     const grad = this.makeGrad(ctx, h);
-    const values = this.bars;
+    const values = this.display;
     /* 柱高本来就是 14 级量化过的，所以按"级"分桶画：globalAlpha 每帧只改 14 次
        （原实现是每根柱改一次，120 次状态切换），帧率能实打实抬上去。 */
     const buckets: number[][] = this.buckets;
@@ -384,7 +412,7 @@ export class Spectrum {
   private drawTimbre(ctx: CanvasRenderingContext2D, w: number, h: number) {
     const gap = w / BAR_N;
     const bw = Math.max(1, gap * 0.7);
-    const values = this.bars;
+    const values = this.display;
     const gLow = ctx.createLinearGradient(0, 0, 0, h);
     gLow.addColorStop(0, this.palette.strong);
     gLow.addColorStop(1, this.palette.base);
@@ -408,7 +436,7 @@ export class Spectrum {
     const cx = w / 2;
     const cy = h / 2;
     const base = Math.min(w, h) * 0.28;
-    const values = this.bars;
+    const values = this.display;
     ctx.strokeStyle = this.palette.ring;
     ctx.lineWidth = 1;
     ctx.globalAlpha = 0.28;
@@ -430,7 +458,7 @@ export class Spectrum {
   }
   private drawWave(ctx: CanvasRenderingContext2D, w: number, h: number) {
     const n = Math.min(BAR_N, 96);
-    const values = this.bars;
+    const values = this.display;
     ctx.strokeStyle = this.palette.light;
     ctx.lineWidth = 2;
     ctx.globalAlpha = 0.9;
@@ -457,11 +485,19 @@ export class Spectrum {
     else this.drawBars(ctx, w, h); // mix / bars 同款（鼓点已在柱高里）
   }
 
-  /** 渲染节拍：重画当前柱高。
-      1.3.0 是 30fps 边算边画，这里是 worker 30Hz 算、画布按 60fps 重画同一份 bars ——
-      **画的就是那一个数组，不做二次插值**，所以 14 级阶梯与正弦抖动的观感与 1.3.0 完全一致，
-      只是屏幕上的合成次数更多（滚动、缩放一类的合成更顺）。 */
+  /** 渲染节拍：把柱高画出来。
+      ★ 绘制用的是**相邻两次分析之间的插值**（`display`），不是刚算出来的 `bars`：
+      分析是 20ms 一 tick（1.3.0 的 50Hz），而画布是 60fps 重画 ——
+      两个节拍不成整数倍时，屏幕上会出现"有时隔一帧才动、有时隔两帧才动"的错拍，
+      看起来就是**卡**（用户："怎么还更卡"）。插值后每一帧都在变，60fps 显示器上就是平滑的，
+      而柱高数值本身仍是 1.3.0 流水线的输出（诊断与播放条读的还是 `levels` / `bars`）。 */
   render(_dt: number) {
+    const span = this.advanceIntervalMs;
+    const alpha = span > 0 ? Math.min(1, (performance.now() - this.lastAdvanceAt) / span) : 1;
+    const prev = this.prevBars;
+    const disp = this.display;
+    const cur = this.bars;
+    for (let i = 0; i < BAR_N; i++) disp[i] = prev[i] + (cur[i] - prev[i]) * alpha;
     this.draw();
   }
   /** 分析节拍：喂一段时域数据（同步路径；worker 可用时走 applyBands） */
