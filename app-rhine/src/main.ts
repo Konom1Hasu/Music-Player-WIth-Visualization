@@ -34,6 +34,7 @@ import {
   currentIndex,
   songDetailMarkup,
   mountSongDetail,
+  setDetailView,
   songEditMarkup,
   mountSongEdit,
   applySongEdit,
@@ -44,6 +45,11 @@ import {
   rereadAllCovers,
   localAudioMarkup,
   fillLocalAudioInfo,
+  solidifyAllMissing,
+  audioQualityMarkup,
+  fillAudioQualityInfo,
+  setCoverAccent,
+  setBeatmapPref,
   mediaKeyStatusMarkup,
   startMediaKeyWatch,
   type PlaybackPrefs,
@@ -78,14 +84,12 @@ $("#stage").innerHTML = `
   </section>
   <div id="cinema-caption" class="cinema-caption"></div>
   <svg id="inspection-marks" viewBox="0 0 1920 1080" aria-hidden="true"><path id="inspection-lines"/><g id="inspection-corners"></g><circle id="inspection-point" r="1.8"/></svg>
-  <div id="inspection-text" aria-hidden="true">CONFIDENTIALITY:<strong>GENERAL BUSINESS USE</strong></div>
   <section id="archive-ui" class="archive-ui" aria-label="曲目选择">
     <div class="archive-callout"><div class="eyebrow">NOW SELECTED <span>／</span> <span id="archive-category">音乐档案</span></div><button class="file-title" data-action="open">TRACK NUMBER: <span id="selected-id">X-<span id="selected-code">001</span></span><span class="file-open">↗</span></button><div class="callout-rule"><i></i></div><div class="file-summary"><span id="selected-title">尚无曲目</span><span id="selected-clearance">等待导入</span></div><button class="read-file" data-action="open">PLAY TRACK <span>→</span></button></div>
     <div id="hover-label" class="hover-label" hidden>X-<span id="hover-code">001</span> / <span id="hover-title"></span></div>
     <div class="archive-counter"><span class="tiny-label">TRACK / SELECT</span><div><span id="selected-number">01</span><i>/</i><span class="count-total">12</span></div></div>
     <div class="archive-navigation"><button data-action="prev" aria-label="上一个曲目">↑</button><div id="file-ticks" class="file-ticks"></div><button data-action="next" aria-label="下一个曲目">↓</button></div>
     <div class="column-navigation"><button data-action="column-prev" aria-label="上一组">←</button><div><span id="column-number">GROUP <span id="column-index">03</span> / 05</span><strong id="column-name">音乐档案</strong></div><button data-action="column-next" aria-label="下一组">→</button></div>
-    <div class="archive-hint"><kbd>←</kbd> <kbd>→</kbd> 切换分组 <span>／</span> <kbd>↑</kbd> <kbd>↓</kbd> 前后曲目 <span>／</span> <kbd>ENTER</kbd> 读取</div>
   </section>
   <section id="detail-ui" class="detail-ui" aria-label="档案内容" hidden>
     <button class="back-button" data-action="back">← <span>TRACK OVERVIEW</span><small>ESC</small></button>
@@ -635,6 +639,7 @@ function openModal(kind: NonNullable<typeof modal>) {
      "耳机 / 媒体键"那行还要顺带起一个轮询，实时显示最近按下的键 */
   if (kind === "settings") {
     void fillLocalAudioInfo();
+    fillAudioQualityInfo();
     void startMediaKeyWatch();
   }
 }
@@ -684,7 +689,7 @@ function renderModal() {
   if (!modal) return;
   modalTransition?.dispose();
   $("#modal-root").innerHTML =
-    `<div class="modal-backdrop"><section class="terminal-modal ${modal === "settings" ? "settings-modal" : ""}" role="dialog" aria-modal="true" aria-label="${modal === "settings" ? "系统设置" : modal === "saved" ? "收藏曲目" : "曲目检索"}"><div class="modal-top"><span>RHINE LAB / ${modal === "settings" ? "SYSTEM PREFERENCES" : "TRACK DIRECTORY"}</span><button data-action="close-modal" aria-label="关闭窗口">CLOSE <span>×</span></button></div>${modal === "settings" ? settingsMarkup() : `<h2>${modal === "saved" ? "SAVED TRACKS" : "TRACK INDEX"}<small>${modal === "saved" ? "收藏曲目" : "音乐库检索"}</small></h2><div class="search-field"><span>⌕</span><input id="archive-search" type="search" autocomplete="off" placeholder="输入曲名、艺术家或专辑" aria-label="检索曲目"/><span class="key">ESC</span></div><div class="category-filters">${categories.map((c, i) => `<button data-filter="${escapeHtml(c)}" class="${c === filter ? "active" : ""}">${escapeHtml(c)}</button>`).join("")}</div><div class="result-header"><span>TRACK / 曲目</span><span>ARTIST / 艺术家</span><span>LENGTH / 时长</span></div><div id="search-results" class="search-results"></div><div class="modal-bottom"><span id="result-count"></span><span>INTERNAL DATABASE <i>●</i> CONNECTED</span></div>`}</section></div>`;
+    `<div class="modal-backdrop"><section class="terminal-modal ${modal === "settings" ? "settings-modal" : ""}" role="dialog" aria-modal="true" aria-label="${modal === "settings" ? "系统设置" : modal === "saved" ? "收藏曲目" : "曲目检索"}"><div class="modal-top"><span>RHINE LAB / ${modal === "settings" ? "SYSTEM PREFERENCES" : "TRACK DIRECTORY"}</span><button data-action="close-modal" aria-label="关闭窗口">CLOSE <span>×</span></button></div>${modal === "settings" ? settingsMarkup() : `<h2>${modal === "saved" ? "SAVED TRACKS" : "TRACK INDEX"}<small>${modal === "saved" ? "收藏曲目" : "音乐库检索"}</small></h2><div class="search-field"><span>⌕</span><input id="archive-search" type="search" autocomplete="off" placeholder="输入曲名、艺术家或专辑" aria-label="检索曲目"/><span class="key">ESC</span></div><div class="category-filters">${categories.map((c, i) => `<button data-filter="${escapeHtml(c)}" class="${c === filter ? "active" : ""}">${escapeHtml(c)}</button>`).join("")}</div><div class="result-header"><span>TRACK / 曲目</span><span>ARTIST / 艺术家</span><span>LENGTH / 时长</span></div><div id="search-results" class="search-results"></div><div class="modal-bottom"><span id="result-count"></span></div>`}</section></div>`;
   const backdrop = $(".modal-backdrop");
   backdrop.hidden = true;
   modalTransition = new SurfaceTransition(backdrop, $(".terminal-modal"));
@@ -728,7 +733,7 @@ function renderResults() {
             `<button class="result-row" data-result="${i}"><span class="result-name"><b>${r.id}</b><span>${escapeHtml(r.title)}<small>${escapeHtml(r.en)}</small></span>${favIndexes.has(i) ? "<i>＋</i>" : ""}</span><span>${escapeHtml(r.department)}</span><span>${escapeHtml(r.date)} <i>↗</i></span></button>`,
         )
         .join("")
-    : `<div class="empty-results"><span>∅</span><strong>${modal === "saved" && !searchQuery ? "尚无收藏曲目" : "没有匹配的曲目"}</strong><p>${modal === "saved" && !searchQuery ? "在曲目面板上点「＋ SAVE TRACK」，或在播放条上点 ♡ 收藏曲目，会出现在这里。" : "换个曲名、艺术家或专辑再试，也可以切换分组筛选。"}</p><button data-action="reset-search">${modal === "saved" ? "查看全部曲目 →" : "重置检索 →"}</button></div>`;
+    : `<div class="empty-results"><span>∅</span><strong>${modal === "saved" && !searchQuery ? "尚无收藏曲目" : "没有匹配的曲目"}</strong><p>${modal === "saved" && !searchQuery ? "在播放条上点 ♡ 收藏，会出现在这里" : "换个关键词，或切换分组筛选"}</p><button data-action="reset-search">${modal === "saved" ? "查看全部曲目 →" : "重置检索 →"}</button></div>`;
   $("#result-count").textContent = `${String(results.length).padStart(2, "0")} TRACKS FOUND`;
 }
 function updateQualitySummary() {
@@ -744,7 +749,7 @@ function updateQualitySummary() {
   summary.textContent = `实际渲染 ${canvas.width} × ${canvas.height} · ${prefs.rendering.antialias === "smaa" ? "SMAA" : "原始抗锯齿"} · 纹理 ${metrics.anisotropy ?? 1}×${metrics.limited ? " · 已达到缓冲上限" : ""}${fpsTxt}`;
 }
 function settingsMarkup() {
-  return `<h2>SYSTEM SETTINGS<small>终端偏好设置</small></h2><p class="settings-intro"><span class="operator-name">${getOperator()}</span> <span>·</span> SESSION AUTHORIZED</p><div class="settings-list"><label class="operator-field" for="operator-input"><div><strong>OPERATOR ID</strong><span>开屏「ID CONFIRMED」与页脚显示的身份标识</span></div><input type="text" id="operator-input" maxlength="40" value="${escapeHtml(getOperator())}" autocomplete="off" spellcheck="false"/></label>${audioSettingsMarkup(prefs)}<label><div><strong>REDUCED MOTION</strong><span>减少镜头移动和过渡动效</span></div><input type="checkbox" data-pref="reduced" ${prefs.reduced ? "checked" : ""}/><i class="toggle"></i></label>${playbackSettingsMarkup()}${mediaKeyStatusMarkup()}${coverToolsMarkup()}${localAudioMarkup()}</div>${qualityMarkup(prefs.rendering)}<div class="settings-shortcuts"><span>KEYBOARD CONTROLS</span><p><kbd>←</kbd><kbd>→</kbd> 切列 <kbd>↑</kbd><kbd>↓</kbd> 选档 <kbd>ENTER</kbd> 读取 <kbd>/</kbd> 检索 <kbd>ESC</kbd> 返回</p></div><div class="settings-bottom"><button data-action="fullscreen">FULLSCREEN <span>↗</span></button><button data-action="restart">REINITIALIZE SYSTEM <span>↻</span></button></div><div class="modal-bottom"><span>ANALYSIS OS / 1.0 · 使用 MiSans 字体（小米） <a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">字体许可</a></span><span>POWERED BY RHINE LAB</span></div>`;
+  return `<h2>SYSTEM SETTINGS<small>终端偏好设置</small></h2><p class="settings-intro"><span class="operator-name">${getOperator()}</span> <span>·</span> SESSION AUTHORIZED</p><div class="settings-list"><label class="operator-field" for="operator-input"><div><strong>OPERATOR ID</strong><span>页脚显示的身份标识</span></div><input type="text" id="operator-input" maxlength="40" value="${escapeHtml(getOperator())}" autocomplete="off" spellcheck="false"/></label>${audioSettingsMarkup(prefs)}<label><div><strong>REDUCED MOTION</strong><span>减少镜头移动与过渡动效</span></div><input type="checkbox" data-pref="reduced" ${prefs.reduced ? "checked" : ""}/><i class="toggle"></i></label>${playbackSettingsMarkup()}${mediaKeyStatusMarkup()}${audioQualityMarkup()}${coverToolsMarkup()}${localAudioMarkup()}</div>${qualityMarkup(prefs.rendering)}<div class="settings-shortcuts"><span>KEYBOARD CONTROLS</span><p><kbd>←</kbd><kbd>→</kbd> 切列 <kbd>↑</kbd><kbd>↓</kbd> 选档 <kbd>ENTER</kbd> 读取 <kbd>/</kbd> 检索 <kbd>ESC</kbd> 返回</p></div><div class="settings-bottom"><button data-action="fullscreen">FULLSCREEN <span>↗</span></button><button data-action="restart">REINITIALIZE SYSTEM <span>↻</span></button></div><div class="modal-bottom"><span>ANALYSIS OS / 1.0 · 使用 MiSans 字体（小米） <a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">字体许可</a></span><span>POWERED BY RHINE LAB</span></div>`;
 }
 
 document.addEventListener("input", (e) => {
@@ -783,6 +788,14 @@ document.addEventListener("change", (e) => {
     prefs.rendering = { ...qualityPresets[el.value as QualityPreset] };
     qualityTouched = true; // 用户自己选了画质 → 本次会话不再自动降档
     savePrefs();
+  } else if (el.id === "aq-cover-accent") {
+    /* 封面强调色：开关落 localStorage 由播放器自己管（它要知道这个偏好去决定采不采样） */
+    setCoverAccent(el.checked);
+    audio.play("confirm");
+  } else if (el.id === "aq-beatmap-toggle") {
+    /* 节拍预分析：同样由播放器自己收口（关掉时要立刻把已装的乐谱撤掉） */
+    setBeatmapPref(el.checked);
+    audio.play("confirm");
   } else if (el.dataset.quality) {
     const key = el.dataset.quality as keyof RenderQuality;
     prefs.rendering = normalizeQuality({ ...prefs.rendering, [key]: key === "antialias" ? el.value : Number(el.value) });
@@ -876,6 +889,12 @@ document.addEventListener("click", (e) => {
   if (action === "play-now") togglePlay();
   /* 一键重读全部封面（系统设置里的按钮）：跑起来可能要几秒，别关弹窗，让 toast 报进度 */
   if (action === "reread-covers") void rereadAllCovers();
+  /* 右侧显示在「可视化 / 歌词」之间切换 —— 只改状态与类名，不重绘详情区
+     （重绘会重放解密动画、也会重建频谱实例）。 */
+  if (action === "view-viz") setDetailView("viz");
+  if (action === "view-lyric") setDetailView("lyric");
+  /* 把还没固化的 B 站曲目补齐到播放器内部（源缓存删掉也能播的保障） */
+  if (action === "solidify-all") void solidifyAllMissing();
   if (action === "edit-track") startEditing();
   if (action === "edit-save") stopEditing(true);
   if (action === "edit-cancel") stopEditing(false);

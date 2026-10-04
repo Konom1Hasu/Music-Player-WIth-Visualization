@@ -21,7 +21,10 @@ export class InspectionOverlay {
   )!;
   private point =
     this.root.querySelector<SVGCircleElement>("#inspection-point")!;
-  private label = document.querySelector<HTMLElement>("#inspection-text")!;
+  /* ★ 界面文字精简（2026-10-03）：那行 "CONFIDENTIALITY: GENERAL BUSINESS USE"
+     是纯装饰字，已从舞台里删掉 —— 这里改成可空，别再写回一个 `!` 断言，
+     否则元素不存在时整条扫描动画会抛 null 崩掉。 */
+  private label = document.querySelector<HTMLElement>("#inspection-text");
 
   render(
     frame: DecryptionFrame,
@@ -55,9 +58,11 @@ export class InspectionOverlay {
     this.point.setAttribute("cx", String(cx));
     this.point.setAttribute("cy", String(cy));
     this.point.style.opacity = String(frame.point);
-    this.label.style.opacity = String(showLabel ? frame.label : 0);
-    this.label.querySelector<HTMLElement>("strong")!.style.opacity = String(
-      frame.labelValue,
-    );
+    if (this.label) {
+      this.label.style.opacity = String(showLabel ? frame.label : 0);
+      this.label.querySelector<HTMLElement>("strong")!.style.opacity = String(
+        frame.labelValue,
+      );
+    }
   }
 }

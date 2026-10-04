@@ -1471,14 +1471,30 @@ function setLyrics(s) {
     body.innerHTML = '<div class="l">暂无歌词</div>';
   }
 }
+/* 歌词游标：lyrics 已按时间排序，改成单调推进而不是每帧从头扫。
+   原来这里对 lyrics 线性扫、又对 items 全量遍历 toggle('active')，
+   在 timeupdate（每秒数次）里就是纯浪费 —— 而且 classList.toggle 是写 DOM。 */
+let lyrCursor = -1;
+let lyrCursorSig = '';
 function updateLyricsHighlight(force) {
   if (!lyricsReady) return;
   const t = audio.currentTime;
-  let idx = -1;
-  for (let i = 0; i < lyrics.length; i++) if (lyrics[i].t <= t) idx = i; else break;
+  // 换歌（歌词数组被换掉）就重置游标
+  const sig = lyrics.length + '|' + (lyrics[0] ? lyrics[0].t : '');
+  if (lyrCursorSig !== sig) { lyrCursorSig = sig; lyrCursor = -1; }
+  while (lyrCursor + 1 < lyrics.length && lyrics[lyrCursor + 1].t <= t) lyrCursor++;
+  while (lyrCursor >= 0 && lyrics[lyrCursor].t > t) lyrCursor--;
+  const idx = lyrCursor;
   const body = $('#lyricsBody');
   const items = body.children;
-  for (let i = 0; i < items.length; i++) items[i].classList.toggle('active', i === idx);
+  /* 只改"将要变化的两行"，不再对全部歌词行做 classList.toggle ——
+     toggle 会触达每个元素的 class 属性，几十行 × 每秒数次 = 不必要的样式重算。 */
+  if (body._activeIdx !== idx) {
+    const prev = body._activeIdx;
+    if (typeof prev === 'number' && items[prev]) items[prev].classList.remove('active');
+    if (idx >= 0 && items[idx]) items[idx].classList.add('active');
+    body._activeIdx = idx;
+  }
   if (idx >= 0 && (force || !body._pinnedIdx || body._pinnedIdx !== idx)) {
     body._pinnedIdx = idx;
     const el = items[idx];
@@ -2113,25 +2129,43 @@ audio.addEventListener('loadedmetadata', () => {
 audio.addEventListener('play', () => { const el = $('#playBtn'); el.innerHTML = '<svg viewBox="0 0 24 24"><rect x="6.8" y="4.6" width="3.6" height="14.8" rx="1.8"/><rect x="13.6" y="4.6" width="3.6" height="14.8" rx="1.8"/></svg>'; });
 audio.addEventListener('pause', () => { $('#playBtn').innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>'; keepVizFast(1000); scheduleViz(); saveState(); });
 
-/* 进度条拖拽 */
+/* 进度条拖拽
+   ★ 原来 pointermove 里每次都 bar.getBoundingClientRect()：
+   拖动时指针每秒产生几十到上百个事件，每个都强制一次同步布局（reflow），
+   而进度条本身又在被改宽度 —— 典型的"读写交替"抖动。
+   现在把矩形缓存在 pointerdown 时算一次，并用 rAF 合并事件：一帧最多落一次
+   （顺带让 audio.currentTime 的赋值不再被高频调用，seek 更稳）。 */
 const bar = $('#bar');
 let seeking = false;
+let barRect = null;
+let seekPct = 0, seekRaf = 0;
+function flushSeek() {
+  seekRaf = 0;
+  if (!seeking || !barRect) return;
+  setBarUI(seekPct * 100);
+  audio.currentTime = seekPct * (audio.duration || 0);
+}
 bar.addEventListener('pointerdown', e => {
   if (!audio.duration) return;
   seeking = true; bar.setPointerCapture(e.pointerId);
-  const r = bar.getBoundingClientRect();
-  const pct = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-  setBarUI(pct * 100);
-  audio.currentTime = pct * audio.duration;
+  barRect = bar.getBoundingClientRect();          // 拖动期间只量一次
+  seekPct = Math.max(0, Math.min(1, (e.clientX - barRect.left) / barRect.width));
+  setBarUI(seekPct * 100);
+  audio.currentTime = seekPct * audio.duration;
 });
 bar.addEventListener('pointermove', e => {
   if (!seeking) return;
-  const r = bar.getBoundingClientRect();
-  const pct = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-  setBarUI(pct * 100);
-  audio.currentTime = pct * (audio.duration || 0);
+  if (!barRect) barRect = bar.getBoundingClientRect();
+  seekPct = Math.max(0, Math.min(1, (e.clientX - barRect.left) / barRect.width));
+  if (!seekRaf) seekRaf = requestAnimationFrame(flushSeek);   // 一帧一次
 });
-bar.addEventListener('pointerup', () => { seeking = false; });
+bar.addEventListener('pointerup', () => {
+  seeking = false;
+  barRect = null;
+  if (seekRaf) { cancelAnimationFrame(seekRaf); seekRaf = 0; }
+});
+/* 窗口尺寸/布局变化时让缓存失效，下次拖动重新量 */
+window.addEventListener('resize', () => { barRect = null; });
 /* 进度条统一更新入口：填充宽度与圆形滑块位置必须一起走，否则滑块会卡在最左端 */
 function setBarUI(pct) {
   pct = Math.max(0, Math.min(100, pct || 0));
@@ -2248,7 +2282,16 @@ function renderList() {
     tip.style.display = 'block';
     tip.innerHTML = favOnly && songs.length ? '<span class="big">💜</span>收藏夹还是空的' : '<span class="big">🎵</span>列表还是空的<br>点击「添加音乐」或拖入音频文件';
   } else tip.style.display = 'none';
-  for (const s of view) {
+  /* ★ 序号改用循环下标，不再用 view.indexOf(s)。
+     原来每渲染一行都要在 view 里线性找一个元素 → 整个列表是 O(n²)：
+     1000 首时约 100 万次比较，切歌、收藏、排序都会重跑一遍。
+     另外把 nextQueue 预先转成 Set，原来每行也各查一次 indexOf（同样是 O(n)）。 */
+  const qset = new Set(nextQueue);
+  // songs 下标表：点击时不必再 songs.indexOf(s)（又是 O(n)）
+  const songIdx = new Map();
+  for (let i = 0; i < songs.length; i++) songIdx.set(songs[i].id, i);
+  for (let vi = 0; vi < view.length; vi++) {
+    const s = view[vi];
     const item = document.createElement('div');
     item.className = 'item' + (s.id === currentId ? ' active' : '');
     item.innerHTML = `
@@ -2256,17 +2299,17 @@ function renderList() {
       <div class="thumb"><img src="${s.cover}" alt="" loading="lazy"></div>
       <div class="info"><div class="t"></div><div class="m"></div></div>
       <span class="dur"></span>
-      <button class="playnext${nextQueue.includes(s.id) ? ' on' : ''}" title="下一首播放"><svg viewBox="0 0 24 24"><path d="M3.6 7.2h11.6"/><path d="M3.6 12h7.6"/><path d="M3.6 16.8h11.6"/><path d="M17.4 10.4 21.4 14l-4 3.6z"/></svg></button>
+      <button class="playnext${qset.has(s.id) ? ' on' : ''}" title="下一首播放"><svg viewBox="0 0 24 24"><path d="M3.6 7.2h11.6"/><path d="M3.6 12h7.6"/><path d="M3.6 16.8h11.6"/><path d="M17.4 10.4 21.4 14l-4 3.6z"/></svg></button>
       <button class="edit" title="编辑歌曲信息（修正识别错的歌名/歌手/封面）"><svg viewBox="0 0 24 24"><path d="M4 20h4.2L20.2 8 16 3.8 4 15.8z"/><path d="M14.6 5.4 18.8 9.6"/></svg></button>
       <button class="del" title="从列表移除"><svg viewBox="0 0 24 24"><path d="M6.4 6.4 17.6 17.6"/><path d="M17.6 6.4 6.4 17.6"/></svg></button>`;
     // 网易云那种行首序号：正在播放的那行显示小喇叭
-    item.querySelector('.idx').textContent = (s.id === currentId) ? '♪' : String(view.indexOf(s) + 1);
+    item.querySelector('.idx').textContent = (s.id === currentId) ? '♪' : String(vi + 1);
     item.querySelector('.t').textContent = s.title;
     item.querySelector('.m').textContent = `${s.artist} · ${s.album}${(s.plays || 0) > 0 ? ` · ♪${s.plays}次` : ''}`;
     item.querySelector('.dur').textContent = s.duration && isFinite(s.duration) ? fmt(s.duration) : '--:--';
     item.addEventListener('click', () => {
       if (s.id === currentId && !audio.paused) { audio.pause(); return; }
-      playAt(songs.indexOf(s));
+      playAt(songIdx.get(s.id));
     });
     item.querySelector('.del').addEventListener('click', e => { e.stopPropagation(); removeSong(s.id); });
     item.querySelector('.playnext').addEventListener('click', e => { e.stopPropagation(); queueNext(s.id); });

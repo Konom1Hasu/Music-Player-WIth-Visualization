@@ -669,9 +669,9 @@ export function setPlaybackPref(key: keyof PlaybackPrefs, value: boolean) {
    样式复用 .settings-list label（与 REDUCED MOTION 同一行式），不新增 CSS。 */
 export function playbackSettingsMarkup(): string {
   const rows: [keyof PlaybackPrefs, string, string][] = [
-    ["rememberPos", "REMEMBER LAST POSITION", "只记\"最后一次在听的那首 + 位置\"这一条，用于下次启动接着听；关掉后不写任何进度。任何一首歌都不会单独记住自己的上次位置，切走再切回一律从头播"],
-    ["resumeLast", "RESUME LAST TRACK", "启动时把播放条恢复到上次在听的那一首与位置"],
-    ["openOnPlay", "OPEN ARCHIVE ON PLAY", "起播时自动打开这首歌的档案详情"],
+    ["rememberPos", "REMEMBER LAST POSITION", "记住最后在听的那一首与位置，用于下次接着听；关掉则不写任何进度"],
+    ["resumeLast", "RESUME LAST TRACK", "启动时恢复上次那一首与位置"],
+    ["openOnPlay", "OPEN ARCHIVE ON PLAY", "起播时自动打开这首歌的档案"],
   ];
   return rows
     .map(
@@ -1065,8 +1065,8 @@ function fillBeatmapInfo() {
 export function coverToolsMarkup(): string {
   return (
     `<label><div><strong>RE-READ ALL COVERS</strong><span>` +
-    `把每一首的封面重新从本地文件里读一遍（内嵌封面 / NCM 头部），读完自动保存并刷新列表与档案阵列；` +
-    `没有本地文件路径的曲目（浏览器模式导入的）会跳过</span></div>` +
+    `从本地文件重读内嵌封面，读完自动保存并刷新列表与档案阵列` +
+    `</span></div>` +
     `<button type="button" class="edit-mini" data-action="reread-covers" style="pointer-events:auto">重新读取全部封面</button></label>`
   );
 }
@@ -2137,6 +2137,23 @@ let analyserNode: AnalyserNode | null = null;
 let freqData: Uint8Array<ArrayBuffer> | null = null;
 let timeData: Float32Array<ArrayBuffer> | null = null;
 let vizDenied = false;
+/* 为什么放弃接管音频（不再静默）。原来 vizDenied 一置位就永远不再尝试，
+   而且界面上**毫无痕迹** —— 用户只看到频谱不动，完全不知道为什么。
+   现在记下原因，并在设置里显示出来。
+   ★ 但"永久不再尝试"本身也害过人：一次**瞬时**失败（比如构造时上下文还没就绪）
+     就会让之后每一次播放都没有频谱，用户只能重启。所以改成**有限重试**：
+     vizDenied 只表示"本次没成功"，真正盖棺的是重试次数用尽。 */
+let vizDenyReason = "";
+let vizDeniedAnnounced = false;
+/* 允许的最大尝试次数。成功一次即归零；失败到上限才彻底放弃并提示。
+   3 次足以越过"首次播放时上下文未就绪"这类瞬时问题，又不会无限刷屏。 */
+const VIZ_MAX_ATTEMPTS = 3;
+let vizAttempts = 0;
+function announceVizDenied() {
+  if (vizDeniedAnnounced) return;
+  vizDeniedAnnounced = true;
+  toast("频谱不可用：" + (vizDenyReason || "音频分析未能启动") + "（播放不受影响）");
+}
 let vizRaf = 0;
 let vizLast = 0;
 /* 分析节拍（20ms，1.3.0 的 50Hz）的定时器句柄。rAF 只管重画，分析由它驱动 ——
@@ -2539,22 +2556,218 @@ function lrcLines(s: Song | null): { t: number; txt: string }[] {
   return lines;
 }
 /** 详情区只有一行"当前歌词"字幕：跟着播放进度整行替换，不做滚动列表。 */
+/* ★ 歌词游标：不再每次线性重扫。
+   lines 是**已按时间排好序**的，而 stepLyrics 挂在 timeupdate 上（每秒数次）。
+   线性扫描一首 5 分钟的歌约 100~150 行 → 每秒几百次纯浪费的比较。
+   改成单调推进的游标：cur 前进时最多走几格，倒退（seek 往回拖）时才回退，
+   两个 while 都是"摊还 O(1)"。 */
+let lyricCursor = 0;
+let lyricCursorId = "";
+/* 诊断用：非 null 时取代 audio.currentTime 作为歌词推进的时间源（见 stepLyrics）。
+   正常运行时恒为 null，对真实播放没有任何影响。 */
+let lyricTimeOverride: number | null = null;
+/** 给自动化验证用：喂一个歌词时间并立刻走一遍 stepLyrics。
+    只在诊断开关下导出（见 mountSongDetail），产品运行时不暴露。 */
+export function setLyricTimeForTest(sec: number) {
+  lyricTimeOverride = isFinite(sec) ? sec : null;
+  stepLyrics();
+}
+
+/* ★ 详情区正在"展示"的那一首 ≠ 正在"播放"的那一首。
+   用户可以在档案阵列里翻看任意一首（详情面板显示 songs[selected]），
+   而播放的还停在别处、甚至一首都没在播（启动时 currentId 是空的）。
+   歌词是详情区的一部分，必须跟着**展示的那一首**走 —— 否则翻档案时
+   明明这首有歌词，面板却写着"♪ 无歌词"（真实踩过：自动化验证里
+   currentId=null，详情区显示的歌有 lrc，但歌词列表一口行都没有）。
+   mountSongDetail 每次挂载都会把当前展示的曲目 id 写进来。 */
+let detailSongId = "";
+/** 详情区这首歌：优先用"展示中的那一首"，它不在库里时（或还没挂载过）回落到正在播放的那一首。 */
+function detailSong(): Song | null {
+  if (detailSongId) {
+    const shown = songs.find((s) => s.id === detailSongId);
+    if (shown) return shown;
+  }
+  return currentSong();
+}
+export function setDetailSongId(id: string) {
+  detailSongId = id || "";
+}
+
 function stepLyrics() {
   const el = document.querySelector<HTMLElement>("#p-lyric-line");
-  if (!el) return;
-  const s = currentSong();
+  const list = document.querySelector<HTMLElement>("#p-lyric-list");
+  const s = detailSong();
   const lines = lrcLines(s);
+
+  /* 换歌就重置游标（lines 换了，旧游标毫无意义）。
+     ★ 必须放在"分叉前" —— 两种模式（列表 / 单行）共用这一个游标，
+       否则从列表切回单行时会拿旧歌的行号去点菜。 */
+  if (lyricCursorId !== (s?.id || "")) {
+    lyricCursorId = s?.id || "";
+    lyricCursor = 0;
+    lyricListId = "";      // 换歌 → 歌词列表必须重建（行数与文本都变了）
+    lyricLastActive = -1;
+    if (list) list.style.transform = "";
+  }
+
   if (!lines.length) {
-    el.textContent = s && s.lrc ? "" : "♪ 无歌词";
-    el.classList.remove("on");
+    const hint = s && s.lrc ? "" : "♪ 无歌词";
+    if (el) {
+      if (el.textContent !== hint) el.textContent = hint;
+      el.classList.remove("on");
+    }
+    if (list && lyricListId !== "__empty__") {
+      lyricListId = "__empty__";
+      lyricLastActive = -1;
+      list.innerHTML = '<div class="lyric-empty">♪ 这一首没有歌词</div>';
+    }
     return;
   }
-  const cur = audio.currentTime || 0;
-  let idx = 0;
-  for (let i = 0; i < lines.length; i++) if (lines[i].t <= cur) idx = i;
-  const text = lines[idx].txt;
-  if (el.textContent !== text) el.textContent = text;
-  el.classList.add("on");
+
+  /* 歌词时间源：正常取 audio.currentTime。
+     ★ 自动化验证里那首假曲目没有真实音源（audio.currentTime 永远是 0），
+       没法推播放进度 —— 于是允许在诊断开关（?diag=1 / rhine-diag）下
+       从外面喂一个时间，走的是**和 timeupdate 完全相同**的这一条路径，
+       验证到的滚动/高亮就是真实行为，不是另写一条捷径。 */
+  const cur = lyricTimeOverride !== null ? lyricTimeOverride : audio.currentTime || 0;
+  // 向前推进：只要能走到下一行，就走
+  while (lyricCursor + 1 < lines.length && lines[lyricCursor + 1].t <= cur) lyricCursor++;
+  // 向后回退：seek 往回拖 / 换到新的一首时的兜底
+  while (lyricCursor > 0 && lines[lyricCursor].t > cur) lyricCursor--;
+
+  /* ---------- 模式一：单行字幕（可视化模式） ---------- */
+  if (el) {
+    const text = lines[lyricCursor].txt;
+    if (el.textContent !== text) el.textContent = text;
+    el.classList.add("on");
+  }
+
+  /* ---------- 模式二：滚动列表（歌词模式） ---------- */
+  if (list) syncLyricList(list, s, lines, lyricCursor);
+}
+
+/** 歌词列表的构建 + 高亮 + 滚动。
+    为什么要"签名化重建"：这个函数挂在 timeupdate 上，每秒被调好几次；
+    每帧重写 innerHTML 既浪费又会打断 CSS 过渡（滚动会一跳一跳）。
+    所以只在**曲目变了**时才重建 DOM，之后每帧只做两件轻活：
+      · 换一下高亮类（只动两个元素，不动整棵树）
+      · 调一次 transform 把当前行滚到中间 */
+let lyricListId = "";
+let lyricLastActive = -1;
+function syncLyricList(
+  list: HTMLElement,
+  s: Song | null,
+  lines: { t: number; txt: string }[],
+  active: number,
+) {
+  /* ① 构建：只在换歌时做一次。每行带 data-t（该行起始秒数），点击即可跳转。 */
+  if (lyricListId !== (s?.id || "")) {
+    lyricListId = s?.id || "";
+    lyricLastActive = -1;
+    list.innerHTML = lines
+      .map(
+        (ln, i) =>
+          `<div class="lyric-row" data-i="${i}" data-t="${ln.t}">${esc(ln.txt)}</div>`,
+      )
+      .join("");
+    list.style.transform = "";
+  }
+  /* ② 高亮：只改变化的那两行 */
+  if (active !== lyricLastActive) {
+    const rows = list.children;
+    const prev = lyricLastActive >= 0 ? (rows[lyricLastActive] as HTMLElement | undefined) : undefined;
+    if (prev) prev.classList.remove("on");
+    const now = rows[active] as HTMLElement | undefined;
+    if (now) now.classList.add("on");
+    lyricLastActive = active;
+  }
+  /* ③ 滚动：把当前行挪到**可视容器**的垂直中线上。
+     用 transform: translateY 而不是 scrollTop —— 前者走合成层，不触发重排，
+     配 CSS 的 transition 能得到平滑滚动；后者在部分浏览器里是瞬跳的。
+     ★ 中线要取**外层滚动容器**的高度（.lyric-scroll），不是列表自己的 clientHeight：
+       .lyric-list 是 absolute、无显式高度，clientHeight 会被内容撑到"所有行加起来"，
+       行数少时与可视区差得离谱，行数多时又会把当前行推到窗口外（踩过：
+       12 行时看着差 10px 像偶然，5 行时会直接跑偏半屏）。 */
+  const row = list.children[active] as HTMLElement | undefined;
+  if (!row) return;
+  const boxEl = list.parentElement;
+  const box = (boxEl ? boxEl.clientHeight : 0) || list.clientHeight || 1;
+  const dy = box / 2 - (row.offsetTop + row.offsetHeight / 2);
+  list.style.transform = `translateY(${Math.round(dy)}px)`;
+}
+
+/** 歌词模式下点击某行 → 跳到那一行。
+    刻意**不**自动起播：用户可能只是在浏览歌词，突然放声会吓一跳。
+    要听的话点播放条就行 —— 跳转已经把进度放到了那句的开头。
+    ★ 只有"展示的这首 == 正在播的这首"时才去动 audio：
+      否则用户翻着另一首的歌词点了一行，会把**正在播的那首**拖走（听感上莫名其妙跳了）。 */
+export function seekLyricRow(target: HTMLElement): void {
+  const row = target.closest<HTMLElement>(".lyric-row");
+  if (!row) return;
+  const t = Number(row.dataset.t);
+  if (!isFinite(t)) return;
+  const shown = detailSong();
+  if (!shown || shown.id !== currentId) return;
+  /* seek 到那一行往前一点点，让"这一行"立刻成为当前行（否则正好卡在边界上，
+     高亮会停在前一行，看着像没跳） */
+  const to = Math.max(0, t - 0.01);
+  try {
+    audio.currentTime = to;
+  } catch {
+    /* 还没加载出可 seek 的时长时忽略 */
+  }
+  stepLyrics();
+}
+
+/* ---------- 右侧面板：可视化 / 歌词 两种形态 ---------- */
+export type DetailView = "viz" | "lyric";
+const LS_DETAIL_VIEW = "rhine-detail-view";
+/** 当前形态。读 localStorage；脏值一律回落 viz（白名单校验，见设置持久化验证）。 */
+let detailView: DetailView =
+  (() => {
+    try {
+      return localStorage.getItem(LS_DETAIL_VIEW) === "lyric" ? "lyric" : "viz";
+    } catch {
+      return "viz";
+    }
+  })();
+export function getDetailView(): DetailView {
+  return detailView;
+}
+/** 切换形态：改状态 → 落库 → 给 .song-viz 换类名 → 补一次歌词同步。
+    不重绘整个详情区 —— 那样会重放解密动画、也会重建频谱实例。 */
+export function setDetailView(v: DetailView): void {
+  if (v !== "viz" && v !== "lyric") return;
+  detailView = v;
+  try {
+    localStorage.setItem(LS_DETAIL_VIEW, v);
+  } catch {
+    /* 隐私模式下写不了，不影响本次会话 */
+  }
+  applyDetailView();
+  /* 切到歌词模式时列表是新建的，游标与高亮都得重算一次 */
+  lyricListId = "";
+  lyricLastActive = -1;
+  stepLyrics();
+}
+/** 把当前形态写到 DOM 上（.song-viz 加 viz-mode / lyric-mode）。
+    详情区每次重绘都是新节点，所以渲染后要再调一次。
+    ★ 反白也要在这里搬 —— setDetailView() **刻意不重绘详情区**（重绘会重放解密动画、
+      重建频谱实例），所以渲染时写在 markup 里的 .on 类不会自己跟着状态走：
+      切到歌词后 .on 还留在"可视化"那颗上，看着像没切过去（实测截图就说这个谎）。
+      这里按状态重新分配 .on，渲染路径与切换路径共用同一份真相。 */
+export function applyDetailView(): void {
+  const box = document.querySelector<HTMLElement>(".song-viz");
+  if (!box) return;
+  box.classList.toggle("lyric-mode", detailView === "lyric");
+  box.classList.toggle("viz-mode", detailView === "viz");
+  const wrap = document.querySelector<HTMLElement>("#p-view-toggle");
+  if (wrap) wrap.setAttribute("aria-pressed", detailView === "lyric" ? "true" : "false");
+  const on = detailView === "lyric";
+  const vizBtn = document.querySelector<HTMLElement>('[data-action="view-viz"]');
+  const lyricBtn = document.querySelector<HTMLElement>('[data-action="view-lyric"]');
+  if (vizBtn) vizBtn.classList.toggle("on", !on);
+  if (lyricBtn) lyricBtn.classList.toggle("on", on);
 }
 
 /* ---------- 列表与播放条 ---------- */
@@ -2614,8 +2827,8 @@ function renderList() {
             return `<div class="p-row${x.id === currentId ? " active" : ""}${queued.has(x.id) ? " queued" : ""}" data-i="${i}"><span class="p-idx">${String(i + 1).padStart(2, "0")}</span><span class="p-meta"><b>${esc(x.title)}</b><small>${esc(x.artist)}${x.album ? " · " + esc(x.album) : ""}${x.fav ? " ／ ♥" : ""}${queued.has(x.id) ? " ／ 下一首" : ""}</small></span><button class="p-queue" data-queue="${x.id}" title="下一首播放">↳</button><button class="p-fav${x.fav ? " on" : ""}" data-fav="${x.id}" title="收藏">${x.fav ? "♥" : "♡"}</button><button class="p-del" data-del="${x.id}" title="移除">✕</button></div>`;
           })
           .join("")
-      : `<div class="p-empty">没有匹配「${esc(q)}」的曲目。<br/>换个关键词，或点搜索框右边的 ✕ 清除。</div>`
-    : `<div class="p-empty">尚无曲目。点击 ＋ 导入音乐文件，右键 ＋ 导入整个文件夹，也可以把文件直接拖进窗口。</div>`;
+      : `<div class="p-empty">没有匹配「${esc(q)}」的曲目<br/>换个关键词，或点右边的 ✕ 清除</div>`
+    : `<div class="p-empty">尚无曲目<br/>点 ＋ 导入音乐，或把文件直接拖进窗口</div>`;
   if (s && listEl.classList.contains("open")) {
     const idx = songs.findIndex((x) => x.id === s.id);
     // 正在播放的这一首被过滤掉了就不跳（否则会滚到一个不存在的位置）
@@ -2652,7 +2865,6 @@ function buildUI() {
       <input id="p-seek" type="range" min="0" max="1000" value="0" title="播放进度" aria-label="播放进度"/>
       <span class="p-time" id="p-time-dur">0:00</span>
       <i class="p-sep" aria-hidden="true"></i>
-      <span class="p-vol-glyph" title="音量">VOL</span>
       <input id="p-vol" type="range" min="0" max="100" value="80" title="音量" aria-label="音量"/>
     </div>`;
   root.appendChild(bar);
@@ -2883,7 +3095,7 @@ export function songDetailMarkup(index: number): string {
   const status = empty ? "NO LIBRARY" : audio.paused ? "READY" : "PLAYING";
   const title = s ? s.title : "尚无曲目";
   const artist = s ? s.artist : "音乐库为空";
-  const album = s ? s.album : "把音乐文件拖进窗口，或按下方 ＋ 导入";
+  const album = s ? s.album : "把音乐文件拖进窗口";
   const facts: [string, string][] = empty
     ? [
         ["DURATION / 时长", "—"],
@@ -2911,14 +3123,46 @@ export function songDetailMarkup(index: number): string {
   </div>
   <div class="detail-rule"></div>
   <dl class="metadata">${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${k.startsWith("PLAYED") ? "<i></i>" : ""}${esc(v)}</dd></div>`).join("")}</dl>
-  <div class="song-viz">
-    <div class="song-viz-head"><span class="panel-label">SPECTRUM / 实时频谱</span><span class="song-viz-note">40Hz – 16kHz · 对数分频 · 96 段</span></div>
-    <canvas id="p-detail-spectrum" width="${Math.round(636 * 1.5)}" height="${Math.round(477 * 1.5)}" aria-hidden="true"></canvas>
-    <div class="song-viz-axis"><span>LOW 40Hz</span><span>MID 1kHz</span><span>HIGH 16kHz</span></div>
+  ${empty ? "" : detailViewBarMarkup()}
+  <div class="song-viz${detailView === "lyric" ? " lyric-mode" : " viz-mode"}" data-song-id="${empty ? "" : esc(s!.id)}">
+    <div class="song-viz-head">
+      <span class="panel-label">SPECTRUM / 实时频谱</span>
+      ${empty ? "" : detailViewToggleMarkup()}
+    </div>
+    <div class="song-viz-body">
+      <canvas id="p-detail-spectrum" width="${Math.round(636 * 1.5)}" height="${Math.round(477 * 1.5)}" aria-hidden="true"></canvas>
+      <div class="lyric-scroll" id="p-lyric-scroll"><div class="lyric-list" id="p-lyric-list"></div></div>
+      <div class="lyric-veil top" aria-hidden="true"></div>
+      <div class="lyric-veil bottom" aria-hidden="true"></div>
+    </div>
+    <div class="song-viz-axis"><span>LOW</span><span>MID</span><span>HIGH</span></div>
     <div class="song-lyric-line" id="p-lyric-line"></div>
   </div>
   <div class="detail-actions">${empty ? actions : ""}<button class="solid-button" data-action="edit-track">✎ EDIT INFO<span>修改歌曲信息</span></button><button class="export-button" data-action="play-now">${audio.paused ? "PLAY" : "PAUSE"} <span>${audio.paused ? "▶" : "■"}</span></button></div>
   <div class="detail-footnote"><span>${esc(artist)} · ${esc(album)}</span><span>${empty ? "000" : String(index + 1).padStart(3, "0")} / ${total}</span></div>`;
+}
+
+/** 右侧形态切换的分段开关（可视化 ⟷ 歌词）。
+    放在详情区顶部工具栏（TRACK 行下面那条），紧邻它要控制的那块内容。
+    aria-pressed 表达"现在是不是歌词模式"，键盘与读屏都能识别。 */
+function detailViewBarMarkup(): string {
+  return (
+    `<div class="view-switch-bar">` +
+    `<span class="panel-label">RIGHT PANEL / 右侧显示</span>` +
+    detailViewToggleMarkup() +
+    `</div>`
+  );
+}
+/** 那个开关本体。两个都渲染出来（而不是一个按钮切换文字），
+    选中态由 aria-pressed 与 .on 类表达 —— 中文标签能同时看见，不用猜。 */
+function detailViewToggleMarkup(): string {
+  const on = detailView === "lyric";
+  return (
+    `<div class="view-toggle" id="p-view-toggle" role="group" aria-label="右侧显示内容" aria-pressed="${on}">` +
+    `<button type="button" data-action="view-viz"${on ? "" : ' class="on"'}>可视化</button>` +
+    `<button type="button" data-action="view-lyric"${on ? ' class="on"' : ""}>歌词</button>` +
+    `</div>`
+  );
 }
 
 /* ============================ 歌曲信息编辑 / 封面读取 ============================
@@ -2958,7 +3202,7 @@ export function songEditMarkup(index: number): string {
         <button class="edit-mini" data-action="edit-cover-embed"${hasPath ? "" : ` disabled title="这一首没有本地文件路径，读不到内嵌封面"`}>重新读取内嵌封面</button>
         <button class="edit-mini" data-action="edit-cover-none">恢复默认封面</button>
       </div>
-      <div class="edit-note">支持把图片直接拖到上面的方框里</div>
+      <div class="edit-note">也可以把图片拖进上面的方框</div>
     </div>
     <div class="edit-fields">
       <label class="edit-field"><span>标题 / TITLE</span><input type="text" id="p-edit-title" maxlength="120" autocomplete="off" spellcheck="false" value="${esc(editDraft.title)}"/></label>
@@ -2966,13 +3210,13 @@ export function songEditMarkup(index: number): string {
       <label class="edit-field"><span>专辑 / ALBUM</span><input type="text" id="p-edit-album" maxlength="120" autocomplete="off" spellcheck="false" value="${esc(editDraft.album)}"/></label>
       <div class="edit-hint">
         <button class="edit-mini" data-action="edit-reread">重新识别元数据</button>
-        <span>从音频文件里再读一次标题 / 艺术家 / 专辑 / 内嵌封面（会覆盖上面的输入）</span>
+        <span>会覆盖上面的输入</span>
       </div>
-      <div class="edit-status" id="${EDIT_STATUS_ID}" data-kind="ok">改完点右下角 SAVE 保存；ESC 取消。</div>
+      <div class="edit-status" id="${EDIT_STATUS_ID}" data-kind="ok">点 SAVE 保存，ESC 取消</div>
     </div>
   </div>
   <div class="song-viz">
-    <div class="song-viz-head"><span class="panel-label">SPECTRUM / 实时频谱</span><span class="song-viz-note">编辑时仍在播放 · 频谱照常</span></div>
+    <div class="song-viz-head"><span class="panel-label">SPECTRUM / 实时频谱</span></div>
     <canvas id="p-detail-spectrum" width="${Math.round(636 * 1.2)}" height="${Math.round(300 * 1.2)}" aria-hidden="true"></canvas>
   </div>
   <div class="detail-actions">
@@ -3215,6 +3459,29 @@ export function applySongEdit(): { ok: boolean; message: string } {
 }
 /** 详情区渲染完成后调用：接管频谱画布并点亮当前歌词行。 */
 export function mountSongDetail(root: ParentNode) {
+  /* 形态（可视化 / 歌词）写在 DOM 上 —— 详情区每次重绘都是新节点，
+     类名不会自己跟过来，所以每次挂载都要重新应用一次。 */
+  applyDetailView();
+  /* ★ 记住"详情区现在展示的是哪一首"：歌词必须跟着展示的那一首走，
+     而不是正在播放的那一首（用户可以在阵列里翻看不播的那首）。
+     id 由 songDetailMarkup 打在 .song-viz 上，这里读回来。 */
+  const vizEl = (root as HTMLElement).querySelector?.(".song-viz") as HTMLElement | null;
+  setDetailSongId(vizEl?.dataset.songId || "");
+  /* 列表是本轮新建的空壳，先把缓存签名清掉，逼 syncLyricList 重建一次 */
+  lyricListId = "";
+  lyricLastActive = -1;
+  const listEl = (root as HTMLElement).querySelector?.("#p-lyric-list") as HTMLElement | null;
+  if (listEl) {
+    /* 点某一行 → 跳到那句。挂在容器上做事件委托，不为每行绑一个监听。 */
+    listEl.addEventListener("click", (ev) => {
+      const t = ev.target as HTMLElement | null;
+      if (t) seekLyricRow(t);
+    });
+    /* ★ 滚动位置量的是 offsetTop，依赖列表已完成布局。
+       若在挂载瞬间就量，行高还是 0，滚动会算到错误位置 ——
+       所以先在下一帧补一次同步（此时排版已完成）。 */
+    requestAnimationFrame(() => stepLyrics());
+  }
   stepLyrics();
   const cv = (root as HTMLElement).querySelector?.("#p-detail-spectrum") as HTMLCanvasElement | null;
   if (cv) {
@@ -3227,6 +3494,10 @@ export function mountSongDetail(root: ParentNode) {
     if (VIZ_TEST || DIAG) {
       (window as any).__audioEl = audio;
       (window as any).__rhineViz = vizDiag;
+      /* 歌词推进的诊断入口：给一个秒数 → 等价于"播到那一秒"。
+         验证脚本拿它核对高亮行与滚动位置（真实 audio 在无音源时推不动）。 */
+      (window as any).__rhineLyricSeek = (sec: number) => setLyricTimeForTest(sec);
+      (window as any).__rhineStepLyrics = () => stepLyrics();
       if (VIZ_TEST) {
         (window as any).__spectrum = spectrum;
         // 合成信号的峰值：用来核对 ?viztest=1 的时域数据到底有没有在跑
@@ -3498,6 +3769,163 @@ export function toggleNight(force?: boolean) {
     /* ignore */
   }
   spectrum?.setPalette(spectrumPalette());
+  /* 深浅一切换，强调色的"底色"就变了（浅色底要深一点才压得住，深色底要亮一点才跳出来），
+     所以让封面配色按新的底色重算一次。 */
+  refreshCoverAccent();
+}
+
+/* ================= 封面主色驱动的强调色（"跟随封面"） =================
+   为什么做这个：项目里所有弹层、滑槽、滑块、进度条把手**都已经跟随主题变量**
+   （--p-accent 等，见 style.css），也就是说"动态换色"这件事的**基础设施早就齐了**，
+   缺的只是一个颜色来源。而封面是每首歌自带、且视觉信息量最大的那一个来源。
+   做法：从当前封面缩略图上采样，挑一个"够鲜艳、够亮"的像素做强调色，
+   再按当前是深色还是浅色主题做明度修正，最后写成 CSS 变量。
+   成本：封面早就被缩成 512px 的 dataURL 了，再缩到 24×24 采一次样即可 —— 开销可忽略。 */
+let coverAccentSig = "";     // 已经算过的封面指纹，避免重复采样
+let coverAccentOn = true;    // 可在设置里关掉（有些封面配色很脏，用户可能不想要）
+export function setCoverAccent(on: boolean) {
+  coverAccentOn = on;
+  try {
+    localStorage.setItem("rhine-cover-accent", on ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+  if (!on) clearCoverAccent();
+  else {
+    coverAccentSig = "";   // 强制重算
+    refreshCoverAccent(true);
+  }
+}
+export function coverAccentEnabled(): boolean {
+  return coverAccentOn;
+}
+/** 把颜色写成主题变量。--p-accent 及其派生色（accent 的浅/深变体）一起给。 */
+function applyCoverAccent(rgb: [number, number, number]) {
+  const [r, g, b] = rgb;
+  const root = document.body;
+  root.style.setProperty("--p-accent", `rgb(${r}, ${g}, ${b})`);
+  // 派生：hover / 选中态用的"亮一档"
+  const lighter = mixChannel(rgb, 1.28);
+  const darker = mixChannel(rgb, 0.72);
+  root.style.setProperty("--p-accent-lite", `rgb(${lighter[0]}, ${lighter[1]}, ${lighter[2]})`);
+  root.style.setProperty("--p-accent-deep", `rgb(${darker[0]}, ${darker[1]}, ${darker[2]})`);
+  root.classList.add("cover-accent");
+}
+function clearCoverAccent() {
+  const root = document.body;
+  root.classList.remove("cover-accent");
+  // 去掉内联变量 → 回落到 style.css 里的主题默认值
+  root.style.removeProperty("--p-accent");
+  root.style.removeProperty("--p-accent-lite");
+  root.style.removeProperty("--p-accent-deep");
+}
+function mixChannel(rgb: [number, number, number], k: number): [number, number, number] {
+  return [
+    Math.max(0, Math.min(255, Math.round(rgb[0] * k))),
+    Math.max(0, Math.min(255, Math.round(rgb[1] * k))),
+    Math.max(0, Math.min(255, Math.round(rgb[2] * k))),
+  ];
+}
+/* 采样算法：不用"平均色"（会退化成灰色），而是按 HSV 挑——
+   取饱和度 × 明度的加权，在"够亮、色彩够足"的像素里选得分最高的那一个，
+   再对它做聚类平均（把相近颜色的像素一起平掉，得到稳定不跳的色相）。 */
+function sampleAccent(img: HTMLImageElement): [number, number, number] | null {
+  const N = 24;
+  const cv = document.createElement("canvas");
+  cv.width = N;
+  cv.height = N;
+  const ctx = cv.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return null;
+  try {
+    ctx.drawImage(img, 0, 0, N, N);
+  } catch {
+    return null;   // 跨域图会抛，直接放弃（本项目的封面都是 dataURL，正常不会）
+  }
+  let data: Uint8ClampedArray;
+  try {
+    data = ctx.getImageData(0, 0, N, N).data;
+  } catch {
+    return null;
+  }
+  const dark = document.body.classList.contains("theme-dark");
+  let best: [number, number, number] | null = null;
+  let bestScore = 0;
+  // 第一遍：找得分最高的像素（得分 = 饱和度 × 明度适配权重）
+  const px: { r: number; g: number; b: number; h: number; s: number; v: number }[] = [];
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] < 200) continue;               // 忽略半透明
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    const { h, s, v } = rgbToHsv(r, g, b);
+    px.push({ r, g, b, h, s, v });
+    /* 太黑或太白都当不了强调色（会跟文字/背景打架）；
+       深色主题要偏亮的色（v 0.45~0.95），浅色主题要偏沉一点的色（v 0.30~0.80）。 */
+    if (s < 0.22) continue;
+    if (dark ? v < 0.40 || v > 0.97 : v < 0.24 || v > 0.86) continue;
+    const score = s * (dark ? v : 1 - Math.abs(v - 0.52) * 1.4);
+    if (score > bestScore) {
+      bestScore = score;
+      best = [r, g, b];
+    }
+  }
+  if (!best) return null;
+  // 第二遍：把色相相近（±18°）的像素平均一遍，得到更稳的颜色
+  const base = rgbToHsv(best[0], best[1], best[2]);
+  let sr = 0, sg = 0, sb = 0, n = 0;
+  for (const p of px) {
+    if (p.s < 0.15) continue;
+    let dh = Math.abs(p.h - base.h);
+    if (dh > 180) dh = 360 - dh;
+    if (dh > 18) continue;
+    if (Math.abs(p.v - base.v) > 0.34) continue;
+    sr += p.r; sg += p.g; sb += p.b; n++;
+  }
+  if (!n) return best;
+  const avg: [number, number, number] = [
+    Math.round(sr / n),
+    Math.round(sg / n),
+    Math.round(sb / n),
+  ];
+  // 最后按主题再校一次明度：深色主题宁可亮一点，浅色主题宁可沉一点，保证对比度
+  return adjustForTheme(avg, dark);
+}
+function rgbToHsv(r: number, g: number, b: number) {
+  r /= 255; g /= 255; b /= 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+  const d = mx - mn;
+  let h = 0;
+  if (d > 0) {
+    if (mx === r) h = ((g - b) / d) % 6;
+    else if (mx === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  return { h, s: mx === 0 ? 0 : d / mx, v: mx };
+}
+function adjustForTheme(rgb: [number, number, number], dark: boolean): [number, number, number] {
+  const { s, v } = rgbToHsv(rgb[0], rgb[1], rgb[2]);
+  // 深色主题：v 抬到 0.62 上下；浅色主题：v 压到 0.48 上下
+  const targetV = dark ? 0.64 : 0.46;
+  const k = v > 0.001 ? Math.max(0.55, Math.min(1.9, targetV / v)) : 1;
+  return mixChannel(rgb, k);
+}
+/** 取当前曲目的封面，算一遍强调色。封面没变就跳过（用 url 前 64 字符当指纹）。 */
+export function refreshCoverAccent(force = false) {
+  if (!coverAccentOn) return;
+  const s = currentSong();
+  const src = s?.cover || "";
+  if (!src) { clearCoverAccent(); coverAccentSig = ""; return; }
+  const sig = src.slice(0, 64) + "|" + src.length + "|" + (document.body.classList.contains("theme-dark") ? "d" : "l");
+  if (!force && sig === coverAccentSig) return;
+  coverAccentSig = sig;
+  const img = new Image();
+  img.onload = () => {
+    const c = sampleAccent(img);
+    if (c) applyCoverAccent(c);
+    else clearCoverAccent();   // 采不出合适的颜色（灰度封面等）→ 回落默认主题色
+  };
+  img.onerror = () => clearCoverAccent();
+  img.src = src;
 }
 
 /* ---------- 初始化 ---------- */
@@ -3515,6 +3943,22 @@ export async function initPlayer() {
   } catch {
     /* ignore */
   }
+  /* 封面强调色偏好：默认开（"跟随封面"是这个界面的主要观感卖点），
+     用户可以关掉 —— 关一次就记住。 */
+  try {
+    const ca = localStorage.getItem("rhine-cover-accent");
+    if (ca === "0") coverAccentOn = false;
+  } catch {
+    /* ignore */
+  }
+  /* 节拍预分析偏好：默认开（"提前点亮"是这次的主要收益），关一次就记住。 */
+  try {
+    if (localStorage.getItem("rhine-beatmap") === "0") beatEnabledPref = false;
+  } catch {
+    /* ignore */
+  }
+  setBeatmapEnabled(beatEnabledPref);
+  installBeatmapHooks();
   buildUI();
   // 先落一份（可能是空库 → 占位档案），保证三维档案阵列一进来就有东西可显示
   syncRecords();

@@ -170,7 +170,13 @@ button {
 .powered {
   position: absolute;
   right: 59px;
-  bottom: 108px;
+  /* ★ 100 → 62（2026-10-03）：详情面板的底部内容（EDIT INFO 那一行按钮）会一直
+     伸到 x 1790、y 900+ 这一带，而这一行占的是 x 1586–1861 —— 两者在 x 上必然重叠，
+     所以这条线**只能靠 y 错开**。62 让它落在 y 994–1018：详情面板的底边锁在 986
+     （见 #detail-content.song-mode 的 bottom 锚定），中间留 8px；
+     下面离页脚（bottom 35，实测顶边 1032）还有 14px。
+     archive 模式与 detail 模式用同一个值，避免切换时这一行跳来跳去。 */
+  bottom: 62px;
   font-size: 18px;
   /* ★ 右下角这行必须永远看得见。它原来和页脚同层（5），而详情面板(4)、三维画布、
      播放列表抽屉(8)、页脚(5) 一叠就可能把它盖住 —— 用户反馈"POWERED BY RHINE LAB 会被遮挡"。
@@ -648,20 +654,6 @@ button {
   height: 24px;
   top: 8px;
   background: #a27849;
-}
-.archive-hint {
-  position: absolute;
-  bottom: 60px;
-  left: 505px;
-  color: #858077;
-  font-size: 10px;
-  letter-spacing: 0.9px;
-}
-.archive-hint > span {
-  margin: 0 12px;
-}
-.archive-hint kbd {
-  font: inherit;
 }
 .hover-label {
   position: absolute;
@@ -1483,7 +1475,15 @@ body.rhine-night .edit-status[data-kind="warn"] {
 }
 .settings-modal {
   width: 930px;
-  height: 786px;
+  /* ★ 2026-10-03：原来固定 height: 786px —— 设置项比它多的时候内容会直接
+     **溢出到面框外面**（实测内容高出可用区一大截），底部那几行就跑到了面板之外，
+     盖在播放条 / 列表上。改成"按内容自适应、最高 940px、内部滚动"：
+     内容少时保持原样，内容多时在面板内部滚，绝不会跑到框外。
+     940 = 1080 − 上下各 70。 */
+  height: auto;
+  max-height: 940px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .settings-modal h2 {
   font-size: 33px;
@@ -1492,7 +1492,7 @@ body.rhine-night .edit-status[data-kind="warn"] {
   font-size: 10px;
   letter-spacing: 1px;
   color: #87806f;
-  margin: 0 0 34px;
+  margin: 0 0 38px;
 }
 .settings-intro > span {
   margin: 0 18px;
@@ -1512,13 +1512,13 @@ body.rhine-night .edit-status[data-kind="warn"] {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 27px 0;
+  padding: 30px 0;
   border-bottom: 1px solid #d0c6b5;
   cursor: pointer;
   position: relative;
 }
 .settings-list strong {
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: 0.8px;
   font-weight: 400;
   display: block;
@@ -1527,7 +1527,7 @@ body.rhine-night .edit-status[data-kind="warn"] {
   display: block;
   font-size: 12px;
   color: #938977;
-  margin-top: 9px;
+  margin-top: 10px;
 }
 .settings-list input {
   position: absolute;
@@ -1585,7 +1585,7 @@ body.rhine-night .edit-status[data-kind="warn"] {
   outline-offset: 2px;
 }
 .settings-shortcuts {
-  margin-top: 26px;
+  margin-top: 30px;
 }
 .settings-shortcuts > span {
   font-size: 9px;
@@ -1595,7 +1595,7 @@ body.rhine-night .edit-status[data-kind="warn"] {
 .settings-shortcuts p {
   font-size: 11px;
   color: #776f60;
-  margin-top: 19px;
+  margin-top: 22px;
 }
 .settings-shortcuts kbd {
   font-family: inherit;
@@ -1608,7 +1608,7 @@ body.rhine-night .edit-status[data-kind="warn"] {
   margin-left: 0;
 }
 .settings-bottom {
-  margin-top: 30px;
+  margin-top: 34px;
   display: flex;
   justify-content: space-between;
 }
@@ -1769,8 +1769,7 @@ body.rhine-night .edit-status[data-kind="warn"] {
   opacity: 1;
 }
 [data-mode="boot"] .archive-counter,
-[data-mode="boot"] .archive-navigation,
-[data-mode="boot"] .archive-hint {
+[data-mode="boot"] .archive-navigation {
   opacity: 0;
 }
 [data-boot="array"] .file-title {
@@ -1823,7 +1822,9 @@ body.rhine-night .edit-status[data-kind="warn"] {
   opacity: 1;
 }
 [data-mode="detail"] .powered {
-  bottom: 108px;
+  /* 与 .powered 的基准值保持一致（见那边的注释）：这一行在两种模式下都停在 y 994–1018，
+     切换模式时不会跳。 */
+  bottom: 62px;
 }
 [data-mode="detail"] .archive-ui {
   opacity: 0;
@@ -1984,20 +1985,6 @@ body.rhine-night .edit-status[data-kind="warn"] {
   fill: none;
   stroke: #24221f;
   stroke-width: 2;
-}
-#inspection-text {
-  position: absolute;
-  left: 1202px;
-  top: 499px;
-  font-size: 23px;
-  font-weight: 600;
-  opacity: 0;
-  pointer-events: none;
-}
-#inspection-text strong {
-  display: block;
-  font-size: 30px;
-  margin-top: 16px;
 }
 .scene-atmosphere {
   background:
@@ -2388,6 +2375,24 @@ body.rhine-night .edit-status[data-kind="warn"] {
   --p-fill: #e4d5c1;
   color: var(--p-ink);
 }
+/* ---- 封面强调色（"跟随封面"，见 player.ts 的 refreshCoverAccent）----
+   基础色由脚本写成 body 上的内联变量；这里只补"派生色"的默认值。
+   为什么派生色也要有默认值：--p-accent-lite / -deep 只在脚本成功采到色时才会被写上，
+   没有封面（或封面是灰度图）时要能回落到与 --p-accent 一致，不能变透明或继承到脏值。 */
+#player-bar,
+#player-playlist {
+  --p-accent-lite: var(--p-accent);
+  --p-accent-deep: var(--p-accent);
+}
+body.cover-accent #player-bar,
+body.cover-accent #player-playlist {
+  transition: color 0.35s ease, border-color 0.35s ease, box-shadow 0.35s ease;
+}
+body.cover-accent #player-bar .p-row.active,
+body.cover-accent #player-playlist .p-row.active {
+  /* 选中行左侧那根竖条跟着封面换色 —— 这是列表里最显眼的一处强调色 */
+  box-shadow: inset 2px 0 0 var(--p-accent);
+}
 body.rhine-night #player-bar,
 body.rhine-night #player-playlist {
   --p-panel: rgba(37, 40, 32, 0.95);
@@ -2411,18 +2416,22 @@ body.rhine-night #player-playlist {
   /* 点播放条（按钮 / 进度条 / 音量条之外的区域）= 回到档案阵列，
      见 player.ts 里 bar 的 click 处理，所以整条给 pointer 光标。 */
   cursor: pointer;
-  /* ★ 底边距必须让开底部那两行：`.system-footer` 在 bottom:35px、`.powered` 在 bottom:30px。
-     之前为了让"底部不那么空"压到 40px，播放条（高 134）把 SESSION AUTHORIZED / 时钟 /
+  /* ★ 底边距必须让开底部那两行：`.system-footer` 在 bottom:35px、`.powered` 在 bottom:100px。
+     之前为了让"底部不那么空"压到 40px，播放条把 SESSION AUTHORIZED / 时钟 /
      REINITIALIZE 那一整行盖住了 —— 用户反馈的"全屏后下方存在遮挡"。
-     80 是 2.1.1 按版面核过、与页脚互不重叠的位置，这里回到 80。 */
+     80 是 2.1.1 按版面核过、与页脚互不重叠的位置，这里回到 80。
+     ★ 2026-10-03 舒展：高度 134 → 148（内容不变，只是每一行之间更透气），
+     于是顶边从 866 抬到 852 —— 播放列表的 bottom 也随之从 222 改到 238，
+     两者之间始终保持 10px 的缝。 */
   bottom: 80px;
-  width: 880px;
-  height: 134px;
+  /* 与播放列表同宽（900）：右边界 959，右侧没有别的东西会撞上来 */
+  width: 900px;
+  height: 148px;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 9px;
-  padding: 11px 22px;
+  gap: 11px;
+  padding: 13px 24px;
   background: var(--p-panel);
   border-top: 1px solid var(--p-hair);
   z-index: 7;
@@ -2441,7 +2450,7 @@ body.rhine-night #player-playlist {
   flex: none;
 }
 .p-label {
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 1.6px;
   color: var(--p-muted);
   text-transform: uppercase;
@@ -2449,13 +2458,13 @@ body.rhine-night #player-playlist {
 }
 .p-label i {
   font-style: normal;
-  margin: 0 4px;
+  margin: 0 5px;
   color: var(--p-faint);
 }
 .p-controls {
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: 13px;
   flex: none;
 }
 /* ★ 播放条控件：**不要小方块**。
@@ -2465,8 +2474,8 @@ body.rhine-night #player-playlist {
    现在：默认无边框无底色，悬停只变颜色（和 `.system-nav button:hover` 同一个强调色）；
    主播放键靠**更大的图形 + 强调色**突出，不做方块。 */
 #player-bar button {
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   border: 0;
   background: transparent;
   color: var(--p-ink);
@@ -2474,7 +2483,7 @@ body.rhine-night #player-playlist {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1;
   transition:
     color 0.18s,
@@ -2499,8 +2508,8 @@ body.rhine-night #player-playlist {
   stroke-linejoin: round;
 }
 #player-bar #p-play {
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
   background: transparent;
   border: 0;
   color: var(--p-strong);
@@ -2516,16 +2525,16 @@ body.rhine-night #player-playlist {
 }
 .p-sep {
   width: 1px;
-  height: 20px;
+  height: 22px;
   background: var(--p-hair-soft);
   display: inline-block;
-  margin: 0 5px;
+  margin: 0 7px;
 }
 .p-mid {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 22px;
+  gap: 24px;
   flex: none;
 }
 .p-now {
@@ -2534,7 +2543,7 @@ body.rhine-night #player-playlist {
 }
 #p-now-title {
   display: block;
-  font-size: 17px;
+  font-size: 18px;
   line-height: 1.25;
   font-weight: 600;
   letter-spacing: -0.2px;
@@ -2544,8 +2553,8 @@ body.rhine-night #player-playlist {
 }
 #p-now-artist {
   display: block;
-  margin-top: 4px;
-  font-size: 11px;
+  margin-top: 5px;
+  font-size: 12px;
   line-height: 1.35;
   letter-spacing: 0.6px;
   color: var(--p-body);
@@ -2571,8 +2580,8 @@ body.rhine-night #player-playlist {
 .p-spectrum {
   display: flex;
   align-items: flex-end;
-  gap: 2px;
-  height: 24px;
+  gap: 3px;
+  height: 26px;
   flex: none;
 }
 .p-spectrum i {
@@ -2585,50 +2594,47 @@ body.rhine-night #player-playlist {
 .p-bot {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 18px;
   flex: none;
 }
 .p-time {
-  font-size: 11px;
+  font-size: 12px;
   letter-spacing: 0.6px;
   color: var(--p-body);
   font-variant-numeric: tabular-nums;
-  min-width: 46px;
+  min-width: 52px;
 }
 .p-time:last-child {
   text-align: right;
 }
 #p-seek {
   flex: 1;
-  height: 16px;
+  height: 18px;
   min-width: 0;
   background: transparent;
   accent-color: #565c46;
   cursor: pointer;
 }
-.p-vol-glyph {
-  font-size: 9px;
-  letter-spacing: 1.2px;
-  color: var(--p-muted);
-  flex: none;
-}
 #p-vol {
-  width: 110px;
-  height: 16px;
+  width: 120px;
+  height: 18px;
   flex: none;
   background: transparent;
   accent-color: #565c46;
   cursor: pointer;
 }
 
-/* 播放列表：与终端弹窗同一套面板语言（底边距跟着播放条：80 + 134 + 24 = 238） */
+/* 播放列表：与终端弹窗同一套面板语言（底边距跟着播放条：80 + 148(条高) + 10 = 238）。
+   ★ 2026-10-03 舒展：播放条加高到 148 之后，列表底边必须跟着上移 16px 才能保住
+   与播放条之间那条 10px 的缝（原来 222 = 80 + 134 + 8）。 */
 #player-playlist {
   position: absolute;
   left: 59px;
-  /* 用户："歌曲栏再往下调一点" —— 从 238 下移到 222（离播放条顶边 214 留 8px，
-     原来留 24px 显得悬在半空）。 */
-  bottom: 222px;
-  width: 880px;
+  bottom: 238px;
+  /* 880 → 900：右边界到 959，离右侧的档案信息面板（左边界 970）留 11px ——
+     实测 940 时两者会重叠 29px（列表右边界 999 > 970），所以宽度上限就是 910。 */
+  width: 900px;
+  /* 顶上到 1080 − 238 − 560 = 282，离标题区（.brand 底边 ≈ 264）留 18px */
   max-height: 560px;
   overflow-y: auto;
   overflow-x: hidden;
@@ -2647,38 +2653,38 @@ body.rhine-night #player-playlist {
   top: 0;
   display: flex;
   align-items: center;
-  gap: 18px;
-  padding: 14px 18px 13px;
+  gap: 22px;
+  padding: 17px 22px 16px;
   background: var(--p-panel);
   border-bottom: 1px solid var(--p-hair-soft);
 }
 .p-head b {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 400;
   letter-spacing: 1.2px;
   text-transform: uppercase;
 }
 .p-head span {
   margin-left: auto;
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 1.2px;
   color: var(--p-faint);
   font-variant-numeric: tabular-nums;
 }
 .p-head .p-theme {
-  width: 26px;
-  height: 26px;
-  font-size: 11px;
+  width: 30px;
+  height: 30px;
+  font-size: 12px;
   flex: none;
 }
 /* 排列顺序：和表头同一套线条语言（细边、无圆角、等宽数字） */
 .p-head .p-sort {
   flex: none;
-  height: 22px;
+  height: 26px;
   margin-left: auto;
-  padding: 0 4px;
+  padding: 0 8px;
   font-family: inherit;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.8px;
   color: inherit;
   background: transparent;
@@ -2717,16 +2723,16 @@ body.rhine-night .p-head .p-sort option {
 .p-search-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 9px 18px 10px;
+  gap: 10px;
+  padding: 12px 22px 13px;
 }
 .p-search-row input {
   flex: 1;
   min-width: 0;
-  height: 28px;
-  padding: 0 10px;
+  height: 34px;
+  padding: 0 12px;
   font-family: inherit;
-  font-size: 11px;
+  font-size: 12px;
   letter-spacing: 0.6px;
   color: inherit;
   background: var(--p-fill);
@@ -2747,9 +2753,9 @@ body.rhine-night .p-head .p-sort option {
   display: none;
 }
 .p-search-row #p-search-clear {
-  width: 28px;
-  height: 28px;
-  font-size: 10px;
+  width: 34px;
+  height: 34px;
+  font-size: 12px;
   flex: none;
 }
 body.rhine-night .p-search-row input {
@@ -2758,8 +2764,8 @@ body.rhine-night .p-search-row input {
 .p-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 9px 18px;
+  gap: 16px;
+  padding: 12px 22px;
   border-bottom: 1px solid var(--p-hair-soft);
   cursor: pointer;
 }
@@ -2771,9 +2777,9 @@ body.rhine-night .p-search-row input {
   box-shadow: inset 2px 0 0 var(--p-strong);
 }
 .p-idx {
-  width: 26px;
+  width: 32px;
   flex: none;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.8px;
   color: var(--p-faint);
   font-variant-numeric: tabular-nums;
@@ -2783,17 +2789,17 @@ body.rhine-night .p-search-row input {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
 }
 .p-meta b {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .p-meta small {
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.6px;
   color: var(--p-body);
   white-space: nowrap;
@@ -2802,11 +2808,11 @@ body.rhine-night .p-search-row input {
 }
 .p-row .p-fav,
 .p-row .p-del {
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   border: 0;
   background: none;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--p-faint);
   flex: none;
 }
@@ -2819,27 +2825,33 @@ body.rhine-night .p-search-row input {
   color: var(--p-accent);
 }
 .p-empty {
-  padding: 26px 18px;
-  font-size: 11px;
+  padding: 32px 22px;
+  font-size: 12px;
   letter-spacing: 0.9px;
   color: var(--p-muted);
 }
 
 /* 详情区：曲目信息 + 大尺寸实时频谱（页签已去掉，整块竖向空间都留给可视化） */
-/* 详情区：可视化优先 —— 画布做成 636×477（正好 4:3），
-   面板整体上移到 top 190、其余信息压到最小，让出来的高度全给频谱。
-   底部必须留出右下角 POWERED BY（y 901–925、x 1571–1846）的位置。 */
+/* 详情区：可视化优先 —— 画布做成 636×477（正好 4:3），面板整体上移，其余信息压到最小，
+   让出来的高度全给频谱。
+   ★ 2026-10-03 改成**底边锚定**：内容高度会随曲名折行、歌词、按钮行变化，
+     原来用 top 锚定时内容一长就往下压，实测曾与右下角的 POWERED BY 重叠
+     204×24 px²（详情按钮行 y 914–960 × POWERED y 948–972）。
+     bottom: 112 → 底边锁在 y 968，内容再长也只**向上**生长；
+     与 POWERED 的顶边（y 994）留 26px，不会再压住它。
+     顶到多高是安全的：系统导航那一行在 y 124–152，而详情模式下它是淡出的。 */
 .detail-content {
-  top: 190px;
+  top: auto;
+  bottom: 112px;
 }
 #detail-content.song-mode .song-head {
   display: flex;
-  gap: 22px;
-  margin-top: 10px;
+  gap: 26px;
+  margin-top: 12px;
 }
 #detail-content.song-mode .song-cover {
-  width: 64px;
-  height: 64px;
+  width: 70px;
+  height: 70px;
   flex: none;
   background: #ddd9d1;
   border: 1px solid #c1b8a7;
@@ -2860,54 +2872,179 @@ body.rhine-night .p-search-row input {
   font-size: 34px;
   line-height: 1.14;
   letter-spacing: -1px;
-  margin: 0 0 8px;
+  margin: 0 0 9px;
   max-width: 100%;
   overflow-wrap: anywhere;
 }
 #detail-content.song-mode .detail-title-cn {
-  font-size: 17px;
-  gap: 16px;
+  font-size: 18px;
+  gap: 18px;
 }
 #detail-content.song-mode .detail-title-cn span {
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 1.1px;
   color: #807b70;
 }
 #detail-content.song-mode .detail-rule {
-  margin-top: 16px;
+  margin-top: 18px;
 }
 /* 元数据改成一行内联（原来 2×2 网格占 104px，现在 24px） */
 #detail-content.song-mode .metadata {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 30px;
+  gap: 6px 34px;
   margin: 0;
 }
 #detail-content.song-mode .metadata > div {
   display: flex;
   align-items: baseline;
-  gap: 7px;
+  gap: 8px;
 }
 #detail-content.song-mode .metadata dt {
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.7px;
 }
 #detail-content.song-mode .metadata dd {
   margin: 0;
-  font-size: 12px;
+  font-size: 13px;
 }
 #detail-content.song-mode .song-viz {
-  margin-top: 12px;
+  margin-top: 14px;
 }
-#detail-content.song-mode .song-viz canvas {
+/* 频谱画布与歌词列表共用同一块舞台：同一时刻只显一个，尺寸完全一致 ——
+   切换时高度不跳、下方轴线与字幕也不位移。 */
+#detail-content.song-mode .song-viz-body {
+  position: relative;
+  width: 636px;
+  height: 477px;
+  margin-top: 12px;
+  overflow: hidden;
+}
+#detail-content.song-mode .song-viz-body canvas {
   display: block;
   width: 636px;
   height: 477px;
-  margin-top: 10px;
   border-bottom: 1px solid #bdb8ad;
 }
+
+/* ---------- 右侧显示切换（可视化 ⟷ 歌词） ---------- */
+.view-switch-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 14px;
+}
+.view-toggle {
+  display: inline-flex;
+  border: 1px solid #c6c1b6;
+  border-radius: 999px;
+  overflow: hidden;
+  background: #ece8e1;
+}
+.view-toggle button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 5px 15px;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.9px;
+  color: #77756b;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+.view-toggle button.on {
+  background: #252820;
+  color: #f2f0ea;
+}
+.view-toggle button:not(.on):hover {
+  color: #252820;
+  background: #e0dcd3;
+}
+/* 歌词模式下频谱头部那个开关藏起来（顶部工具栏已经有一个） */
+.song-viz.lyric-mode .song-viz-head .view-toggle {
+  display: none;
+}
+
+/* ---------- 歌词滚动列表 ---------- */
+.lyric-scroll {
+  position: absolute;
+  inset: 0;
+  display: none;
+  overflow: hidden;
+  padding: 0 26px;
+  /* 上下留出可见区，配合遮罩做出"从深处升起"的层次 */
+  mask-image: linear-gradient(transparent 0, #000 22%, #000 78%, transparent 100%);
+  -webkit-mask-image: linear-gradient(transparent 0, #000 22%, #000 78%, transparent 100%);
+}
+.song-viz.lyric-mode .lyric-scroll {
+  display: block;
+}
+/* ★ 这三条必须带 #detail-content 前缀。
+   §2911 那条「画布 636×477」写的是 `#detail-content.song-mode .song-viz-body canvas`，
+   特异度 (1 id + 2 class + 2 elem)。这里若只写 `.song-viz.lyric-mode canvas`（0 id），
+   就算排在后面也**赢不过带 id 的那条** —— 歌词模式下画布照旧 display:block，
+   和歌词列表叠在同一块舞台上（实测截图里频谱还透在歌词后面）。
+   带上 #detail-content 提到 (1 id + 3 class + 1 elem)，按"同类再比特异度"才压得住。 */
+#detail-content .song-viz.lyric-mode canvas,
+#detail-content .song-viz.lyric-mode .song-viz-axis,
+#detail-content .song-viz.lyric-mode .song-lyric-line {
+  display: none;
+}
+.lyric-list {
+  position: absolute;
+  left: 26px;
+  right: 26px;
+  top: 0;
+  will-change: transform;
+  transition: transform 0.42s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+/* 每行压到 30px 以内，让"当前行上下还有两句"的上下文同时可见 */
+.lyric-row {
+  padding: 6px 0;
+  font-size: 16px;
+  line-height: 23px;
+  letter-spacing: 0.3px;
+  color: #a8a294;
+  cursor: pointer;
+  transition: color 0.25s ease, font-size 0.25s ease, opacity 0.25s ease;
+  opacity: 0.55;
+}
+.lyric-row:hover {
+  opacity: 0.85;
+}
+/* ★ 当前行高光：加粗放大 + 换成前景色 + 左缘一道竖线。
+   三重信号叠加，光靠颜色的话在投影仪/低对比屏上会看不清。
+   放大要够狠才看得出来（16 → 22px，1.375 倍）：高光行和相邻行的字差
+   一大截，扫一眼就知道唱到哪了。行高同步放大，行距不挤。 */
+.lyric-row.on {
+  color: #1d1f19;
+  font-weight: 600;
+  font-size: 22px;
+  line-height: 31px;
+  opacity: 1;
+  padding-left: 14px;
+  border-left: 3px solid #252820;
+  margin-left: -17px;
+}
+.lyric-empty {
+  padding: 200px 0;
+  text-align: center;
+  font-size: 13px;
+  color: #a8a294;
+}
+
+/* 歌词模式：底部那行单行字幕让位给列表，不再重复显示 */
+.song-viz.lyric-mode .song-lyric-line {
+  display: none;
+}
+
 /* 空库：没有数据可画，把高度收回来，并保留「导入音乐」入口 */
-#detail-content.empty-library .song-viz canvas {
+#detail-content.empty-library .song-viz-body {
+  height: 380px;
+}
+#detail-content.empty-library .song-viz-body canvas {
   height: 380px;
 }
 #detail-content.empty-library .metadata,
@@ -2918,27 +3055,22 @@ body.rhine-night .p-search-row input {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 16px;
-}
-.song-viz-note {
-  font-size: 9px;
-  letter-spacing: 0.9px;
-  color: #9a9487;
+  gap: 18px;
 }
 .song-viz-axis {
   display: flex;
   justify-content: space-between;
-  margin-top: 7px;
-  font-size: 9px;
+  margin-top: 9px;
+  font-size: 10px;
   letter-spacing: 0.9px;
   color: #807b70;
 }
 /* 当前歌词：单行字幕，跟着进度整行替换 */
 .song-lyric-line {
-  margin-top: 10px;
-  min-height: 22px;
-  font-size: 15px;
-  line-height: 22px;
+  margin-top: 13px;
+  min-height: 24px;
+  font-size: 16px;
+  line-height: 24px;
   letter-spacing: 0.4px;
   color: #9a9487;
   white-space: nowrap;
@@ -2995,9 +3127,7 @@ body.theme-dark .tiny-label,
 body.theme-dark .detail-kicker,
 body.theme-dark .panel-label,
 body.theme-dark .metadata dt,
-body.theme-dark .song-viz-note,
 body.theme-dark .song-viz-axis,
-body.theme-dark .archive-hint,
 body.theme-dark .system-footer,
 body.theme-dark .powered,
 body.theme-dark .hover-label,
@@ -3017,6 +3147,33 @@ body.theme-dark .settings-list,
 body.theme-dark .search-field input,
 body.theme-dark .song-lyric-line {
   color: #bcbfb1;
+}
+/* 歌词列表在深色主题下：未唱到的是暗灰，当前行才提到最亮。
+   深色下"加粗 + 放大"的对比不如浅色明显，所以额外给当前行加了左侧竖线。 */
+body.theme-dark .lyric-row {
+  color: #7c8074;
+}
+body.theme-dark .lyric-row.on {
+  color: #f2f0ea;
+  border-left-color: #f2f0ea;
+}
+body.theme-dark .lyric-empty {
+  color: #7c8074;
+}
+body.theme-dark .view-toggle {
+  background: #2a2d26;
+  border-color: #4a4e42;
+}
+body.theme-dark .view-toggle button {
+  color: #9a9487;
+}
+body.theme-dark .view-toggle button.on {
+  background: #eceadf;
+  color: #1d1f19;
+}
+body.theme-dark .view-toggle button:not(.on):hover {
+  color: #f0eee5;
+  background: #3a3e34;
 }
 body.theme-dark .detail-rule,
 body.theme-dark .callout-rule {
@@ -3097,4 +3254,105 @@ body.theme-dark .song-cover {
 }
 #detail-content.song-mode .detail-footnote {
   margin-top: 16px;
+}
+
+/* ============================================================
+   玻璃质感（2026-10-04，用户："给 UI 加上玻璃质感"）
+   —— 只加在**详情区 + 弹层**（用户选定的范围），不加播放条 / 播放列表。
+   原因：播放条与列表背后是持续动画的三维场景，每帧重新模糊一块 900×148 的区域
+   并不便宜（项目早先就为此刻意避开了 backdrop-filter）；而详情区与弹层背后
+   基本是静态内容，模糊开销小，视觉收益最明显。
+
+   做法（"克制"档，用户选定）：
+     · backdrop-filter: blur(12px) saturate(1.12) —— 轻磨砂，不是强雾化
+     · 底色从"几乎不透明的纸面"降到 0.72 左右 —— 透出背后的三维景深
+     · 顶部一道 1px 亮边（高光）+ 深色内阴影 —— 玻璃的"厚度"感
+     · 一圈 1px 冷描边 —— 玻璃切边，同时保证在深浅底上都有轮廓
+   深浅两套色各给一份，跟随 body.theme-dark / body.rhine-night。
+   ⚠️ backdrop-filter 是"从背后取样"：元素必须有**半透明**底色才看得出效果，
+      底色写不透明（1.0）就等于没加。下面每处的底色都刻意留了透明度。
+   ============================================================ */
+
+/* ---- 详情面板：右侧那块内容（曲目信息 + 频谱/歌词） ---- */
+#detail-content.song-mode,
+#detail-content.edit-mode {
+  /* 面板只是一层"玻璃片"：内边距给出来，内容不再贴着边缘 */
+  padding: 26px 26px 24px;
+  border-radius: 14px;
+  background: rgba(243, 241, 235, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  /* 顶部亮边（高光）+ 底部深边（厚度）＋ 一层外投影（浮起来） */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
+    inset 0 -1px 0 rgba(120, 112, 96, 0.16),
+    0 18px 48px rgba(90, 78, 58, 0.14);
+  backdrop-filter: blur(12px) saturate(1.12);
+  -webkit-backdrop-filter: blur(12px) saturate(1.12);
+}
+/* 深色主题（terminal / 夜间）：换成深玻璃 */
+body.theme-dark #detail-content.song-mode,
+body.rhine-night #detail-content.song-mode,
+body.theme-dark #detail-content.edit-mode,
+body.rhine-night #detail-content.edit-mode {
+  background: rgba(30, 34, 28, 0.62);
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.3),
+    0 18px 48px rgba(0, 0, 0, 0.4);
+}
+
+/* ---- 弹层：设置 / 检索 / 收藏 那张大面板 ---- */
+.terminal-modal {
+  background: rgba(240, 238, 231, 0.74);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  border-radius: 14px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.8),
+    inset 0 -1px 0 rgba(120, 112, 96, 0.14),
+    0 26px 95px rgba(99, 81, 58, 0.22);
+  backdrop-filter: blur(16px) saturate(1.14);
+  -webkit-backdrop-filter: blur(16px) saturate(1.14);
+}
+body.theme-dark .terminal-modal,
+body.rhine-night .terminal-modal {
+  background: rgba(26, 30, 24, 0.7);
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.32),
+    0 26px 95px rgba(0, 0, 0, 0.5);
+}
+/* 弹层背后的遮罩本身也再压一点、加层模糊 —— 让玻璃与其后的三维场景分层更清楚 */
+.modal-backdrop {
+  background: rgba(227, 224, 215, 0.38);
+}
+body.theme-dark .modal-backdrop,
+body.rhine-night .modal-backdrop {
+  background: rgba(8, 10, 8, 0.42);
+}
+
+/* ---- 弹层内部那些"卡片式"分组（设置项区块、检索分组） ---- */
+.terminal-modal .settings-list > label,
+.terminal-modal .settings-list > .settings-block {
+  border-radius: 9px;
+}
+
+/* ---- 无障碍：系统开了"减少透明"就把毛玻璃与半透底一起收掉 ---- */
+@media (prefers-reduced-transparency: reduce) {
+  #detail-content.song-mode,
+  #detail-content.edit-mode,
+  .terminal-modal {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: rgba(237, 235, 228, 0.98);
+  }
+  body.theme-dark #detail-content.song-mode,
+  body.rhine-night #detail-content.song-mode,
+  body.theme-dark #detail-content.edit-mode,
+  body.rhine-night #detail-content.edit-mode,
+  body.theme-dark .terminal-modal,
+  body.rhine-night .terminal-modal {
+    background: rgba(30, 34, 28, 0.98);
+  }
 }
