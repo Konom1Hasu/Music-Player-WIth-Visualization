@@ -728,6 +728,9 @@ async function loadBiliAudio(s: Song, autoplay: boolean) {
   armPendingSeek(s);
   diagLoad(s);
   if (autoplay) audio.pause(); // 先把上一首停住，免得异步备源期间它还在响
+  /* 首次走这条路时，把曲库里历史遗留的 8.3 短名路径修成长名。
+     一次性、很轻（每首两次 stat），但能彻底断掉"文件不存在：C:\Users\KONOMI~1\..."。 */
+  await healsSongPathsOnce();
   await ensurePlayableSource(s, false);
   if (token !== loadSeq || currentId !== s.id) return;
   const blob = await blobUrlOf(s);

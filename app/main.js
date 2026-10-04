@@ -33,8 +33,67 @@ const APP_VERSION = (function () {
 })();
 
 const SESSION_ID = crypto.randomBytes(6).toString('hex');
-const SESSION_TMP = path.join(os.tmpdir(), 'mp-session-' + SESSION_ID);
+/* ★★ 临时目录必须用"长路径"（真实事故的修复）★★
+   Windows 的 TEMP 环境变量经常是 **8.3 短名**：本机实测
+     os.tmpdir() → C:\Users\KONOMI~1\AppData\Local\Temp
+   （用户名 KonomiHasu 超过 8 字符，系统给它生成了短名 KONOMI~1）。
+   这个短名一旦进入路径，会连锁毁掉两件事：
+
+     ① `file://` URL 变成 file:///C:/Users/KONOMI%7E1/... —— Chromium 的
+        file-URL 解析器**不认识 8.3 短名**，会直接判成非法地址
+        （实测报 `bad option: --user-data-dir=...KONOMI~1...` 这一类错误）；
+     ② 更隐蔽的是它会**存进曲库**：B 站缓存导入时 s.srcUrl 就是带短名的 file://，
+        于是每次启动重建会话副本后地址都对不上，表现为"导入的歌点了放不出来"
+        （用户反馈的"老是显示无法播放的歌曲"）。
+
+   修法：用 fs.realpathSync.native() 把 TEMP 还原成长名再拼路径
+   （Windows 上它就是 GetLongPathName，实测把 KONOMI~1 还原成 KonomiHasu）。
+   拿不到就退回原值 —— 拼不出长名也不该让程序起不来。 */
+function longPath(p) {
+  try { return fs.realpathSync.native(p); } catch (e) { return p; }
+}
+const SESSION_TMP = path.join(longPath(os.tmpdir()), 'mp-session-' + SESSION_ID);
 const SESSION_AUDIO_DIR = path.join(SESSION_TMP, 'audio');
+
+/* ★ 启动自证日志：把"本次进程真正加载的代码指纹 + 算出来的会话路径"落一份记录。
+   起因是一次极难排查的误判 —— 用户报"改了还是同样的错"，而根源是**那个进程
+   从昨天就没关过**，`SESSION_TMP` 是 const、启动时算一次，之后改多少代码都影响不到它。
+   光看报错路径无法区分"代码没改对"和"进程没重启"，于是把这件事写成可查证据：
+     · build  = 本次加载的 main.js 的 md5 前 12 位（改没改一眼看出）
+     · tmpRaw = os.tmpdir() 的原始值（短名长名）
+     · tmpLong= longPath 还原后的值
+     · session= 最终会话路径（含 ~ 就是还原失败）
+   写到 userData/startup.log，**只保留最近 20 次**，避免无限增长。 */
+function writeStartupSelfReport() {
+  try {
+    const crypto = require('crypto');
+    const selfPath = __filename;
+    let build = 'unknown';
+    try {
+      build = crypto.createHash('md5').update(fs.readFileSync(selfPath)).digest('hex').slice(0, 12);
+    } catch (e) { /* 读不到就算了，不影响启动 */ }
+    const tmpRaw = os.tmpdir();
+    const line = JSON.stringify({
+      t: new Date().toISOString(),
+      v: APP_VERSION,
+      build: build,
+      sid: SESSION_ID,
+      pid: process.pid,
+      exec: process.execPath,
+      tmpRaw: tmpRaw,
+      tmpLong: longPath(tmpRaw),
+      session: SESSION_TMP,
+      sessionIsShort: SESSION_TMP.indexOf('~') >= 0
+    });
+    const logPath = path.join(app.getPath('userData'), 'startup.log');
+    let prev = [];
+    try { prev = fs.readFileSync(logPath, 'utf8').split('\n').filter(Boolean); } catch (e) { /* 首次 */ }
+    prev.push(line);
+    if (prev.length > 20) prev = prev.slice(prev.length - 20);
+    fs.writeFileSync(logPath, prev.join('\n') + '\n');
+  } catch (e) { /* 自证日志失败绝不能影响启动 */ }
+}
+
 /* 本地保留副本目录：导入 B 站缓存时把"可播放副本"留一份在这里，播放就不再依赖源缓存。
    用户反馈"B站缓存在把文件删除/移动进文件夹后就不能播了，没有做到本地音频的解耦" ——
    根因是副本只写在会话临时目录里（退出即销毁），源一没就再也重建不出来。
@@ -109,10 +168,13 @@ function wipeDir(dir) {
   }
   try { fs.rmdirSync(dir); } catch (e) { /* ignore */ }
 }
-/* 启动时清掉上一次异常退出（崩溃/强杀）留下的会话目录 */
+/* 启动时清掉上一次异常退出（崩溃/强杀）留下的会话目录。
+   ★ base 必须与上面 SESSION_TMP 用的是**同一个** longPath 结果 ——
+   否则扫描的是一个短名目录（KONOMI~1\...）、而目录实际建在长名目录下，
+   残留的旧会话目录就永远扫不到、也永远清不掉。 */
 function sweepStaleSessions() {
   try {
-    const base = os.tmpdir();
+    const base = longPath(os.tmpdir());
     for (const name of fs.readdirSync(base)) {
       if (name.indexOf('mp-session-') !== 0) continue;
       const p = path.join(base, name);
@@ -490,6 +552,8 @@ if (!gotLock) {
   });
 
   app.whenReady().then(() => {
+    /* 启动自证：记录本次加载的代码指纹与会话路径（排查"进程没重启"这类误判） */
+    writeStartupSelfReport();
     // 数据管控：清掉上次崩溃/强杀残留的会话临时目录（派生数据不留宿）
     sweepStaleSessions();
     // 数据管控：擦除 1.0.x 遗留在 userData 里的长期副本（升级清理）
@@ -1065,11 +1129,38 @@ const bili = require('./bili');
 
 function biliOpts() {
   ensureSessionTmp();
-  return { userDataDir: app.getPath('userData'), audioDir: SESSION_AUDIO_DIR };
+  /* ★ keepDir = 曲库目录：扫描出来的副本直接就固化在这儿，不经过会话临时目录。
+     一次解析、一次落盘（以前是 scan 写会话目录、bili-keep 再复制一遍，白写一份盘），
+     而且从源头保证曲库里的音源地址是长效的。详见 bili.js 的 scan() 注释。 */
+  ensureLibraryAudio();
+  return {
+    userDataDir: app.getPath('userData'),
+    audioDir: SESSION_AUDIO_DIR,
+    keepDir: LIBRARY_AUDIO_DIR
+  };
+}
+
+/* ★★ 扫描目录必须先还原成长路径（真实事故的第二处）★★
+   第 ① 处修复（longPath 包住 os.tmpdir）只解决了"副本落在哪里"，
+   但**源路径本身**同样会带短名 —— 系统文件夹选择框返回的路径在 Windows 上
+   可能是 8.3 短名（实测同样是 C:\Users\KONOMI~1\...）。这个短名一旦成为
+   bili.scan 的根，会顺着 path.join 传染给每一条 audioPath：
+     · 拼出的 file:// URL 带 %7E1 → Chromium 判非法 → MediaError 4；
+     · ensureM4a 用 md5(源路径) 当副本文件名，长短名算出**两个名字**,
+       于是同一个源每次都当成新文件重做，缓存形同虚设。
+   所以扫之前先把它拧成长名。还原失败就退回原值（行为不比改动前差）。 */
+function longDir(d) {
+  try {
+    if (!d || typeof d !== 'string') return d;
+    const fixed = longPath(d);
+    return fixed || d;
+  } catch (e) {
+    return d;
+  }
 }
 
 ipcMain.handle('bili-scan', async (_e, presetDir) => {
-  let dir = presetDir;
+  let dir = longDir(presetDir);
   if (!dir) {
     const r = await dialog.showOpenDialog(mainWin, {
       title: '选择 B 站缓存文件夹（含 entry.json / audio.m4s）',
@@ -1077,7 +1168,7 @@ ipcMain.handle('bili-scan', async (_e, presetDir) => {
       properties: ['openDirectory']
     });
     if (r.canceled || !r.filePaths || !r.filePaths.length) return { canceled: true };
-    dir = r.filePaths[0];
+    dir = longDir(r.filePaths[0]);
   }
   try {
     const items = await bili.scan(dir, biliOpts());
@@ -1088,7 +1179,8 @@ ipcMain.handle('bili-scan', async (_e, presetDir) => {
     return { error: String((e && e.message) || e) };
   }
 });
-ipcMain.handle('bili-scan-dir', async (_e, dir) => {
+ipcMain.handle('bili-scan-dir', async (_e, rawDir) => {
+  const dir = longDir(rawDir);
   try {
     const items = await bili.scan(dir, biliOpts());
     audit('bili-scan', { src: dir, result: 'ok', bytes: items.length });
@@ -1107,12 +1199,17 @@ ipcMain.handle('bili-scan-dir', async (_e, dir) => {
 ipcMain.handle('prepare-bili-audio', (_e, originalPath, force) => {
   try {
     if (!originalPath || typeof originalPath !== 'string') return { error: '缺少原始路径' };
-    if (!fs.existsSync(originalPath)) return { error: '原始文件不存在：' + originalPath };
+    /* 曲库里的老记录可能存着 8.3 短名（扫描目录修复之前导入的），先拧成长名再判存在。
+       顺带好处：副本文件名 = md5(长名)，与扫描阶段算出的那个一致，不会重复生成。 */
+    const srcPath = longPath(originalPath);
+    /* 报错里给**还原后的**路径 —— 那才是实际去查找的位置，用户照着核对时用得上。
+       （以前给 originalPath，遇到 8.3 短名时会显示一串 KONOMI~1，反而看糊涂。） */
+    if (!fs.existsSync(srcPath)) return { error: '原始文件不存在（可能已在 B 站缓存里被删除）：' + srcPath };
     ensureSessionTmp();
-    const out = bili.ensureM4a(originalPath, SESSION_AUDIO_DIR, !!force);
+    const out = bili.ensureM4a(srcPath, SESSION_AUDIO_DIR, !!force);
     if (!out) return { error: '生成可播放副本失败' };
     const size = fs.statSync(out).size;
-    audit('bili-extract', { src: originalPath, bytes: size, ext: 'm4a', result: 'ok' });
+    audit('bili-extract', { src: srcPath, bytes: size, ext: 'm4a', result: 'ok' });
     return { ok: true, path: out, url: require('url').pathToFileURL(out).href, size: size };
   } catch (e) {
     return { error: String((e && e.message) || e) };
@@ -1125,7 +1222,8 @@ ipcMain.handle('prepare-bili-audio', (_e, originalPath, force) => {
 ipcMain.handle('bili-keep', (_e, originalPath) => {
   try {
     if (!originalPath || typeof originalPath !== 'string') return { error: '缺少原始路径' };
-    if (!fs.existsSync(originalPath)) return { error: '原始文件不存在：' + originalPath };
+    const srcPath = longPath(originalPath);
+    if (!fs.existsSync(srcPath)) return { error: '原始文件不存在（可能已在 B 站缓存里被删除）：' + srcPath };
     ensureLibraryAudio();
     const out = bili.ensureM4a(originalPath, LIBRARY_AUDIO_DIR, false);
     if (!out) return { error: '生成本地副本失败' };
@@ -1257,8 +1355,9 @@ const RECOVER_MODE = process.argv.includes('--recover-library');
 const INGEST_MODE = process.argv.includes('--recover-ingest');
 /* 跨 profile 的交接区：旧 profile 恢复出来的东西先放这里（系统临时目录），
    由当前 profile 再吃进去 —— 与已有的"会话临时目录"同一套做法，绝不写进音乐目录，
-   吃完即删。 */
-const RECOVER_BUNDLE = path.join(os.tmpdir(), 'rhine-recover');
+   吃完即删。路径同样要过长名（见上面 longPath 的说明）：这个目录会被
+   recover.html 以 file:// 直接加载，短名会让 Chromium 认不出地址。 */
+const RECOVER_BUNDLE = path.join(longPath(os.tmpdir()), 'rhine-recover');
 let recoverWriter = null;
 let recoverStats = { origins: [], total: 0, files: 0, bytes: 0, added: 0, skipped: 0, finished: 0, bundle: RECOVER_BUNDLE };
 
@@ -1455,16 +1554,37 @@ async function runIngest() {
   return recoverStats;
 }
 
+/* 把"库里存的路径"还原成规范的长路径。
+   老版本导入 B 站缓存时把 C:\Users\KONOMI~1\... 这种 8.3 短名存进了曲库
+   （见上面 longPath 的说明）。
+
+   ★★ 必须【无条件】先还原，不能只在 existsSync 失败时才还原 ★★
+   这里踩过一个真坑：8.3 短名在 Node 的 fs 里**是能访问的**（existsSync 返回 true），
+   所以"读不到才还原"的写法会让短名原样穿透到 read-audio —— 文件读得出来，
+   但拼出的 file:// URL 带 %7E1，Chromium 判为非法地址，
+   最终报 MediaError 4（格式不支持或文件头异常）。
+   换言之：**能不能被 Node 读到**和**能不能被 Chromium 加载**是两回事，
+   而 8.3 短名恰好在第一关上通过、第二关上失败。
+   所以判据不能是"能不能读"，只能是"是不是规范的长名" —— 一律还原。
+   还原失败（路径本就不存在等）就退回原值，行为与改动前一致。 */
+function resolveReadablePath(p) {
+  if (!p || typeof p !== 'string') return p;
+  const fixed = longPath(p);
+  return fixed || p;
+}
+
 ipcMain.handle('read-audio', (_e, p) => {
   try {
-    if (!p || typeof p !== 'string' || !fs.existsSync(p)) return { error: '文件不存在' };
-    const st = fs.statSync(p);
+    if (!p || typeof p !== 'string') return { error: '文件不存在' };
+    const real = resolveReadablePath(p);
+    if (!fs.existsSync(real)) return { error: '文件不存在：' + p };
+    const st = fs.statSync(real);
     if (st.size > 300 * 1024 * 1024) return { error: '文件过大（>300MB）' };
-    const buf = fs.readFileSync(p);
-    const mime = /\.(m4a|m4s|mp4)$/i.test(p) ? 'audio/mp4'
-      : (/\.flac$/i.test(p) ? 'audio/flac'
-        : (/\.wav$/i.test(p) ? 'audio/wav'
-          : (/\.ogg$|\.opus$/i.test(p) ? 'audio/ogg' : 'audio/mpeg')));
+    const buf = fs.readFileSync(real);
+    const mime = /\.(m4a|m4s|mp4)$/i.test(real) ? 'audio/mp4'
+      : (/\.flac$/i.test(real) ? 'audio/flac'
+        : (/\.wav$/i.test(real) ? 'audio/wav'
+          : (/\.ogg$|\.opus$/i.test(real) ? 'audio/ogg' : 'audio/mpeg')));
     return { bytes: buf, mime: mime, size: st.size };
   } catch (e) {
     return { error: String((e && e.message) || e) };

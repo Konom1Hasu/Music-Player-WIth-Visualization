@@ -62,6 +62,13 @@ const factory = new Function('fs', 'os', 'path', 'crypto', 'Buffer',
   + 'const SESSION_AUDIO_DIR = ' + JSON.stringify(sessDir) + ';\n'
   + 'let sessionTmpReady = true;\n'
   + 'function markHidden(){}\n'
+  /* ★ 必须一并注入 longPath（与 main.js 里同名同行为）。
+     sweepStaleSessions 现在用 longPath(os.tmpdir()) 取扫描根目录，是为了修
+     "Windows 的 TEMP 是 8.3 短名导致 file:// 地址非法"那个真实事故。
+     测试沙箱不注入它的话，sweepStaleSessions 一调用就抛 ReferenceError，
+     安静地走进 catch —— 表现为"陈旧会话没被清掉"，看着像产品回归、其实是测试缺件。
+     这里注入真实实现（realpathSync.native 失败即退回原值），与生产路径一致。 */
+  + 'function longPath(p){ try { return fs.realpathSync.native(p); } catch (e) { return p; } }\n'
   + wipeChunk + '\n'
   + 'return { wipeFile, wipeDir, sweepStaleSessions };');
 const W = factory(fs, os, path, crypto, Buffer);
