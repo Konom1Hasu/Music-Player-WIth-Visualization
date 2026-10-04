@@ -1122,9 +1122,14 @@ ipcMain.on('mini-control', (_e, action) => {
    解析逻辑全在 ./bili.js（不依赖 Electron，可离线用 node 直接测试）。
    这里只负责：弹文件夹选择框 → 调用 bili.scan → 把结果交给渲染进程。
 
-   数据管控：可播放副本（剥掉私有头的 m4a）不再落到 userData 长期驻留，
-   而是写进【本次会话专属】临时目录，退出即销毁；下次启动由渲染端的
-   ensureAllPlayable() 从原始缓存路径重新生成。封面缓存仍在 userData（只是图片）。 */
+   ★ 固化策略（"解析一份到播放器内部，与源缓存解耦"）：
+     · **导入扫描时**，剥好头的可播放副本直接固化进曲库目录
+       <userData>\library\audio（见 biliOpts().keepDir）——
+       B 站缓存在用户自己的 Videos\bilibili 下，随时会被 B 站客户端或用户清掉；
+       固化一份到播放器内部之后，源没了照播、重启也在。
+     · **播放时**的临时副本仍走【本次会话专属】临时目录，退出即销毁
+       （那份只为喂给 <audio>，不需要长期驻留）。
+     · 封面缓存只是图片，仍在 userData。 */
 const bili = require('./bili');
 
 function biliOpts() {
@@ -1216,20 +1221,27 @@ ipcMain.handle('prepare-bili-audio', (_e, originalPath, force) => {
   }
 });
 
-/* 把"可播放副本"留一份到曲库目录（与源缓存解耦）。导入 B 站缓存时逐首调用。
+/* 把"可播放副本"固化一份到曲库目录（与源缓存解耦）。
+   ★ 现在导入扫描时已经直接固化（见 biliOpts 的 keepDir），所以这个接口的
+     主职责变成**补救存量曲目**：早期版本导入的曲目只有 s.path（裸依赖外部缓存），
+     源一删就永远播不了（《scualee》就是这么变成僵尸条目的）。渲染端在
+     "设置 → 固化全部"或播放时才发现副本缺失的情况下逐首调用它补齐。
    幂等：同一个源算出的目标文件名固定，已存在就直接返回，不重复占盘。
-   源缓存被删掉之后调用会失败（原始文件不存在）—— 这时渲染侧会明确提示，而不是静默无声。 */
+   源缓存已被删掉时调用会失败（原始文件不存在）—— 渲染侧据此标"音源缺失"，
+   而不是静默无声。 */
 ipcMain.handle('bili-keep', (_e, originalPath) => {
   try {
     if (!originalPath || typeof originalPath !== 'string') return { error: '缺少原始路径' };
     const srcPath = longPath(originalPath);
     if (!fs.existsSync(srcPath)) return { error: '原始文件不存在（可能已在 B 站缓存里被删除）：' + srcPath };
     ensureLibraryAudio();
-    const out = bili.ensureM4a(originalPath, LIBRARY_AUDIO_DIR, false);
-    if (!out) return { error: '生成本地副本失败' };
+    const out = bili.ensureM4a(srcPath, LIBRARY_AUDIO_DIR, false);
+    /* ensureM4a 内部已做完整性校验（存在 / 大小 / 容器头），返回 null 即"没拿到可用音频"。
+       区分一下原因：源在、但副本做不出来，多半是源损坏或写盘失败。 */
+    if (!out) return { error: '生成本地副本失败（源文件可能已损坏，或磁盘写入失败）' };
     const size = fs.statSync(out).size;
-    audit('bili-keep', { src: originalPath, bytes: size, ext: 'm4a', result: 'ok' });
-    return { ok: true, path: out, url: require('url').pathToFileURL(out).href, size: size };
+    audit('bili-keep', { src: srcPath, bytes: size, ext: 'm4a', result: 'ok' });
+    return { ok: true, path: out, url: require('url').pathToFileURL(out).href, size: size, sane: true };
   } catch (e) {
     return { error: String((e && e.message) || e) };
   }
@@ -1303,6 +1315,13 @@ ipcMain.handle('get-data-policy', () => {
       // 派生数据（解出的音频 / 剥离头的副本）只存在于会话临时目录
       derivedScope: 'session-temp',
       tempCleanup: 'on-quit',
+      /* ★ 唯一的例外，且是刻意为之：**导入**的 B 站缓存音频会在曲库里固化一份
+         可播放副本（<userData>\library\audio）。源缓存在用户自己的 Videos\bilibili
+         下，随时可能被 B 站客户端或用户清掉 —— 不固化就等于把"能不能播"押在
+         一个不属于播放器的目录上（真实事故：《scualee》的源被删，记录成了
+         永远报错的僵尸条目）。
+         这份副本是"用户自己导入的内容"，只存在于本机，不导出、不上传。 */
+      importedAudioKeptIn: 'userData/library/audio',
       // 程序不提供任何导出 / 另存为 / 分享能力
       exportApi: false,
       // 只处理真正的 NCM 容器，不做通用解密
@@ -1588,5 +1607,23 @@ ipcMain.handle('read-audio', (_e, p) => {
     return { bytes: buf, mime: mime, size: st.size };
   } catch (e) {
     return { error: String((e && e.message) || e) };
+  }
+});
+
+/* 轻量探活：只 stat，不读字节。
+   渲染端在采用本地保留副本（s.localPath）之前用它确认那份副本还在盘上 ——
+   否则会拿着一份失效引用去 read-audio，弹出一条指向老短路径的
+   "文件不存在：C:\Users\KONOMI~1\..."（用户实测反馈的报错）。
+   同时也把还原后的真实路径回传，方便曲库就地修好。 */
+ipcMain.handle('audio-exists', (_e, p) => {
+  try {
+    if (!p || typeof p !== 'string') return { ok: false };
+    const real = resolveReadablePath(p);
+    if (!fs.existsSync(real)) return { ok: false, error: '文件不存在：' + p };
+    const st = fs.statSync(real);
+    if (!st.isFile()) return { ok: false, error: '不是文件：' + p };
+    return { ok: true, path: real, size: st.size, fixed: real !== p };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
   }
 });

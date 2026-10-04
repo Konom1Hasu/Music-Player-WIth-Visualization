@@ -119,6 +119,35 @@ function copyWithoutPrefix(src, dest, offset) {
   } finally { fs.closeSync(fd); }
 }
 
+/* ★★ 固化副本必须**可信** —— 它是"最后一份还能播的东西" ★★
+   固化进曲库目录的那份（library/audio）承担着"源缓存删了也照播"的责任，
+   所以写完之后要回头看它一眼。历史上有过两次坏副本事故：
+     · 硬链接时代，会话目录擦除把共享 inode 覆写成全 0（源文件一起坏了）；
+     · copyFileSync 中途失败留下的半截文件。
+   这种文件照样"存在、大小也不为 0"，只做 existsSync 是拦不住的 ——
+   必须看内容头。判据刻意宽松（认得常见容器魔数即可），
+   因为**认不出头的文件 Chromium 同样播不了**：宁可此时判失败让上层明确知道，
+   也不要往曲库里塞一个坏引用 —— 那会变成又一个永远报错的僵尸条目。 */
+const OTHER_AUDIO_MAGIC = ['ID3', 'fLaC', 'OggS', 'RIFF'];
+function isSaneAudio(p) {
+  try {
+    const st = fs.statSync(p);
+    if (!st.isFile()) return false;
+    if (st.size < 512) return false;          // 短于此不可能是完整曲目
+    const fd = fs.openSync(p, 'r');
+    try {
+      const n = Math.min(4096, st.size);
+      const head = Buffer.alloc(n);
+      fs.readSync(fd, head, 0, n, 0);
+      for (const tag of MP4_HEAD_TAGS) if (head.indexOf(tag) >= 0) return true;
+      for (const tag of OTHER_AUDIO_MAGIC) if (head.indexOf(tag) === 0) return true;
+      /* mp3 常有帧同步字（无 ID3 标签的那种） */
+      if (head.length > 2 && head[0] === 0xff && (head[1] & 0xe0) === 0xe0) return true;
+      return false;
+    } finally { fs.closeSync(fd); }
+  } catch (e) { return false; }
+}
+
 function ensureM4a(audioPath, cacheDir, force) {
   /* cacheDir 由主进程决定：现在传的是【本次会话专属的临时目录】，
      所以可播放副本不会在 userData 里长期驻留，退出即被擦除（数据管控）。 */
@@ -153,7 +182,8 @@ function ensureM4a(audioPath, cacheDir, force) {
     if (!reusable) {
       try { copyWithoutPrefix(audioPath, dest, offset); } catch (e) { return null; }
     }
-    return dest;
+    /* 写完回头验一次：坏副本（半截 / 被覆写成全 0）绝不能当"可用音频"交付 */
+    return isSaneAudio(dest) ? dest : null;
   }
   /* ★★ 这里原来是 fs.linkSync（硬链接），已改为一律复制。★★
      硬链接看起来很美 —— 同盘瞬时、不占额外空间 —— 但它与源文件**共享 inode**，
@@ -162,11 +192,12 @@ function ensureM4a(audioPath, cacheDir, force) {
      用户的原始缓存文件却已经被原地写成全 0。
      实测后果：B 站缓存音频变成全零文件，再播放就是 MediaError 4
      （"格式不支持或文件头异常"）。多占一份磁盘换绝对安全，值得。 */
-  try { if (!force && fs.existsSync(dest) && fs.statSync(dest).size > 0) return dest; } catch (e) { /* ignore */ }
+  /* 复用前提：文件在、且**内容头认得出** —— 只查 size > 0 会放过历史坏副本 */
+  try { if (!force && isSaneAudio(dest)) return dest; } catch (e) { /* ignore */ }
   try {
     if (fs.existsSync(dest)) fs.unlinkSync(dest);
     fs.copyFileSync(audioPath, dest);
-    return dest;
+    return isSaneAudio(dest) ? dest : null;
   } catch (e) { return null; }
 }
 
@@ -482,6 +513,21 @@ function probeM4a(p, maxBytes) {
 async function scan(rootDir, opts) {
   if (!opts || !opts.userDataDir) throw new Error('scan 需要 opts.userDataDir');
   const out = [];
+  /* ★★「解析一份音频数据到播放器内部」的落点就在这儿 ★★
+     opts.keepDir 一旦给出，剥好头的可播放副本就**直接写进曲库目录**
+     （<userData>\library\audio），而不是会话临时目录。
+
+     为什么必须这样：B 站缓存的原始 .m4s 在用户自己的 Videos\bilibili 下，
+     随时可能被 B 站客户端清理、被用户手动删。副本只落在会话临时目录时，
+     源一没就再也变不出音频 —— 曲目就成了永远报错的僵尸条目（真实事故：
+     《scualee》的源目录被删，库里的记录既没有本地副本、又指向已销毁的会话，
+     每次播放都报同一个错，且一个字节都不变）。
+
+     写进曲库目录 = 副本从此与源缓存**彻底解耦**：源删了照播，重启也在。
+     同一份内容只解析一次、只落盘一次（以前是 scan 写会话目录、
+     bili-keep 再复制一遍，白白多写一份盘）。 */
+  const keepDir = opts.keepDir || '';
+  const targetDir = keepDir || opts.audioDir || path.join(opts.userDataDir, 'bili_audio');
   const found = collect(rootDir);
   // 所有候选逐个读内容判定类型（结果进 kindCache，同一文件只读一次）
   const audioFiles = [], videoFiles = [], otherFiles = [];
@@ -530,8 +576,9 @@ async function scan(rootDir, opts) {
     const pick = pickBestAudio(dir, audioFiles);
     if (!pick.best) continue;
     const audio = pick.best.path;
-    // 数据管控：副本写进会话临时目录（opts.audioDir），不再落到 userData
-    const link = ensureM4a(audio, opts.audioDir || path.join(opts.userDataDir, 'bili_audio'));
+    /* 副本落点由调用方决定：给了 keepDir 就固化进曲库目录（与源缓存解耦），
+       否则退回会话临时目录（退出即销毁）。 */
+    const link = ensureM4a(audio, targetDir);
     if (!link) continue;
     used.add(audio);
     const parsed = parseBiliTitle(raw, uname);
@@ -544,6 +591,11 @@ async function scan(rootDir, opts) {
       album: (isPc && meta.groupTitle ? String(meta.groupTitle) : 'B站缓存') + (q.kbps ? ` · ${q.kbps}k` : ''),
       audioPath: audio,
       path: toFileUrl(link),
+      /* ★ 这一份是不是已经固化进播放器内部（曲库目录）——
+         渲染端据此决定曲目的 srcUrl 直接写固化副本，而不是写随时会失效的
+         会话临时路径。这是"新记录不再天生带脏 srcUrl"的关键。 */
+      kept: !!keepDir,
+      keptBytes: (function () { try { return fs.statSync(link).size; } catch (e) { return 0; } })(),
       cover: cover || null,
       folder: dir,
       durationHint: isPc && meta.duration ? Number(meta.duration) : 0,
@@ -574,7 +626,7 @@ async function scan(rootDir, opts) {
     let name = path.basename(dir);
     if (/^\d+$/.test(name) || /^[0-9a-f]{16,}$/i.test(name)) name = '';
     const parsed = parseBiliTitle(name);
-    const link = ensureM4a(a, opts.audioDir || path.join(opts.userDataDir, 'bili_audio'));
+    const link = ensureM4a(a, targetDir);
     if (!link) continue;
     out.push({
       title: parsed.title,
@@ -583,6 +635,8 @@ async function scan(rootDir, opts) {
       album: (probeM4a(a) || {}).kbps ? ('B站缓存 ' + (probeM4a(a) || {}).kbps + 'k') : 'B站缓存',
       audioPath: a,
       path: toFileUrl(link),
+      kept: !!keepDir,
+      keptBytes: (function () { try { return fs.statSync(link).size; } catch (e) { return 0; } })(),
       cover: await resolveCover(dir, '', opts),
       folder: dir,
       rawTitle: name,
@@ -592,4 +646,4 @@ async function scan(rootDir, opts) {
   return out;
 }
 
-module.exports = { scan: scan, parseBiliTitle: parseBiliTitle, stripNoise: stripNoise, ensureM4a: ensureM4a };
+module.exports = { scan: scan, parseBiliTitle: parseBiliTitle, stripNoise: stripNoise, ensureM4a: ensureM4a, isSaneAudio: isSaneAudio };

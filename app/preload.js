@@ -26,6 +26,9 @@ contextBridge.exposeInMainWorld('desktop', {
   importLegacySettings: () => ipcRenderer.invoke('import-legacy-settings'),
   // 读音频字节，用于 blob 兜底播放 → { bytes, mime, size } | { error }
   readAudio: (p) => ipcRenderer.invoke('read-audio', p),
+  // 轻量探活：只 stat 不读字节 → { ok, path, size, fixed } | { ok:false, error }
+  // 用于在采用本地副本前确认它还在盘上（老版本存过 8.3 短名路径）
+  audioExists: (p) => ipcRenderer.invoke('audio-exists', p),
   // 全局快捷键注册状态（媒体键是否被游戏占用）→ { media, fallback, detail }
   getHotkeyStatus: () => ipcRenderer.invoke('get-hotkey-status'),
   // 数据管控策略自检 + 本地审计日志条数 → { version, sessionId, auditCount, policy }

@@ -127,10 +127,14 @@ export interface Song {
   pos: number;
   lrc?: string;
   order: number;
-  /* B 站缓存专用：s.path 是原始 .m4s 路径；s.localPath 是**导入时复制进曲库目录的本地副本**
-     （与源缓存解耦，源删了也能播）。triedBlob / triedHeal 是本次会话内的重试标记，不落库。 */
+  /* B 站缓存专用：
+     · s.path      = 原始 .m4s 路径（外部缓存目录，随时可能被清理）
+     · s.localPath = **固化进曲库目录的本地副本**（与源缓存彻底解耦，源删了也照播）
+     · s.missing   = 源已不在、又没有固化副本 → 这一首真的播不了（如实标出来，
+                     不让它伪装成"B 站缓存"等用户点了才报错）
+     · triedHeal 是本次会话内的自愈标记，不落库 */
   localPath?: string;
-  triedBlob?: boolean;
+  missing?: boolean;
   triedHeal?: boolean;
 }
 
@@ -145,6 +149,8 @@ const desktop = (window as any).desktop as
       localAudioInfo?: () => Promise<any>;
       importLegacySettings?: () => Promise<any>;
       readAudio?: (p: string) => Promise<any>;
+      /** 轻量探活：只 stat 不读字节 → { ok, path, size, fixed } | { ok:false, error } */
+      audioExists?: (p: string) => Promise<any>;
       on?: (channel: string, cb: (data: any) => void) => void;
       getHotkeyStatus?: () => Promise<any>;
     }
@@ -646,21 +652,43 @@ function fileUrlToPath(url: string): string {
     return "";
   }
 }
+/* 会话副本目录名形如 mp-session-<sid>，落在系统临时目录，**随进程退出即销毁**。
+   ★ 所以凡是 mp-session-* 的路径，**一律不可信** —— 不只是"别人的会话"，
+     连"当前会话"的也不该被持久化进曲库（重启就没了）。
+     历史遗留记录里就存着
+       file:///C:/Users/KONOMI~1/AppData/Local/Temp/mp-session-07c53b8c53d7/audio/xxx.m4a
+     它既带 8.3 短名、又指向早已消失的会话，却被当成兜底音源一路放行到 <audio>，
+     于是每次播放都报"文件不存在"，且报错**一个字节都不变**（因为记录从没被重写）。
+   → 判定标准：路径里出现 mp-session- 就判死，强制走 s.path 重建。 */
+function isStaleSessionPath(p: string): boolean {
+  return /[\\/]mp-session-[0-9a-f]+[\\/]/i.test(String(p || ""));
+}
 /** 上一次"取音源"失败的原因（源文件不存在 / 生成副本失败），供报错提示用 */
 let lastSourceError = "";
 /** 取"现在能读的音频文件路径"：
     ① 本地保留副本（与源缓存解耦）—— 有就直接用；
     ② 会话副本：让主进程从源缓存现做（源还在时才可能成功）；
     ③ 都拿不到 → 返回空串，并把原因记在 lastSourceError 里。
-    force = true 时跳过 ①（播放报错后的自愈：强制从源重建）。 */
+    force = true 时跳过 ①（播放报错后的自愈：强制从源重建）。
+   ★ ① 必须确认副本在盘上：老版本存过 8.3 短名路径，盲目采用会一路读到失败。
+   ★ 这里**不再**碰 s.srcUrl —— 它是"上一次算出来的结果"，可能早已失效。
+     以前把它当兜底（fileUrlToPath(s.srcUrl)）正是"报错一直不变"的元凶：
+     旧记录里的 srcUrl 指向已消失的会话目录，却被无条件拿去读。 */
 async function playablePathOf(s: Song, force = false): Promise<string> {
-  if (s.localPath && !force) return s.localPath;
+  if (s.localPath && !force) {
+    if (await audioReadableExists(s.localPath)) return s.localPath;
+    s.localPath = undefined; // 副本已不在，丢掉失效引用
+  }
   if (s.path && desktop?.prepareBiliAudio) {
     try {
       const r = await desktop.prepareBiliAudio(s.path, !!force);
       if (r && r.ok && r.path) {
         s.srcUrl = r.url || s.srcUrl;
         lastSourceError = "";
+        /* ★ 搭个便车：源还在、副本也刚做出来了 —— 顺手固化一份到曲库目录，
+           下次源被删就不必再求人。fire-and-forget，不拖慢播放启动；
+           失败也无妨（下次播放会再试一遍）。 */
+        if (!s.localPath) void solidifySong(s);
         return r.path;
       }
       lastSourceError = (r && r.error) || "生成可播放副本失败";
@@ -672,32 +700,168 @@ async function playablePathOf(s: Song, force = false): Promise<string> {
   lastSourceError = lastSourceError || "这一首没有可用的本地副本";
   return "";
 }
-/** 让主进程备好可播放副本并把新地址写回 s.srcUrl；返回"地址变了没有"。
-    幂等：副本已经正确时主进程直接返回原路径，几乎零开销。 */
-async function ensurePlayableSource(s: Song, force = false): Promise<boolean> {
-  /* 本地保留副本优先：它有就不必再动源缓存（源删了也照样能播） */
-  if (!force && s.localPath && s.srcUrl !== s.localPath) {
-    s.srcUrl = s.localPath;
-    return true;
+/** ★ 把这首歌的音源**固化一份到播放器内部**（<userData>\library\audio），
+    从此与外部 B 站缓存目录彻底解耦 —— 源被删、被移走都照播。
+
+    这就是"导入的缓存应该解析一份进播放器并保护起来"的落地动作。
+    两个触发点：
+      · 导入扫描（新版已直接落盘，见导入流程）；
+      · 播放时搭便车（源还在、但当初没固化成功的存量曲目 —— 补救路径）。
+    幂等且可失败：同一个源算出的目标文件名固定，已存在直接返回；
+    失败不打扰播放，只是下次再试。同一首歌并发去重，避免重复写盘。 */
+const solidifyingIds = new Set<string>();
+async function solidifySong(s: Song): Promise<boolean> {
+  if (!s || !s.path) return false;
+  if (s.localPath) return true;               // 已经有固化副本，不必再做
+  if (!desktop?.keepBiliAudio) return false;
+  if (solidifyingIds.has(s.id)) return false;
+  solidifyingIds.add(s.id);
+  try {
+    const kr = await desktop.keepBiliAudio(s.path);
+    if (kr && kr.ok && kr.path) {
+      s.localPath = kr.path;
+      /* 固化副本成了 → 曲目的音源地址就指向它（长效）。别的地方若还残留
+         会话路径/短名，一并换成这份 —— 曲库里只留能长期用的地址。 */
+      const cur = fileUrlToPath(s.srcUrl || "");
+      if (!s.srcUrl || !cur || isStaleSessionPath(cur)) s.srcUrl = s.localPath;
+      persist(s);
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    solidifyingIds.delete(s.id);
   }
+}
+/* 曲库里有没有"需要还原成长名"的路径 —— 见 healsSongPathsOnce。
+   懒执行：第一次真正播放 B 站曲目时才探，不在启动路径上加开销。 */
+let pathHealDone = false;
+/** 一次性把曲库里存的 8.3 短名路径修成长名，并**清掉失效的 srcUrl**。
+    背景：老版本导入 B 站缓存时，系统文件夹选择框返回的短名
+    （C:\Users\KONOMI~1\...）被原样存进了 s.path / s.localPath。
+    短名在 Node 里读得到，所以以前一直"看着没问题"；但它拼出的
+    file:// URL 带 %7E1，Chromium 判非法 → MediaError 4
+    （"格式不支持或文件头异常"）。主进程的 audio-exists 会无条件还原成长名，
+    这里拿它把库里的旧值就地换掉，之后启动都不必再修。
+
+    ★ 同时清理 srcUrl：历史记录里存过指向 **早已销毁的会话目录** 的 URL
+      （mp-session-07c53b8c53d7），它让每次播放都报同一个错、且永远不变。
+      这类值直接抹掉 —— 下次播放会由 playablePathOf 从 s.path 重新生成，
+      生成出来的才是本次会话真正有效的地址。
+
+    ★ 并如实标出"音源缺失"：源没了、固化副本也没有的曲目是真的播不了。
+      提前探一次、在列表上标出来，比让用户点进去才吃到报错好得多。 */
+async function healsSongPathsOnce(): Promise<void> {
+  if (pathHealDone) return;
+  pathHealDone = true;
+  if (!desktop?.audioExists) return;
+  for (const s of songs) {
+    let dirty = false;
+    /* 失效的会话 URL / 带短名的 URL：一律清掉，让播放时重新生成 */
+    if (s.srcUrl) {
+      const asPath = fileUrlToPath(s.srcUrl);
+      if (isStaleSessionPath(asPath)) { s.srcUrl = undefined; dirty = true; }
+    }
+    /* 固化副本：短名还原 + 探活。副本已不在就丢掉这个失效引用
+       （源还在时，播放会顺带重新固化一份）。 */
+    let copyOk = false;
+    if (s.localPath) {
+      try {
+        const r = await desktop.audioExists(s.localPath);
+        if (r && r.ok) {
+          copyOk = true;
+          if (r.fixed && r.path) { s.localPath = r.path; dirty = true; }
+        } else {
+          s.localPath = undefined; dirty = true;
+        }
+      } catch {
+        copyOk = true; // 探不通就不下结论，别误清
+      }
+    }
+    /* 源路径：短名还原 + 存在性 → 决定要不要标"音源缺失" */
+    if (s.path) {
+      let srcOk = false;
+      try {
+        const r = await desktop.audioExists(s.path);
+        if (r && r.ok) {
+          srcOk = true;
+          if (r.fixed && r.path) { s.path = r.path; dirty = true; }
+        }
+      } catch {
+        srcOk = true; // 探不通当作还在，不下"缺失"的结论
+      }
+      const miss = !srcOk && !copyOk;
+      if (!!s.missing !== miss) { s.missing = miss; dirty = true; }
+    }
+    if (dirty) persist(s);
+  }
+}
+/** 让主进程确认"这份音频现在还能读到"（只 stat，不读字节，很轻）。
+    没接上桌面端（网页版）时一律返回 true —— 不改变原有行为。 */
+async function audioReadableExists(p: string): Promise<boolean> {
+  if (!p) return false;
+  if (!desktop?.audioExists) return true;
+  try {
+    const r = await desktop.audioExists(p);
+    return !!(r && r.ok);
+  } catch {
+    return true; // 探不通就当它还在，交给后面的 readAudio 去报真正的错
+  }
+}
+
+async function ensurePlayableSource(s: Song, force = false): Promise<boolean> {
+  /* ① 固化副本优先：有、且在盘上 → 直接用它，**根本不必碰源缓存**。
+     ★ 但必须先确认这份副本真的还在：老版本把 8.3 短名路径写进了 localPath
+       （C:\Users\KONOMI~1\...），或者用户手工清过 library\audio —— 盲目采用
+       会让 blobUrlOf 一路拿到读不到的文件，弹出"文件不存在：C:\Users\KONOMI~1\..."。
+     以前这里的条件是 `s.localPath && s.srcUrl !== s.localPath` —— 已固化且已同步时
+     条件为假，于是**继续往下从源重建**，白白多写一份临时副本；源已被删时还会
+     白失败一次。现在改成"能读就收工"。 */
+  if (!force && s.localPath) {
+    if (await audioReadableExists(s.localPath)) {
+      const changed = s.srcUrl !== s.localPath;
+      s.srcUrl = s.localPath;
+      return changed;
+    }
+    /* 副本没了：丢掉这个失效引用，往下走让主进程从源重建。
+       源也被删时，由 playablePathOf 给出"原始文件不存在"的准确原因。 */
+    s.localPath = undefined;
+    persist(s);
+  }
+  /* ② 从源缓存现做一份会话副本（临时的，只为喂给 <audio>）。 */
   const p = await playablePathOf(s, force);
   if (!p) return false;
   const changed = s.srcUrl !== p;
   s.srcUrl = p;
   return changed;
-}
-/** 把音频文件读成 blob 地址（绕开 file:// 限制）。读不到返回空串。
-    force = true：跳过本地保留副本，强制从源缓存重建会话副本（自愈路径）。 */
+}/** 把音频文件读成 blob 地址（绕开 file:// 限制）。读不到返回空串。
+    force = true：跳过本地保留副本，强制从源缓存重建会话副本（自愈路径）。
+   ★ 兜底顺序：playablePathOf（会重建）→ srcUrl（**必须探活**）→ s.path（**必须探活**）。
+     以前是 (await playablePathOf(...)) || fileUrlToPath(s.srcUrl) || s.path —— 中间那环
+     完全不校验，把已消失会话目录里的路径直接喂给 readAudio，报错很误导（说"格式不支持"）。
+     现在每一环都先确认"文件真的在盘上"，不在就跳过并给出准确原因。 */
 async function blobUrlOf(s: Song, force = false): Promise<string> {
   if (!desktop?.readAudio) return "";
-  const p = (await playablePathOf(s, force)) || fileUrlToPath(s.srcUrl || "") || s.path || "";
-  if (!p) return "";
+  let p = await playablePathOf(s, force);
+  if (!p) {
+    /* ① 上一次算出的 srcUrl：只在"文件确实还在、且不是临时会话路径"时才用 */
+    const cached = fileUrlToPath(s.srcUrl || "");
+    if (cached && !isStaleSessionPath(cached) && (await audioReadableExists(cached))) p = cached;
+  }
+  if (!p) {
+    /* ② 原始源缓存路径：同样先探活（源被删/被移走时给准确提示，而不是伪装成格式错误） */
+    const raw = s.path || "";
+    if (raw && !isStaleSessionPath(raw) && (await audioReadableExists(raw))) p = raw;
+  }
+  if (!p) {
+    lastSourceError = lastSourceError || "源缓存已被删除，本地副本也不在";
+    return "";
+  }
   try {
     const res = await desktop.readAudio(p);
     if (res && res.bytes && res.bytes.byteLength) {
-      const url = URL.createObjectURL(new Blob([res.bytes], { type: res.mime || "audio/mp4" }));
-      s.triedBlob = true;
-      return url;
+      return URL.createObjectURL(new Blob([res.bytes], { type: res.mime || "audio/mp4" }));
     }
     lastSourceError = (res && res.error) || "读不到音频字节";
   } catch {
@@ -720,7 +884,16 @@ function diagLoad(s: Song) {
     urlKind: s.srcUrl ? (s.path ? "bili" : "url") : s.file ? "blob" : "none",
   };
 }
-/** 装 B 站缓存那一路的音源：副本 → blob → file://（依次退）。异步，装好再 play。 */
+/** 装 B 站缓存那一路的音源：**走内存读取（blob）**。
+    ────────────────────────────────────────────────────────────
+    这里曾经改成"副本 file:// 直读优先、失败再降级 blob"，理由是省一次 IPC + 少占内存。
+    **那个改动是错的**，用户反馈"导入的 B 站缓存提示格式不支持或文件头异常"就是它：
+      · UI 挂在 http://127.0.0.1:41739（本机静态服务）上，**file:// 音源会被 Chromium 拦掉**
+        （Not allowed to load local resource）—— 见本文件上方"两件事都得做"那段注释的 ②；
+      · 被拦之后 <audio> 报 MediaError 4（"格式不支持或文件头异常"），
+        于是每一首都得先失败一次、再走 error 自愈降级，既慢又一定会弹红提示。
+    实测证明"直读"在这套架构下根本走不通。**正确做法：一律 read-audio 读字节 → Blob → objectURL**，
+    这条路径一直可用，且能绕开协议限制。代价（整份载入内存）是这个架构下必须接受的。 */
 let loadSeq = 0;
 async function loadBiliAudio(s: Song, autoplay: boolean) {
   const token = ++loadSeq;
@@ -733,6 +906,7 @@ async function loadBiliAudio(s: Song, autoplay: boolean) {
   await healsSongPathsOnce();
   await ensurePlayableSource(s, false);
   if (token !== loadSeq || currentId !== s.id) return;
+  /* 读字节转 blob。这是该路径唯一可行的装载方式（file:// 会被拦）。 */
   const blob = await blobUrlOf(s);
   if (token !== loadSeq || currentId !== s.id) {
     if (blob) URL.revokeObjectURL(blob);
@@ -743,9 +917,7 @@ async function loadBiliAudio(s: Song, autoplay: boolean) {
     if (currentUrl) URL.revokeObjectURL(currentUrl);
     currentUrl = blob;
   }
-  /* 读不到字节就退回 file://：本机多数情况会被 Chromium 拦掉，但真拦了会触发 error
-     自愈（重建副本 → 再试 blob），不会把这一首彻底闷死。 */
-  audio.src = blob || s.srcUrl || "";
+  audio.src = blob || "";
   loadedId = s.id;
   if (autoplay) audio.play().catch(() => {});
 }
@@ -759,15 +931,38 @@ export function coverToolsMarkup(): string {
     `<button type="button" class="edit-mini" data-action="reread-covers" style="pointer-events:auto">重新读取全部封面</button></label>`
   );
 }
-/** 系统设置里的"本地音频副本"一行：只显示占用（导入 B 站缓存时复制进来的那些）。
-    这一行是给用户看盘占用的，不需要按钮 —— 副本删了就播不了，所以不做一键清空。 */
+/** 系统设置里的"本地音频副本"一行：显示占用 + 一个"补齐未固化"的按钮。
+    ★ 为什么需要按钮：这份副本是**与外部缓存解耦**的保障 ——
+      早期版本导入的曲目可能只有源路径、没有副本，源一删就永远播不了
+      （《scualee》就是这么变成僵尸条目的）。按钮把"源还在的那些"一次性补齐。
+      刻意不做一键清空：副本删了就播不了，那是自毁。 */
 export function localAudioMarkup(): string {
   return (
     `<label><div><strong>LOCAL AUDIO COPIES</strong><span>` +
-    `导入 B 站缓存时会把"可播放副本"复制一份到曲库目录（<code>%APPDATA%\\music-player\\library\\audio</code>），` +
-    `这样**源缓存文件夹被删掉/移走之后仍然能播**。这里显示的是它占了多少盘</span></div>` +
-    `<span id="local-audio-info" class="settings-value">读取中…</span></label>`
+    `导入时固化进播放器的可播放副本，源文件夹删掉后仍能播。这里显示它占的盘` +
+    `</span></div>` +
+    `<span id="local-audio-info" class="settings-value">读取中…</span>` +
+    `<button type="button" class="edit-mini" data-action="solidify-all" style="pointer-events:auto">补齐未固化的</button></label>`
   );
+}
+/** 把"源还在、但还没固化"的 B 站曲目一次性补齐到播放器内部。
+    源已被删的固不了 —— 那些属于"音源缺失"，如实计数告知，不假装成功。 */
+export async function solidifyAllMissing(): Promise<void> {
+  const targets = songs.filter((s) => s.path && !s.localPath);
+  if (!targets.length) {
+    toast("所有 B 站曲目都已固化在播放器内部");
+    return;
+  }
+  toast(`正在固化 ${targets.length} 首…`);
+  let ok = 0;
+  let miss = 0;
+  for (const s of targets) {
+    if (await solidifySong(s)) ok++;
+    else miss++;
+  }
+  notify();
+  if (miss) toast(`已固化 ${ok} 首；${miss} 首的源缓存已不在，无法再固化`);
+  else toast(`已固化 ${ok} 首，与源缓存解耦完成`);
 }
 /** 填充 localAudioMarkup() 里那个占位（打开设置面板后异步取一次） */
 export async function fillLocalAudioInfo() {
@@ -837,10 +1032,12 @@ export async function rereadAllCovers() {
     URL.revokeObjectURL(currentUrl);
     currentUrl = null;
   }
-  s.triedBlob = false;
   s.triedHeal = false;
-  if (s.srcUrl) {
-    // B 站缓存：副本要在会话临时目录里重新生成，而且必须绕开 file:// 限制 —— 异步装载
+  /* ★ 判据用 s.path（原始源缓存路径，稳定），不要用 s.srcUrl ——
+     srcUrl 是"上次算出的可播放地址"，可能是失效的历史值，
+     但它的存在不代表这一首是路径型音源。两者都指向路径型音源时走异步装载。 */
+  if (s.path || s.srcUrl) {
+    // B 站缓存：副本要在会话临时目录里重新生成，而且必须走内存读取绕开 file:// 限制 —— 异步装载
     void loadBiliAudio(s, autoplay);
     return;
   }
@@ -867,6 +1064,7 @@ function selectSong(id: string, autoplay = false) {
   currentId = id;
   const s = songs.find((x) => x.id === id);
   if (!s) return;
+  invalidatePrefetch();   // 换了歌，上一轮的预取结论作废
   loadSongAudio(s, autoplay);
   spectrum?.resetPeaks();
   renderNow();
@@ -947,6 +1145,7 @@ export function queueNext(id: string) {
   }
   nextQueue = nextQueue.filter((x) => x !== id);
   nextQueue.unshift(id);
+  invalidatePrefetch();   // 队列变了 → "下一首是谁"变了，预取要重算
   renderList();
   toast(`下一首播放：《${s.title}》`);
 }
@@ -993,6 +1192,71 @@ export function playNext() {
     return;
   }
   playAt((i + 1) % songs.length);
+}
+/* ================= 预取下一首（消除切歌等待） =================
+   问题：点"下一首"到出声之间，要串行走完
+     prepareBiliAudio（IPC 往返 + 可能重写副本） → readAudio（整份读盘） → setSrc → play
+   用户感知到的就是"按了没反应，过半秒才响"。
+   做法：播放中判断"离曲尾还有 N 秒"，先把下一首的**音源准备好**（只备源，不播放）：
+     · 路径型音源（B 站缓存）：提前让主进程生成副本并把 srcUrl 写回曲目记录，
+       于是真正切歌时 ensurePlayableSource 是幂等命中、几乎零开销；
+     · 普通文件：无需准备（objectURL 是同步的）。
+   为什么只做"备源"而不做"预解码"：预解码要第二个 <audio>，会与 §音频图 里
+   那条 MediaElementSource 的归属打架（一个元素只能被一个 AudioContext 接管），
+   收益不稳定而风险明确。备源已经能吃掉这条链路上最贵的 IPC + 读盘。 */
+const PREFETCH_LEAD_SEC = 12;   // 距曲尾多少秒开始预取
+const PREFETCH_LEAD_MIN = 6;    // 短曲目的下限（避免 20 秒的歌一进来就预取）
+let prefetchedId = "";          // 已经预取好的曲目 id（避免重复请求）
+let prefetchingId = "";         // 正在预取中的曲目 id（避免并发重复）
+/** 算"下一首是谁"（与 playNext 的选择逻辑保持一致，但不产生副作用） */
+function peekNext(): Song | null {
+  if (nextQueue.length) {
+    const id = nextQueue[0];
+    const s = songs.find((x) => x.id === id);
+    if (s) return s;
+  }
+  const i = currentIndex();
+  if (i < 0 || songs.length < 2) return null;
+  if (mode === "shuffle") {
+    // 随机模式本来就没有"下一首"可言，不预取（随机选到哪首是播放时才知道的）
+    return null;
+  }
+  if (mode === "order") return i < songs.length - 1 ? songs[i + 1] : null;
+  return songs[(i + 1) % songs.length];
+}
+/** 为这首歌备好音源（幂等）。已经在做或已经做过就直接返回。 */
+async function prefetchSong(s: Song) {
+  if (!s || !s.path) return;                 // 只有路径型音源需要"备"
+  if (s.id === prefetchedId || s.id === prefetchingId) return;
+  // 已经有本地保留副本 → 它本身就是"永远可用"的地址，不必再动
+  if (s.localPath && s.srcUrl === s.localPath) {
+    prefetchedId = s.id;
+    return;
+  }
+  prefetchingId = s.id;
+  try {
+    const changed = await ensurePlayableSource(s, false);
+    if (changed) persist(s);
+    prefetchedId = s.id;
+  } catch {
+    /* 预取失败无所谓 —— 真正切歌时还会再走一遍完整链路 */
+  } finally {
+    if (prefetchingId === s.id) prefetchingId = "";
+  }
+}
+/** 由 timeupdate 驱动：判断该不该预取。开销只有几次比较。 */
+function maybePrefetch() {
+  if (!songs.length || audio.paused) return;
+  const dur = audio.duration;
+  if (!dur || !isFinite(dur)) return;
+  const lead = Math.max(PREFETCH_LEAD_MIN, Math.min(PREFETCH_LEAD_SEC, dur * 0.15));
+  if (dur - audio.currentTime > lead) return;
+  const nxt = peekNext();
+  if (nxt) void prefetchSong(nxt);
+}
+/** 换歌 / 队列变化时让预取状态失效（否则会拿旧结论跳过预取） */
+function invalidatePrefetch() {
+  prefetchedId = "";
 }
 export function playPrev() {
   if (!songs.length) return;
@@ -1313,7 +1577,10 @@ async function addFiles(fileList: FileList | File[]) {
    否则列表里这一首的时长永远是 0:00。 */
 function probeDuration(s: Song) {
   const tmp = new Audio();
-  let url = s.srcUrl || (s.file ? URL.createObjectURL(s.file) : "");
+  /* ★ srcUrl 可能是失效的历史值（指向已销毁的会话目录）。
+     拿它去试必然 onerror，白等一轮；直接跳过，让下面的 onerror 分支去重建。 */
+  const cachedOk = Boolean(s.srcUrl) && !isStaleSessionPath(fileUrlToPath(s.srcUrl || ""));
+  let url = (cachedOk ? s.srcUrl : "") || (s.file ? URL.createObjectURL(s.file) : "");
   let done = false;
   const drop = (u: string) => {
     if (u.startsWith("blob:")) URL.revokeObjectURL(u);
@@ -1464,24 +1731,35 @@ export async function importBili() {
       }
       seen.add(key);
     }
-    /* ★ 与源缓存解耦：把"可播放副本"复制一份到曲库目录（<userData>\library\audio）。
-       用户反馈"把 B 站缓存文件夹删掉/移走之后就不能播了" —— 以前副本只在会话临时目录里，
-       源一没就再也重建不出来。这一步失败不影响导入（播放时还能从源现做副本）。 */
+    /* ★ 与源缓存解耦：固化副本。
+       新版扫描（主进程 biliOpts 传了 keepDir）**在扫描时就已把可播放副本
+       落进曲库目录** <userData>\library\audio —— it.kept 为真，且 it.path 就是
+       那份固化副本的地址。这里直接用，不再复制第二遍（以前 scan 写会话目录 +
+       这里再复制一遍，同一份内容白写两次盘）。
+       只有老版本扫描（没有 kept 字段）才走 keepBiliAudio 兜底补一份。
+       两者都拿不到时 localPath 为空 —— 播放时还会再试一次固化并给出明确原因。 */
     let localPath = "";
-    if (desktop?.keepBiliAudio && it.audioPath) {
+    if (it.kept && it.path) {
+      localPath = fileUrlToPath(String(it.path));
+      if (localPath && isStaleSessionPath(localPath)) localPath = ""; // 双保险：会话路径绝不入库
+    }
+    if (!localPath && desktop?.keepBiliAudio && it.audioPath) {
       try {
         const kr = await desktop.keepBiliAudio(String(it.audioPath));
-        if (kr && kr.ok && kr.path) {
-          localPath = kr.path;
-          kept++;
-        }
+        if (kr && kr.ok && kr.path) localPath = kr.path;
       } catch {
         /* ignore */
       }
     }
+    if (localPath) kept++;
     const song: Song = {
       id: uid(),
-      srcUrl: it.path,
+      /* ★ srcUrl 只放**长效**地址。
+         以前这里写 it.path，而老版 scan 的 it.path 指向会话临时目录
+         （mp-session-<sid>/audio/xxx.m4a）—— 进程一退出就失效，却被持久化进曲库。
+         这正是《scualee》那条"报错一个字节都不变"的脏记录的来源。
+         现在优先用固化副本；真拿不到时才退回 it.path（播放侧还有失效判定兜底）。 */
+      srcUrl: localPath || it.path,
       path: it.audioPath || "",
       localPath: localPath || undefined,
       title: (it.title || "").trim() || "未知歌曲",
@@ -1500,9 +1778,11 @@ export async function importBili() {
   }
   notify();
   if (!currentId && songs.length) selectSong(songs[0].id);
-  if (added && dup) toast(`B站缓存导入：新增 ${added} 首（本地副本 ${kept} 份），跳过重复 ${dup} 首`);
+  const allKept = added > 0 && kept === added;
+  if (added && dup) toast(`B站缓存导入：新增 ${added} 首（已固化 ${kept} 份），跳过重复 ${dup} 首`);
   else if (!added && dup) toast(`这些 B 站缓存已经在曲库里了（跳过重复 ${dup} 首）`);
-  else toast(`B站缓存导入：新增 ${added} 首（已复制 ${kept} 份本地副本，源文件夹删掉也能播）`);
+  else if (allKept) toast(`B站缓存导入：新增 ${added} 首，已全部固化进播放器内部（源文件夹删掉也能播）`);
+  else toast(`B站缓存导入：新增 ${added} 首（已固化 ${kept} 份，其余未固化）`);
 }
 
 /* ---------- UI（挂在 #stage 内，和终端共用一套网格与配色） ---------- */
@@ -2271,7 +2551,17 @@ const mmss = (s: number) => {
   return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 };
 function sourceLabel(s: Song): string {
-  if (s.srcUrl) return "B 站缓存";
+  /* ★ 判据用 s.path / s.localPath（稳定的字段），不要用 s.srcUrl ——
+     它是"上次算出的可播放地址"，会被自愈逻辑清空，拿它判断会让标签在
+     "B 站缓存" 和 "本地文件" 之间乱跳。 */
+  if (s.path) {
+    /* 源没了、固化副本也没有 —— 如实说"播不了"，别让它伪装成普通曲目，
+       等用户点进去才吃到报错。 */
+    if (s.missing) return "音源缺失";
+    /* 固化副本在库目录 = 与源缓存已解耦，源删了也照播 —— 值得如实标出来 */
+    if (s.localPath) return "B 站缓存 · 已存本地";
+    return "B 站缓存";
+  }
   const name = s.filePath || (s.file ? s.file.name : "");
   const ext = (name.match(/\.([a-z0-9]+)$/i)?.[1] ?? "").toUpperCase();
   if (s.ncmPath) return "NCM → " + (ext || "MP3");
@@ -2662,6 +2952,9 @@ audio.addEventListener("error", async () => {
     playbackErrorHandling = true;
     s.triedHeal = true;
     try {
+      /* B 站这一路走的是"读字节 → blob"，正常情况下不会因为协议被拦（file:// 已不用）。
+         到这里还能报错，最可能的就是**副本本身坏了**（头没剥干净、副本被清掉）——
+         所以直接重建副本、重读字节。 */
       toast(`${name}${why}，正在重建可播放副本…`);
       await ensurePlayableSource(s, true); // force = 强制重建
       if (currentId === s.id) {
@@ -2672,10 +2965,7 @@ audio.addEventListener("error", async () => {
         if (blob) {
           if (currentUrl && currentUrl !== blob) URL.revokeObjectURL(currentUrl);
           currentUrl = blob;
-        }
-        const src = blob || s.srcUrl || "";
-        if (src && src !== audio.src) {
-          audio.src = src;
+          audio.src = blob;
           loadedId = s.id;
           audio.play().catch(() => {});
           playbackErrorHandling = false;
@@ -2687,9 +2977,20 @@ audio.addEventListener("error", async () => {
     }
     playbackErrorHandling = false;
   }
-  /* 提示里带上真实原因：源缓存被删掉时会写"原始文件不存在：<路径>"，
-     这正是"改过缓存文件夹之后放不出来"的那种情况，用户一眼就能看懂。 */
-  toast(`${name}无法播放：${why}${code ? `（MediaError ${code}）` : ""}${lastSourceError ? ` ／ ${lastSourceError}` : ""}`);
+  /* ★ 报错文案的主次必须摆对。
+     原来的写法一律以 MediaError 的机械翻译打头（"格式不支持或文件头异常"），
+     再把真实原因塞在后面 —— 用户第一眼看到的是"格式不支持"，会以为播放器坏了，
+     而真正的原因往往是"源文件已经不在硬盘上"。这是**误导性**的。
+     规则：lastSourceError 若已给出明确原因（文件不存在 / 已删除 / 副本不在），
+     就让它当主语；MediaError 只在没别的原因时才当主因，否则降为附注。 */
+  const reason = lastSourceError;
+  const reasonIsClear = !!reason && /不存在|已删除|不在|读不到|被删|没有可用的本地副本/.test(reason);
+  const tail = code && !reasonIsClear ? `（MediaError ${code}）` : "";
+  const msg = reasonIsClear
+    ? `${name}无法播放：${reason}`
+    : `${name}无法播放：${why}${code ? `（MediaError ${code}）` : ""}${reason ? ` ／ ${reason}` : ""}`;
+  toast(msg);
+  return;
 });
 
 /* ---------- 事件 ---------- */
@@ -2714,6 +3015,7 @@ audio.addEventListener("timeupdate", () => {
      量很小，换来的是"不管是正常关窗还是被强杀，下次启动都能显示上次的位置"。 */
   savePlayhead();
   stepLyrics();
+  maybePrefetch();
 });
 audio.addEventListener("loadedmetadata", () => {
   const s = currentSong();

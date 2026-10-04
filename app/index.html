@@ -1916,6 +1916,38 @@ async function ensurePlayableSource(s, force) {
   } catch (e) { s._prepareFailed = true; }
   return false;
 }
+/* 装载"路径型音源"（B 站缓存）：内存读取 → Blob URL。
+   为什么不用 s.srcUrl（file://）直读：UI 挂在本机静态服务（http://127.0.0.1:41739）上，
+   Chromium 会拦掉 file:// 音源（Not allowed to load local resource），报 MediaError 4
+   「格式不支持或文件头异常」。所以只能让主进程读回字节、渲染层拼成 Blob 再喂 <audio>。
+   与 player.ts 里的 loadBiliAudio 保持同一策略（见那边的注释）。 */
+async function loadBiliAudioBlob(s) {
+  if (!s) return;
+  const token = (loadBiliAudioBlob._seq = (loadBiliAudioBlob._seq || 0) + 1);
+  await ensurePlayableSource(s, false);
+  if (token !== loadBiliAudioBlob._seq || currentId !== s.id) return;
+  const path = s.localPath || decodeURIComponent(String(s.srcUrl || '').replace(/^file:\/\/\//, '').replace(/^file:\/\//, '')) || s.path;
+  if (!path || !window.desktop || !window.desktop.readAudio) {
+    // 主进程不可用（浏览器里打开）：退化为直接给 file://（浏览器环境没有这道限制）
+    audio.src = s.srcUrl || '';
+    return;
+  }
+  try {
+    const res = await window.desktop.readAudio(path);
+    if (token !== loadBiliAudioBlob._seq || currentId !== s.id) return;
+    if (res && res.bytes && res.bytes.byteLength) {
+      if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; }
+      currentUrl = URL.createObjectURL(new Blob([res.bytes], { type: res.mime || 'audio/mp4' }));
+      audio.src = currentUrl;
+      return;
+    }
+    console.warn('[音源] 读不到音频字节', path, res && res.error);
+  } catch (err) {
+    console.warn('[音源] 读取音频字节失败', path, err);
+  }
+  // 实在读不到：给出 file:// 让 error 处理器报一条可见的提示，而不是静默无声
+  audio.src = s.srcUrl || '';
+}
 /* 启动时把所有"路径型音源"（B 站缓存）统一刷新一遍。
    为什么不放在 selectSong 里 await：playAt 是"selectSong 之后立刻 play()"，
    一旦 await 就会拿旧音源起播，时序会乱。放在启动阶段后台跑，既不碰播放时序，
@@ -1935,14 +1967,17 @@ function selectSong(id) {
   const s = songs.find(x => x.id === id);
   if (!s) return;
   if (currentUrl) { URL.revokeObjectURL(currentUrl); currentUrl = null; }
-  // 路径型音源（B站缓存）用主进程生成的可播放副本地址；其余用 objectURL
+  // 路径型音源（B站缓存）：必须走内存读取 → Blob URL。
+  // ★ 不能直接用 s.srcUrl（file://）：UI 挂在本机静态服务上时 Chromium 会拦 file:// 音源，
+  //   表现为 MediaError 4「格式不支持或文件头异常」。旧写法"file:// 优先、出错再降级"会让
+  //   每一首都先失败一次才出声 —— 已废弃，一律走内存读取。
   if (s.srcUrl) {
-    audio.src = s.srcUrl;
+    void loadBiliAudioBlob(s);
   } else if (s.file) {
     currentUrl = URL.createObjectURL(s.file);
     audio.src = currentUrl;
   }
-  s._triedBlob = false;   // 新歌重置"blob 兜底"标记
+  s._triedBlob = false;   // 保留：error 自愈仍用它做"这次已经试过 blob"的标记
   renderNowPlaying();
   renderList();
   setLyrics(s);
