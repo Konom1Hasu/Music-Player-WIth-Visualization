@@ -316,11 +316,36 @@ function logMainError(tag, err) {
 process.on('uncaughtException', (err) => logMainError('异常', err));
 process.on('unhandledRejection', (reason) => logMainError('未处理的 Promise 拒绝', reason));
 
+// 读取用户设置。GPU 选型与渲染模式都必须在 ready 之前决定，所以放在最前面读。
+let userSettings = {};
+try {
+  const sp = path.join(app.getPath('userData'), 'settings.json');
+  if (fs.existsSync(sp)) userSettings = JSON.parse(fs.readFileSync(sp, 'utf8')) || {};
+} catch (e) { /* ignore */ }
+
 // 强制 GPU 硬件加速：避免单独启动时 Chromium 退回软件渲染
 app.commandLine.appendSwitch('ignore-gpu-blocklist');
 // 不设 enable-gpu-rasterization —— 让 2D 画布走 CPU 光栅（Skia）再上传合成：
 // 单独运行时 GPU 被系统降频节流，主线程不会被 GPU 光栅回压阻塞，循环保持高帧率。
-// 不设 force-discrete-gpu —— 用直连显示器的核显（Intel UHD），避免跨显卡回拷。
+/* 多显卡机器上让哪块 GPU 跑三维。
+   ★ 修正一处一直没生效的旧注释：这里原来写的是
+     「不设 force-discrete-gpu —— 用直连显示器的核显（Intel UHD），避免跨显卡回拷」，
+   但 force-discrete-gpu 这个开关名在 Windows 的 Chromium 里**根本不存在**
+   （在 音乐播放器.exe 里 grep 不到），所以那句注释其实什么都没做 —— 程序既没被
+   指定用核显、也没被指定用独显，结果一直落在核显上。
+   Electron 自己的开关名是下面这两个（见 Electron 文档 "Electron CLI Flags"）：
+     --force_high_performance_gpu   多显卡时用独显
+     --force_low_power_gpu          多显卡时用核显
+   本机实测为 Intel UHD + RTX 5060 Laptop 混合显卡、屏 2560×1600@165Hz：
+   核显撑不住三维档案 → 帧率看门狗把画质降到底 →「性能」档只渲染到设备分辨率的
+   约 53%，档案上的刻线就发糊。所以默认改为请求独显。
+   退回核显的两种方式：命令行加 --low-power-gpu，或把 settings.json 里
+   preferDiscreteGpu 写成 false。若独显下反而出现跨显卡回拷的卡顿，就切回来。 */
+const lowPowerGpu =
+  process.argv.includes('--low-power-gpu') || userSettings.preferDiscreteGpu === false;
+app.commandLine.appendSwitch(
+  lowPowerGpu ? 'force_low_power_gpu' : 'force_high_performance_gpu',
+);
 // 不设 disable-direct-composition —— blt 呈现会把多窗口合成串行化到主进程：
 // 开小窗后主窗口 rAF 减半的元凶。保留 flip-model（DComp），它对多窗口是并行呈现。
 app.commandLine.appendSwitch('disable-features',
@@ -334,13 +359,18 @@ app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('enable-features', 'HardwareMediaKeyHandling,MediaSessionService');
 // 注意：不设 disable-frame-rate-limit / disable-gpu-vsync —— 会把呈现改坏（无节流撕裂）。
 
-// 读取渲染模式设置（软件渲染需在 ready 前禁用硬件加速）
-let userSettings = {};
-try {
-  const sp = path.join(app.getPath('userData'), 'settings.json');
-  if (fs.existsSync(sp)) userSettings = JSON.parse(fs.readFileSync(sp, 'utf8')) || {};
-} catch (e) { /* ignore */ }
-if (userSettings.renderMode === 'software') app.disableHardwareAcceleration();
+/* ================= 软件渲染开关：只认命令行，不再读设置文件 =================
+   ★ 真实事故的修复（用户："原始模式下可视化肉眼可见的卡顿"）。
+   旧版 app/index.html 上有个「GPU / 软件」按钮，会把 renderMode 写进 settings.json；
+   而新版主界面已经换成 RhineLabUI 三维终端，**那个按钮在新界面里根本不存在** ——
+   于是这个设置变成只有入口、没有出口的陷阱：用户当初点过一次（本机实测是
+   2026-08-25 留下的 {"renderMode":"software"}），此后每次启动 WebGL 都走软件后端
+   （SwiftShader），三维场景在 CPU 上跑，帧率被彻底锁死。界面上再怎么调画质档
+   都没用，因为瓶颈根本不在画质档，而在"整个场景没用显卡渲染"。
+   现在只认显式命令行 `--software-render`：设置文件里的历史值一律忽略，
+   不让一个已经删掉的按钮继续遥控新界面。 */
+const SOFTWARE_RENDER = process.argv.includes('--software-render');
+if (SOFTWARE_RENDER) app.disableHardwareAcceleration();
 
 let mainWin = null;
 let miniWin = null;
@@ -786,10 +816,17 @@ ipcMain.on('mini-bars', (_e, data) => {
 ipcMain.on('mini-state', (_e, data) => {
   if (miniWin && !miniWin.isDestroyed()) miniWin.webContents.send('mini-meta', data);
 });
-/* 渲染模式（软件模式下次启动生效） */
+/* 渲染模式（旧界面遗留通道）。新版界面已经不用软件渲染了，但仍要"顺手清理"：
+   老用户的 settings.json 里可能还留着 renderMode:'software'，虽然主进程已经不读它，
+   留着会误导后来看这个文件的人（也误导排查"为什么卡"的人）。所以收到切换指令时
+   把这项直接删掉，而不是写回一个再也不会被读取的值。 */
 ipcMain.on('set-render-mode', (_e, mode) => {
-  userSettings.renderMode = mode === 'software' ? 'software' : 'gpu';
+  delete userSettings.renderMode;
   try { fs.writeFileSync(path.join(app.getPath('userData'), 'settings.json'), JSON.stringify(userSettings)); } catch (e) { /* ignore */ }
+  if (mode === 'software') {
+    logMainError('渲染模式', new Error(
+      '旧界面请求切换到软件渲染，已忽略：新版只认命令行 --software-render'));
+  }
 });
 /* GPU 渲染状态自检 + 当前显卡名 */
 ipcMain.handle('get-gpu-status', () => {
