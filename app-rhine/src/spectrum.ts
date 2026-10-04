@@ -23,6 +23,8 @@
  *      柱高**数值**仍完全来自 1.3.0 那条流水线（诊断与播放条读的 `levels` 就是它）。
  */
 
+import { BEAT_VERSION, sampleBeatMap, type BeatMap } from "./beatmap.ts";
+
 export const SPECTRUM_BANDS = 120; // 对数频段数（分析侧，不动）
 /* 柱数是**显示侧**的采样密度，与 120 个分析频段解耦：bar i → 频段区间
    floor(pow(i/BAR_N,0.8)*117)，区间内取平均。150 比 120 多约 1/4 根、每根窄约 1/5，
@@ -48,7 +50,9 @@ const BASS_WIDE_CENTER = 0.12; // 左峰宽丘中心（≈45Hz）
    旧版把它们存在 localStorage 的 `mp_tilt` `mp_bassw2` `mp_jit2` `mp_kick` `mp_peakh` 里。
    用户调过它们（例如 平衡 63、峰高 1.45），所以这里做成**可运行时改的参数对象**，
    启动时由 `player.ts` 的 importLegacyVizSettings() 从旧版存储导入一次；
-   导入不到就用 1.3.0 的默认值（下面 VIZ_DEFAULTS）。 */
+   导入不到就用 1.3.0 的默认值（下面 VIZ_DEFAULTS）。
+   注：观感强化（鼓点灵敏度 / 顶端张力 / 顶端形态）是**独立常量**，见文件下方的
+   KICK_* / TOP_TENSION* / TOP_SPIKE* —— 它们的默认值不等于 1.3.0，置 0 即可回退。 */
 export interface VizParams {
   tilt: number; // 频谱平衡 0~100（越大左侧整体越高）
   bassSigma: number; // 左峰宽丘的 σ（0.020~0.080，越小越窄）
@@ -108,6 +112,143 @@ const KICK_BAND_FROM = 2;
 const KICK_BAND_TO = 16;
 const KICK_BAND_N = KICK_BAND_TO - KICK_BAND_FROM + 1;
 
+/* ============ 观感强化参数（全部独立常量，可单独调节或置 0 回退） ============
+     · KICK_*      —— 鼓点 onset 灵敏度（跟得住高速鼓点）
+     · TOP_TENSION —— 顶端补抖：让高柱有张力 / 抖动（不再被量化抹平）
+     · TOP_SPIKE_* —— 顶端形态：锯齿尖峰（既不是方块、也不是连续曲线）
+   把 TOP_TENSION / TOP_SPIKE 置 0 即回到 1.3.0 的原始观感。 */
+
+/* ★ 鼓点灵敏度：参考电平用**不对称跟随**（上升快、回落也快），
+   阈值之上的部分线性放大 —— 密集的 8 分 / 16 分鼓点也能各自触发到接近满值。 */
+const KICK_REF_ATTACK = 0.30; // ref 上升时的跟随系数
+const KICK_REF_RELEASE = 0.16; // ref 回落时的跟随系数（越大越跟得上快节奏）
+const KICK_RISE_FLOOR = 0.02; // 触发阈值（越低越敏感）
+const KICK_RISE_GAIN = 3.2; // 阈值之上的放大倍数
+
+/* 这两组常量要让 worker 里的分析实现也用到（同一套数值，避免两条路径跑出不同观感）。 */
+export {
+  KICK_BAND_FROM as SPECTRUM_KICK_FROM,
+  KICK_BAND_TO as SPECTRUM_KICK_TO,
+  KICK_REF_ATTACK as SPECTRUM_KICK_REF_ATTACK,
+  KICK_REF_RELEASE as SPECTRUM_KICK_REF_RELEASE,
+  KICK_RISE_FLOOR as SPECTRUM_KICK_FLOOR,
+  KICK_RISE_GAIN as SPECTRUM_KICK_GAIN,
+};
+
+/* ★ 瞬态强调（"精细反映歌曲里的鼓点、音色"）：
+   只靠低频 onset 时，只有底鼓会推起左峰；军鼓 / 踩镲这类**宽带**敲击
+   在显示上几乎看不出来。这里再算一路**谱通量**（spectral flux）：
+     · 对每个分析频段取 m_b − m_b(上一 tick) 的正向增量 → 得到"这一 tick 谁在涨"；
+     · 增量之和做归一化，得到每个频段在本次敲击里占的**份额**；
+     · 再乘一个全局 onset 门（只有真的出现敲击时才抬，持续段不提亮）。
+   于是底鼓抬低频、军鼓抬中频、踩镲抬高频 —— 敲击的**频谱形状**被如实带出来，
+   而不是整排一起亮。门控用与 kick 相同的"不对称跟随 + 低阈值"。 */
+const TRANSIENT_REF_ATTACK = 0.26; // 通量参考电平上升时的跟随系数
+const TRANSIENT_REF_RELEASE = 0.14; // 通量参考电平回落时的跟随系数
+const TRANSIENT_FLOOR = 0.18; // 触发阈值
+const TRANSIENT_GAIN = 2.6; // 阈值之上的放大倍数
+const TRANSIENT_BOOST = 0.62; // 份额换算成"抬多少柱高"的系数（0 = 关闭瞬态强调）
+const TRANSIENT_BANDS_REF = 12; // 份额归一参考段数：通量集中在这个段数上时，每段加满 TRANSIENT_BOOST
+const TRANSIENT_FROM = 1; // 从第几个分析频段开始算（跳过直流附近）
+export {
+  TRANSIENT_REF_ATTACK as SPECTRUM_TR_REF_ATTACK,
+  TRANSIENT_REF_RELEASE as SPECTRUM_TR_REF_RELEASE,
+  TRANSIENT_FLOOR as SPECTRUM_TR_FLOOR,
+  TRANSIENT_GAIN as SPECTRUM_TR_GAIN,
+  TRANSIENT_BOOST as SPECTRUM_TR_BOOST,
+  TRANSIENT_BANDS_REF as SPECTRUM_TR_BANDS_REF,
+  TRANSIENT_FROM as SPECTRUM_TR_FROM,
+};
+
+/* ★ 峰值线衰减（用户 2026-10-04："频谱的回落还是不够干脆"）。
+   诊断结论：柱体**本体的回落非常干脆**（离线观测：敲击峰值 1.0 → 一个 tick 掉到 0.40，
+   半程 0ms、掉到 10% 只用 40ms）—— 拖尾**不在柱体上，在这条峰值线上**。
+   峰值线的语义是"最近一次峰值的指示线"，所以它**必须比柱体慢**（否则和柱顶重合、看不出是两条），
+   原来取 0.97/tick（50Hz）—— 换算成时间常数是**半程 455ms、掉到 10% 要 1.5 秒、5% 要 2 秒**：
+   敲击过去之后，一条水平亮线在空中挂将近两秒，读起来就是"回落不干脆"。
+   改成 0.90/tick：半程 132ms、10% 437ms —— 仍明显慢于柱体（看得清是指示线），
+   但不再是一道 2 秒的残影。置 1 即不回落的旧行为（不推荐）。 */
+const PEAK_DECAY = 0.9;
+
+/* ★ 回落时的插值跨度比例（配合 PEAK_DECAY 一起解决"回落不干脆"）。
+   render() 把"上一个分析 tick → 这个 tick"的柱高差按时间线性铺开 ——
+   上升时这是对的（起势要顺），下降时它会把"一步砸下来"摊成一条 20ms 的斜坡。
+   取 0.6：下落量在跨度的前 60%（12ms）就到位，之后停在终点 —— 触底更干脆，
+   又不会完全取消插值（完全取消会让 20ms/60fps 的错拍重新显形，见 render() 的说明）。 */
+const FALL_INTERP_SPAN = 0.6;
+
+/* ==================== 节拍先验（离线预分析，详见 beatmap.ts） ====================
+   在线的鼓点检测（上面的 KICK_*）是**因果的**：必须先听到、才可能亮。
+   一个分析窗 1024 点 ≈ 21ms，再乘上 worker 往返与 60fps 的绘制节拍，
+   屏幕真正亮起来的时刻比耳朵晚 30~50ms —— 注释里反复出现的"延迟感严重"
+   就是这条链的固有代价，**调参救不了**（参数只改灵敏度，改不了因果性）。
+
+   先验路径不一样：拍点在播放前就算出来了，所以可以在拍点**之前**就升起来。
+   三件事，各自独立、都能单独置 0 回退：
+     · BEAT_PRE_ROLL    提前量（秒）—— 根治感知延迟（常量在 beatmap.ts）；
+     · BEAT_FORM_*      每 4 拍（一小节）换一次柱体形态 —— 从"被动响应"到"编排"；
+     · BEAT_PREHEAT_*   副歌到来前提前扩动态范围 —— 高潮段更有张力。
+   ★ 先验只做"上限抬升"（与在线值取 max），不做替换：
+     预分析失败 / 还没算完 / 用户关掉时这几项全为 0，观感与改动前逐位相同。 */
+const BEAT_PREHEAT_EXPAND = 0.24; // 预热时以 0.5 为中心扩张多少（0 = 关闭）
+const BEAT_PREHEAT_GAIN = 0.05; // 预热时的整体增益（0 = 关闭）
+const BEAT_DOWNBEAT = 0.05; // 小节重音：每小节第一拍给低频段加多少（0 = 关闭）
+/* 每小节换一次的形态表（4 种循环）：
+   ① 柱顶尖峰幅度 ② 尖峰空间频率 ③ 行波空间频率。
+   三者都控制在 ±30% 以内 —— 目的是"这一小节和上一小节不一样"，不是"画面在变形"。 */
+const BEAT_FORM_TIP = [1.0, 1.3, 0.82, 1.12];
+const BEAT_FORM_FREQ = [1.0, 1.22, 0.86, 1.08];
+const BEAT_FORM_JIT = [1.0, 0.88, 1.15, 1.02];
+
+/* ★ 顶端张力：14 级量化会把"小于一级（1/13≈0.077）"的抖动舍掉，于是越高的柱越"死" ——
+   最高的几根常同落在一个级上，顶边成了平顶方块，看着"高耸但呆板、没张力"。
+   做法：在量化**之后**给柱再补一层抖动（幅度随柱高自 TOP_MIX_FROM 起线性增强，
+   矮柱不补、底噪区不会变毛刺），顶端因此重新带上参差的张力。置 0 即回到旧行为。
+   · 幅度由 TOP_TENSION × TOP_TENSION_GAIN 决定，向下能落多深还受 advance() 里的 CEIL_DIP 限制；
+   · 抖动**快慢**由 TOP_TENSION_RATE 决定（独立的快相位，与行波相位解耦）——
+     目标是"低频率、大摆幅"：周期要够长（≥ 0.3 秒）才读得出"柱子砸下来又起来"，
+     太快会退化成哆嗦，太慢则退化成缓慢漂移。 */
+const TOP_TENSION = 0.45; // 顶端补抖强度（0 = 不补）
+const TOP_TENSION_GAIN = 1.2; // 补抖幅度系数（越大顶端摆幅越大）
+const TOP_MIX_FROM = 0.35; // 从这一柱高开始补抖（越低参与补抖的柱越多）
+const TOP_TENSION_RATE = 0.22; // 补抖相位步进（弧度/tick）：越小周期越长、越像"大摆幅"而不是"哆嗦"
+/* 量化前那层行波的余量下限：原式 headroom=(1-v)/0.45 在高柱上趋近 0，
+   给一个下限让中高柱也抖起来（配合上面的量化后补抖）。 */
+const JITTER_HEADROOM_MIN = 0.28;
+
+/* ★ 顶端形态：用户要"不要方块，也不要连续曲线" —— 即顶端要**参差的尖峰**。
+   方块来自 fillRect 的平顶；连续曲线来自把相邻柱连成一条线。
+   这里改成：每根柱顶再叠加一段**小幅高频起伏的尖**（按柱序做确定性伪随机），
+   顶边因此呈锯齿状；同时**不连接**相邻柱（各画各的竖条），避免变成曲线。 */
+const TOP_SPIKE = 0.16; // 顶端尖峰幅度（相对柱高的比例）
+const TOP_SPIKE_FREQ = 2.7; // 尖峰的空间频率（每根柱之间的相位步进，越大越密）
+
+/* ★ 顶端高频抖动（2026-10-03，用户："可以加入高频抖动"）：
+   TOP_TENSION 那一路是**低频率、大摆幅**（周期约 0.57 秒）——读起来是"柱子砸下来又起来"。
+   用户要在这个"大落差"之上再叠一层**快的**，于是另起一路独立相位：
+   周期 ≈ 2π / TOP_SHIMMER_RATE ≈ 3.1 tick ≈ 61ms（约 16Hz），在高柱顶端快速颤动。
+   · 幅度必须够跨过量化级才看得见：显示侧是 14 级分桶绘制的，级距 1/13 ≈ 0.077，
+     取 0.12 —— 顶端能跨 1~2 级，肉眼是"高频细颤"，又不会盖过慢摆幅的落差。
+   · 两个正弦成分（1 : 1.6）叠加，避免单一正弦那种规律感；相邻 tick 的变化量也更大。
+   · 只作用于高柱（与 TOP_TENSION 共用 topMix 权重），矮柱与底噪区不受影响。
+   置 0 即关闭这一层。 */
+const TOP_SHIMMER = 0.12; // 高频抖动幅度（0 = 关闭）
+const TOP_SHIMMER_RATE = 2.05; // 相位步进（弧度/tick）
+const TOP_SHIMMER_SPFREQ = 1.7; // 空间频率（相邻柱之间的相位步进，越大越"沸腾"）
+
+/* ★ 音色灵敏度（2026-10-03，用户："对歌曲的音色要更加敏感"）：
+   频谱的"形状"才是音色，而 1.3.0 的**全局 2.1 次幂**把中高频细电压得几乎看不见
+   （v=0.4 → 0.4^2.1 ≈ 0.15），于是画面上只剩"低频厚、高频薄"一个轮廓，
+   人声的泛音、镲的空气感、弦乐的共振峰全都糊掉了。两个手段，都只动**形状**、
+   不动低频峰的高度（"高耸"仍然由低端的 2.1 次幂保证）：
+     · 频率相关幂次：低端保持 2.1，高端降到 TIMBRE_EXP_TREBLE；
+     · 谱锐化：拿掉一部分邻域均值，让共振峰与谷更分明（作用在对数压缩后的 120 段上）。
+   回退：TIMBRE_EXP_TREBLE = 2.1 且 TIMBRE_SHARPEN = 0 即回到 1.3.0 的观感。 */
+const TIMBRE_EXP_BASS = 2.1; // 低频端幂次（= 1.3.0 原值，别动）
+const TIMBRE_EXP_TREBLE = 1.45; // 高频端幂次（越小，中高频细节越显）
+const TIMBRE_EXP_FROM = 0.22; // 从这一归一化频率起向高频端过渡
+const TIMBRE_SHARPEN = 0.55; // 谱锐化强度（0 = 关闭）
+
 export type SpectrumMode = "mix" | "timbre" | "bars" | "ring" | "wave";
 
 export interface SpectrumPalette {
@@ -146,11 +287,36 @@ export class Spectrum {
   /* 按量化级分桶用的容器（每帧复用，避免每帧新建数组） */
   private buckets: number[][] = Array.from({ length: VIZ_LEVELS }, () => []);
   private jitterPhase = 0;
+  /* 顶端张力的独立快相位：与 jitterPhase 分开，保证补抖在相邻帧之间真的变化
+     （用慢的行波相位补抖会退化成"缓慢漂移"而不是抖动）。 */
+  private topPhase = 0;
+  /* 顶端高频抖动的相位（见 TOP_SHIMMER）：比 topPhase 快约 9 倍，专门做"细颤"那一层 */
+  private shimmerPhase = 0;
+  /* 谱锐化用的中间缓冲（每 tick 复用，不产生垃圾） */
+  private tmpFreq = new Float32Array(SPECTRUM_BANDS);
   private kickEnergy = 0;
   private kickRef = 0;
+  /* 瞬态（谱通量）检测的状态：上一 tick 的原始幅度、本 tick 的正向增量、通量参考电平 */
+  private prevBands = new Float32Array(SPECTRUM_BANDS);
+  private fluxDelta = new Float32Array(SPECTRUM_BANDS);
+  private transientRef = 0;
+  private transientOn = 0; // 本次敲击的强度（0~1）
   private grad: CanvasGradient | null = null;
   private gradKey = "";
   private mode: SpectrumMode = "mix";
+  /* ---- 节拍先验的状态（见 BEAT_FORM_* 的注释） ---- */
+  private beat: BeatMap | null = null;
+  private playhead = -1; // 当前播放位置（秒）；< 0 = 未知（没播 / 探针模式）
+  private bLive = 0; // 这一 tick 先验是否可用（1/0，避免每帧读 null）
+  private bkick = 0; // 预测鼓点（含提前量）
+  private bform = 0; // 形态编号 0~3（每小节变一次）
+  private bInBar = 0; // 拍在小节里的位置 0~3
+  private bPhase = 0; // 拍内相位 0~1
+  private bPreheat = 0; // 副歌预热 0~1
+  private bEnergy = 0; // 先验低频能量 0~1
+  /* 形态 → 绘制参数的两个派生值（每 tick 算一次，绘制里只读） */
+  private formTip = 1;
+  private spikeFreq = TOP_SPIKE_FREQ;
   private palette: SpectrumPalette = {
     light: "#c9a878",
     strong: "#9b7247",
@@ -183,6 +349,48 @@ export class Spectrum {
   setMode(mode: SpectrumMode) {
     this.mode = mode;
   }
+  /** 装一份离线预分析出来的"乐谱"（换曲时调）。传 null 表示没有（退回在线模式）。 */
+  setBeatmap(bm: BeatMap | null) {
+    this.beat = bm && bm.v === BEAT_VERSION ? bm : null;
+    this.bLive = 0;
+    this.bkick = 0;
+    this.bPreheat = 0;
+    this.bform = 0;
+    this.formTip = 1;
+    this.spikeFreq = TOP_SPIKE_FREQ;
+  }
+  /** 当前播放位置（秒）。每个分析 tick 喂一次（player.ts 两侧都喂：定时器与 worker 回包）。 */
+  setPlayhead(t: number) {
+    this.playhead = Number.isFinite(t) && t >= 0 ? t : -1;
+  }
+  /** 每个分析 tick 调一次：把先验算成这一 tick 的几个量（见 advance）。 */
+  private applyBeatPrior() {
+    if (!this.beat || this.playhead < 0) {
+      this.bLive = 0;
+      this.bkick = 0;
+      this.bPreheat = 0;
+      this.bEnergy = 0;
+      this.bInBar = 0;
+      this.bPhase = 0;
+      this.formTip = 1;
+      this.spikeFreq = TOP_SPIKE_FREQ;
+      return;
+    }
+    const s = sampleBeatMap(this.beat, this.playhead);
+    this.bLive = 1;
+    this.bkick = s.kick;
+    this.bform = s.form;
+    this.bInBar = s.inBar;
+    this.bPhase = s.phase;
+    this.bPreheat = s.preheat;
+    this.bEnergy = s.energy;
+    this.formTip = BEAT_FORM_TIP[s.form] ?? 1;
+    this.spikeFreq = TOP_SPIKE_FREQ * (BEAT_FORM_FREQ[s.form] ?? 1);
+    /* ★ 提前点亮就这一行：在线那一路是因果的（最快也要等一个分析窗），
+       先验这路在拍点**之前** BEAT_PRE_ROLL 就开始升。取 max 而不是替换 ——
+       先验错了（歌没算准 / 播放头对不上）时在线那一路仍然兜得住。 */
+    if (this.bkick > this.kickEnergy) this.kickEnergy = this.bkick;
+  }
   /** 供播放条刻度取样（1.3.0 里也是直接读柱高数组） */
   get levels() {
     return this.bars;
@@ -192,9 +400,42 @@ export class Spectrum {
   setAdvanceInterval(ms: number) {
     if (isFinite(ms) && ms > 0) this.advanceIntervalMs = ms;
   }
-  /** 诊断用：归一化后的频段 + 柱高快照 */
+  /** 诊断用：归一化后的频段 + 柱高快照 + 本次敲击强度 */
   snapshot() {
-    return { freq: Array.from(this.freq), bars: Array.from(this.bars), show: Array.from(this.display) };
+    return {
+      freq: Array.from(this.freq),
+      bars: Array.from(this.bars),
+      /* 峰值线（指示线）：回落观测要单独量它 ——
+         "回落干脆不干脆"的拖尾主要出在这条线上，见 PEAK_DECAY 的说明。 */
+      peaks: Array.from(this.peaks),
+      show: Array.from(this.display),
+      transient: this.transientOn,
+      /* 节拍先验的即时量（诊断 / 回归用）：
+         live=0 表示"这一 tick 没有乐谱"，此时下面几个必须全为 0 ——
+         回归脚本靠这条断言"关掉预分析时观感与改动前逐位相同"。 */
+      beat: {
+        live: this.bLive,
+        bpm: this.beat ? Math.round(this.beat.bpm * 10) / 10 : 0,
+        kick: Math.round(this.bkick * 1000) / 1000,
+        form: this.bform,
+        preheat: Math.round(this.bPreheat * 1000) / 1000,
+        energy: Math.round(this.bEnergy * 1000) / 1000,
+      },
+    };
+  }
+  /* 诊断摘要用的固定对象：诊断每帧都要读，不能每帧新建（60fps 下的垃圾量不小） */
+  private beatDiag = { live: 0, bpm: 0, beats: 0, kick: 0, form: 0, preheat: 0, energy: 0 };
+  /** 节拍先验的诊断摘要（几个数而已，供探针每帧核对） */
+  beatInfo() {
+    const d = this.beatDiag;
+    d.live = this.bLive;
+    d.bpm = this.beat ? Math.round(this.beat.bpm * 10) / 10 : 0;
+    d.beats = this.beat ? this.beat.beats.length : 0;
+    d.kick = Math.round(this.bkick * 1000) / 1000;
+    d.form = this.bform;
+    d.preheat = Math.round(this.bPreheat * 1000) / 1000;
+    d.energy = Math.round(this.bEnergy * 1000) / 1000;
+    return d;
   }
   /** 频段映射摘要（Hz）：首段 / 末段 / 低频峰中心。核对"映射是不是 20Hz ~ 0.45×Nyquist"用，
       几个数、不分配数组，可以每帧塞进诊断对象。 */
@@ -221,6 +462,21 @@ export class Spectrum {
     this.display.fill(0);
     this.kickRef = 0;
     this.kickEnergy = 0;
+    this.prevBands.fill(0);
+    this.fluxDelta.fill(0);
+    this.transientRef = 0;
+    this.transientOn = 0;
+    this.shimmerPhase = 0;
+    /* 先验的量一并清掉：换曲时"上一首的拍点"不该再推着这一首的低频走。
+       注意这里**不清** this.beat —— 乐谱由 player 在装好音源后重设，
+       清了反而会在"同一首重播"时白丢一份已经算好的先验。 */
+    this.bLive = 0;
+    this.bkick = 0;
+    this.bPreheat = 0;
+    this.bInBar = 0;
+    this.bPhase = 0;
+    this.formTip = 1;
+    this.spikeFreq = TOP_SPIKE_FREQ;
   }
 
   /* ---------- 分析：Hann 加窗 + Goertzel ---------- */
@@ -258,16 +514,46 @@ export class Spectrum {
     for (let b = 0; b < SPECTRUM_BANDS; b++) {
       this.freq[b] = Math.log10(1 + 100 * Math.min(1, this.bands[b] / mx)) / LOG101;
     }
+    /* ★ 瞬态强调：算谱通量（各频段相对上一 tick 的正向增量），
+       把这次敲击的能量按**频段份额**加回柱高 —— 底鼓抬低频、军鼓抬中频、踩镲抬高频，
+       敲击的频谱形状因此能看出来（只抬受影响的那些频段，不是整排一起亮）。
+       门控是必要的：持续段也有微小通量，不门控会让整幅频谱一直发亮。 */
+    let fluxSum = 0;
+    for (let b = TRANSIENT_FROM; b < SPECTRUM_BANDS; b++) {
+      const dBand = this.bands[b] - this.prevBands[b];
+      const pos = dBand > 0 ? dBand : 0;
+      this.fluxDelta[b] = pos;
+      this.prevBands[b] = this.bands[b];
+      fluxSum += pos;
+    }
+    const flux = fluxSum / Math.max(mx, 1e-9); // 按本帧峰值缩放 → 与音量无关
+    if (this.transientRef <= 0) this.transientRef = flux;
+    const trise = (flux - this.transientRef) / Math.max(this.transientRef, 1e-6);
+    const onset = Math.max(0, Math.min(1, (trise - TRANSIENT_FLOOR) * TRANSIENT_GAIN));
+    this.transientOn = onset;
+    const trRef = flux > this.transientRef ? TRANSIENT_REF_ATTACK : TRANSIENT_REF_RELEASE;
+    this.transientRef += (flux - this.transientRef) * trRef;
+    if (onset > 0 && fluxSum > 0) {
+      /* 份额归一：通量集中在 TRANS_BANDS_REF 根上时，那几根加满 TRANSIENT_BOOST；
+         铺得越开（宽带噪声型敲击）每根加得越少 —— 这正是"冲击的宽窄"。 */
+      const k = (TRANSIENT_BOOST * onset * TRANSIENT_BANDS_REF) / fluxSum;
+      for (let b = TRANSIENT_FROM; b < SPECTRUM_BANDS; b++) {
+        const pos = this.fluxDelta[b];
+        if (pos <= 0) continue;
+        this.freq[b] = Math.min(1, this.freq[b] + pos * k);
+      }
+    }
     // 鼓点：用【未归一化】的低频原始幅度做 onset（归一化后的低频恒等于 1，取差分永远为 0）
-    /* ★ 段位照 1.3.0：第 2–16 带共 15 段（这里曾误用 2–8 共 7 段）——
-       段数变了 onset 的灵敏度和频率范围都会变，鼓点泵动就跟不上拍子。 */
+    /* 段位照 1.3.0：第 2–16 带共 15 段；参考电平用不对称跟随 + 低阈值，
+       密集的 8 分 / 16 分鼓点也能各自触发到接近满值。 */
     let low = 0;
     for (let b = KICK_BAND_FROM; b <= KICK_BAND_TO; b++) low += this.bands[b];
     low /= KICK_BAND_N;
     if (this.kickRef <= 0) this.kickRef = low;
     const rise = (low - this.kickRef) / Math.max(this.kickRef, 1e-6);
-    const kick = Math.max(0, Math.min(1, (rise - 0.08) * 2.2));
-    this.kickRef += (low - this.kickRef) * 0.05;
+    const kick = Math.max(0, Math.min(1, (rise - KICK_RISE_FLOOR) * KICK_RISE_GAIN));
+    const kRef = low > this.kickRef ? KICK_REF_ATTACK : KICK_REF_RELEASE;
+    this.kickRef += (low - this.kickRef) * kRef;
     this.kickEnergy = kick;
     this.freq[SPECTRUM_BANDS] = kick;
   }
@@ -328,9 +614,46 @@ export class Spectrum {
     return s / Math.max(1, b - a);
   }
 
+  /* ---------- 音色灵敏度：谱锐化（见 TIMBRE_SHARPEN 的说明） ----------
+     对数压缩后的 120 段里，"音色"就藏在相邻段的相对高低里：共振峰是局部凸起、
+     谐波间隙是局部凹陷。这里把每段相对"三点平滑值"的偏离放大一点：
+       f' = f + K·(f − (f₋₁ + 2f + f₊₁)/4)
+     凸起更凸、凹陷更凹 → 峰谷更分明，音色差异因此更容易分辨。
+     ★ 只作用于 120 个分析频段（不含 freq[SPECTRUM_BANDS] 那个 kick 值），
+     并且每 tick 都从"本 tick 新算出来的值"重算，不会跨帧累积。
+     ★ 放在 advance() 开头调用，于是**同步路径与 worker 路径共用这一层** ——
+     不用再去 player.ts 的 worker 源码模板里复刻一遍（少一处漂移风险）。 */
+  private enhanceTimbre() {
+    if (TIMBRE_SHARPEN <= 0) return;
+    const f = this.freq;
+    const s = this.tmpFreq;
+    const B = SPECTRUM_BANDS;
+    for (let b = 0; b < B; b++) s[b] = f[b];
+    for (let b = 0; b < B; b++) {
+      const a = s[b > 0 ? b - 1 : 0];
+      const c = s[b < B - 1 ? b + 1 : B - 1];
+      const sm = (a + 2 * s[b] + c) * 0.25;
+      const v = s[b] + (s[b] - sm) * TIMBRE_SHARPEN;
+      f[b] = v < 0 ? 0 : v > 1 ? 1 : v;
+    }
+  }
+
   /* ---------- 柱高流水线（★ 逐行照 1.3.0，不做任何平滑/降噪/调优） ---------- */
   private advance() {
     const n = BAR_N;
+    /* ★ 音色灵敏度：先对 120 个分析频段做谱锐化（见 enhanceTimbre）——
+       放在这里，同步路径与 worker 路径就都走到了，不用改 player.ts 里的 worker 模板。 */
+    this.enhanceTimbre();
+    /* ★ 节拍先验：必须在读 kickEnergy 之前算（它会把 kickEnergy 抬到提前量上）。 */
+    this.applyBeatPrior();
+    const preheat = this.bPreheat;
+    /* ★ 小节重音：只在"先验可用"时才算 —— 否则 bInBar/bPhase 恒为 0，
+       会把"没有乐谱"误读成"每时每刻都是小节头"，低频被无脑加 5%。 */
+    const downbeat =
+      this.bLive && this.bInBar === 0 && this.bPhase < 0.35
+        ? 1 - this.bPhase / 0.35
+        : 0;
+    const formJit = this.bLive ? BEAT_FORM_JIT[this.bform] ?? 1 : 1;
     const tilt = (50 - vizParams.tilt) / 50;
     const bars = this.bars;
     /* 插值的起点：这一 tick 之前屏幕上是多少（见 render() 的说明） */
@@ -338,17 +661,42 @@ export class Spectrum {
     for (let i = 0; i < n; i++) {
       let v = this.sampleBand(i, n);
       v *= Math.pow(5, tilt * (1 - i / n)); // 倾斜补偿（低频端最高 5×）
-      v = Math.pow(Math.min(1, v), 2.1); // 幂次曲线：拉大高低差
+      /* ★ 幂次改成**频率相关**（见 TIMBRE_EXP_* 的说明）：低端 2.1（高耸感来自它），
+         高端降到 TIMBRE_EXP_TREBLE，让泛音 / 齿音 / 空气感显形。
+         两个值相等时与 1.3.0 的全局 2.1 次幂逐位相同。 */
+      const tw = Math.max(0, Math.min(1, (i / n - TIMBRE_EXP_FROM) / (1 - TIMBRE_EXP_FROM)));
+      const pexp = TIMBRE_EXP_BASS - (TIMBRE_EXP_BASS - TIMBRE_EXP_TREBLE) * tw;
+      v = Math.pow(Math.min(1, v), pexp); // 幂次曲线：拉大高低差
+      /* ★ 副歌预热（先验）："接下来 2.5 秒明显更响"时提前把动态范围撑开 ——
+         以 0.5 为中心做扩张（高的更高、低的更低）＋ 一点整体增益。
+         画面张力比声音早到位，高潮进来时就不会显得"突然一下"。 */
+      if (preheat > 0) {
+        v = 0.5 + (v - 0.5) * (1 + BEAT_PREHEAT_EXPAND * preheat);
+        v *= 1 + BEAT_PREHEAT_GAIN * preheat;
+        if (v < 0) v = 0;
+        else if (v > 1) v = 1;
+      }
       // 鼓点用【乘法泵动】：加法会把十几根一起顶过 1.0 钳住，量化后顶端变成平直方块
       const pumpW = Math.exp(-Math.pow((i / n - 0.07) / 0.1, 2));
       v *= 1 - pumpW * vizParams.kickPump * (1 - this.kickEnergy);
       v += this.kickEnergy * 0.06 * pumpW;
+      /* ★ 小节重音：每小节第一拍的前 35% 给低频段一点额外推力。
+         这是"编排"最直观的一处 —— 画面在小节头上有个明确的重音，
+         而不是全程匀速起伏（没有乐谱时它恒为 0，观感不变）。 */
+      if (downbeat > 0 && i / n < 0.25) v *= 1 + BEAT_DOWNBEAT * downbeat;
       // 抖动：正弦行波（空间频率 JITTER_FREQ、相位每拍 +JITTER_STEP），
-      // 向上幅度按剩余余量缩放，避免峰心两侧被一起钳住而失去针形
-      const ph = i * jitterFreq() * Math.PI * 2 + this.jitterPhase;
-      const headroom = Math.max(0, Math.min(1, (1 - v) / 0.45));
+      // 向上幅度按剩余余量缩放（★但给了下限 JITTER_HEADROOM_MIN，见常量说明）。
+      // ★ 空间频率乘 formJit：每小节换一次抖动纹理（BEAT_FORM_JIT）。
+      const ph = i * jitterFreq() * formJit * Math.PI * 2 + this.jitterPhase;
+      const headroom = Math.max(
+        JITTER_HEADROOM_MIN,
+        Math.max(0, Math.min(1, (1 - v) / 0.45))
+      );
       v *= 1 + Math.sin(ph) * jitterAmp() * headroom;
       v = Math.max(0.02, Math.min(1, v));
+      /* ★ 量化（14 级）会把"小于一级"的抖动四舍五入掉 —— 一级 = 1/13 ≈ 0.077，
+         所以 v 越接近 1、抖动越看不见，几根相邻柱同落在一个级上就成了平顶方块。
+         这里在量化**之后**再补一层"越顶端越明显"的抖动（见 TOP_TENSION 常量）。 */
       v = Math.round(v * (VIZ_LEVELS - 1)) / (VIZ_LEVELS - 1); // 14 级量化（阶梯感）
       // 量化后补一层"单边向下"的颤动：满高条的顶端不会看着是死的
       v *= 1 - jitterWobble() * (0.5 - 0.5 * Math.sin(ph));
@@ -356,10 +704,43 @@ export class Spectrum {
       const atk = 0.7 - 0.2 * (i / n);
       const rel = 0.58 + 0.22 * (i / n);
       bars[i] = v > bars[i] ? bars[i] + (v - bars[i]) * atk : bars[i] + (v - bars[i]) * rel;
-      // 峰值线按分析节拍衰减：放渲染循环里会随帧率变化
-      this.peaks[i] = Math.max(this.peaks[i] * 0.97, bars[i]);
+      /* ★ 顶端张力叠在**一阶跟随之后**：直接作用在屏幕柱高上，不会被跟随器平滑掉。
+         相位用独立的快相位 topPhase（TOP_TENSION_RATE 弧度/tick），保证相邻帧真的在变。 */
+      const topMix = Math.max(0, (bars[i] - TOP_MIX_FROM) / (1 - TOP_MIX_FROM));
+      if (topMix > 0) {
+        const qp = i * TOP_SPIKE_FREQ * Math.PI * 2 + this.topPhase;
+        /* 目标不是把柱子推满，而是让它在上沿**大幅上落**。两个钳位配合：
+             · CEIL_TOP：抖动后允许到达的最高值。压在 0.97（而非 1.00），
+               高柱就不会"一直顶满"；真正要顶满的鼓点由 kick 泵动那一路去顶。
+             · CEIL_DIP：向下最多落多深。这是"落差"的物理上限 ——
+               设小了（如 0.12）顶端只会微颤，设大了才砸得下来。
+             两侧都按实际余量收缩，所以矮柱不会被误伤。 */
+        const CEIL_TOP = 0.97; // 抖动后允许到达的最高值
+        const CEIL_DIP = 0.45; // 向下最多落这么深（决定"落差"上限）
+        const qBipolar = Math.sin(qp) * 0.55 + Math.sin(qp * 2.7 + 1.1) * 0.45;
+        const amp = TOP_TENSION * TOP_TENSION_GAIN * topMix;
+        const upRoom = Math.max(0, CEIL_TOP - bars[i]);
+        const downRoom = Math.max(0, Math.min(CEIL_DIP, bars[i] - 0.02));
+        const d = qBipolar >= 0
+          ? Math.min(qBipolar * amp, upRoom)
+          : Math.max(qBipolar * amp, -downRoom);
+        bars[i] = Math.max(0.02, Math.min(1, bars[i] + d));
+        /* ★ 高频抖动（用户："可以加入高频抖动"）：叠在慢摆幅之上的另一路快相位。
+           慢的那路负责"砸下来又起来"的大落差，这一路负责顶端持续细颤 ——
+           两者周期差约 9 倍，合起来就是"大幅度 + 高频"的抖动。
+           信号是两个正弦的混合（1 : 1.6），两个周期不成整数倍，颤动不会显出规律。 */
+        if (TOP_SHIMMER > 0) {
+          const sp = i * TOP_SHIMMER_SPFREQ * Math.PI * 2 + this.shimmerPhase;
+          const sh = Math.sin(sp) * 0.62 + Math.sin(sp * 1.6 + 0.7) * 0.38;
+          bars[i] = Math.max(0.02, Math.min(1, bars[i] + sh * TOP_SHIMMER * topMix));
+        }
+      }
+      // 峰值线按分析节拍衰减：放渲染循环里会随帧率变化（系数见 PEAK_DECAY 的说明）
+      this.peaks[i] = Math.max(this.peaks[i] * PEAK_DECAY, bars[i]);
     }
     this.jitterPhase += jitterStep();
+    this.topPhase += TOP_TENSION_RATE;
+    this.shimmerPhase += TOP_SHIMMER_RATE;
     this.lastAdvanceAt = performance.now();
   }
 
@@ -375,6 +756,17 @@ export class Spectrum {
       this.gradKey = key;
     }
     return this.grad;
+  }
+  /* ★ 顶端尖峰：给每根柱顶叠一段**确定性的**小幅起伏，让顶边呈锯齿状。
+     为什么不靠"随机"：随机会让同一帧重画两次都不一样（60fps 下看着像噪点在跳），
+     这里用柱序的相位做伪随机，**同一根柱的尖峰形状是稳定的**，只有柱高在动。
+     为什么不做成曲线：这里只画"每根柱自己的一小段竖条"（各画各的、不连线），
+     所以既不会有 fillRect 的平顶方块，也不会连成一条平滑曲线。 */
+  private topSpike(i: number) {
+    /* ★ 用 spikeFreq 而不是写死的 TOP_SPIKE_FREQ：有乐谱时它每小节换一次
+       （BEAT_FORM_FREQ），锯齿的疏密随小节变化；没有乐谱时恒等于原值。 */
+    const f = this.spikeFreq;
+    return Math.sin(i * f) * 0.6 + Math.sin(i * f * 1.7 + 1.3) * 0.4;
   }
   private drawBars(ctx: CanvasRenderingContext2D, w: number, h: number) {
     const gap = w / BAR_N;
@@ -397,8 +789,25 @@ export class Spectrum {
       const bh = Math.max(2, v * (h - 8));
       ctx.globalAlpha = 0.45 + 0.55 * v;
       for (let n = 0; n < list.length; n++) {
-        const x = list[n] * gap + (gap - bw) / 2;
+        const i = list[n];
+        const x = i * gap + (gap - bw) / 2;
         ctx.fillRect(x, h - bh, bw, bh);
+      }
+    }
+    /* ★ 顶端尖峰层：在每根柱顶再补一小段竖条，高度 = 柱高 × 尖峰幅度 × 确定性伪随机。
+       只对"有实际高度"的柱画（矮柱不画，免得底噪区变成一排毛刺）。
+       这一层用同一 fillStyle，只改 globalAlpha —— 与上面按级分桶同样的省状态切换做法。 */
+    if (TOP_SPIKE > 0) {
+      ctx.globalAlpha = 0.78;
+      const maxBody = h - 8;
+      for (let i = 0; i < BAR_N; i++) {
+        const v = values[i];
+        if (v < 0.12) continue; // 太矮的柱不加尖，避免底部尽是碎刺
+        const bodyH = v * maxBody;
+        // ★ formTip：尖峰幅度每小节换一次（BEAT_FORM_TIP）
+        const tip = Math.max(1, bodyH * TOP_SPIKE * this.formTip * (0.5 + 0.5 * this.topSpike(i)));
+        const x = i * gap + (gap - bw) / 2;
+        ctx.fillRect(x, h - bodyH - tip, bw, tip);
       }
     }
     // 峰值线：一条 fillStyle 画完（都在同一高度带里，按行合并）
@@ -427,6 +836,12 @@ export class Spectrum {
       ctx.fillStyle = t < 0.14 ? gLow : t < 0.6 ? gMid : this.makeGrad(ctx, h);
       ctx.globalAlpha = 0.45 + 0.55 * v;
       ctx.fillRect(x, h - bh, bw, bh);
+      // 顶端尖峰层：与 drawBars 同一套（见那边的说明）
+      if (TOP_SPIKE > 0 && v >= 0.12) {
+        const tip = Math.max(1, bh * TOP_SPIKE * this.formTip * (0.5 + 0.5 * this.topSpike(i)));
+        ctx.globalAlpha = 0.78;
+        ctx.fillRect(x, h - bh - tip, bw, tip);
+      }
       ctx.globalAlpha = 0.85;
       ctx.fillRect(x, h - Math.max(2, this.peaks[i] * (h - 8)) - 3, bw, 2);
     }
@@ -493,11 +908,24 @@ export class Spectrum {
       而柱高数值本身仍是 1.3.0 流水线的输出（诊断与播放条读的还是 `levels` / `bars`）。 */
   render(_dt: number) {
     const span = this.advanceIntervalMs;
-    const alpha = span > 0 ? Math.min(1, (performance.now() - this.lastAdvanceAt) / span) : 1;
+    const elapsed = span > 0 ? Math.min(1, (performance.now() - this.lastAdvanceAt) / span) : 1;
+    /* ★ 上升 / 下降用不同的插值进度（用户 2026-10-04："频谱的回落还是不够干脆"）。
+       柱体本体的回落已经很脆（一个 tick 掉 60%），但这段"上一个 tick → 这个 tick"的
+       线性插值会把这一整段落**摊满 20ms** —— 屏幕上看到的就是一条平滑的斜坡，
+       把"一步砸下来"读成了"慢慢滑下来"。
+       所以让**下降**用更短的有效跨度（FALL_INTERP_SPAN 的比例）：同样 20ms 内，
+       下落量在更早的时刻就到位，触底更利落；**上升**仍走满跨度，保持起势的顺滑。
+       两条路径的柱高数值都没变，只改"什么时候把它画出来"。 */
+    const up = elapsed;
+    const down = Math.min(1, elapsed / FALL_INTERP_SPAN);
     const prev = this.prevBars;
     const disp = this.display;
     const cur = this.bars;
-    for (let i = 0; i < BAR_N; i++) disp[i] = prev[i] + (cur[i] - prev[i]) * alpha;
+    for (let i = 0; i < BAR_N; i++) {
+      const from = prev[i];
+      const to = cur[i];
+      disp[i] = from + (to - from) * (to >= from ? up : down);
+    }
     this.draw();
   }
   /** 分析节拍：喂一段时域数据（同步路径；worker 可用时走 applyBands） */
@@ -518,7 +946,9 @@ export class Spectrum {
     let live = false;
     for (let i = 0; i < BAR_N; i++) {
       this.bars[i] *= 0.9;
-      this.peaks[i] *= 0.94;
+      /* 与 PEAK_DECAY 同一套口径：峰值线在停播时也照着 0.90 收，
+         别再用另一个 0.94 —— 两处不一致会让"停播后残留多久"变得没法预期。 */
+      this.peaks[i] *= PEAK_DECAY;
       if (this.bars[i] > 0.01) live = true;
     }
     this.kickEnergy = 0;

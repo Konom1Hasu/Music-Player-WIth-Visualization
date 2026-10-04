@@ -8,6 +8,19 @@ import {
   SPECTRUM_BANDS,
   SPECTRUM_F_MIN,
   SPECTRUM_F_MAX_RATIO,
+  SPECTRUM_KICK_FROM,
+  SPECTRUM_KICK_TO,
+  SPECTRUM_KICK_REF_ATTACK,
+  SPECTRUM_KICK_REF_RELEASE,
+  SPECTRUM_KICK_FLOOR,
+  SPECTRUM_KICK_GAIN,
+  SPECTRUM_TR_REF_ATTACK,
+  SPECTRUM_TR_REF_RELEASE,
+  SPECTRUM_TR_FLOOR,
+  SPECTRUM_TR_GAIN,
+  SPECTRUM_TR_BOOST,
+  SPECTRUM_TR_BANDS_REF,
+  SPECTRUM_TR_FROM,
   vizParams,
   setVizParams,
   clampVizParams,
@@ -17,6 +30,17 @@ import {
   type SpectrumPalette,
   type SpectrumMode,
 } from "./spectrum";
+import {
+  beatmapOf,
+  hasBeatmap,
+  requestBeatmaps,
+  requestBeatmapNow,
+  setBeatmapHooks,
+  setBeatmapEnabled,
+  beatmapEnabled,
+  beatmapStatus,
+  type BeatMap,
+} from "./beatmap";
 
 /* ---------- 可视化参数：默认 1.3.0 原值，启动时可从旧版导入一次 ----------
    旧版播放器的调音面板把 平衡/峰宽/抖动/鼓点/峰高 存在 localStorage 的 mp_* 里，
@@ -136,6 +160,10 @@ export interface Song {
   localPath?: string;
   missing?: boolean;
   triedHeal?: boolean;
+  /* 离线预分析出来的"乐谱"（节拍网格 + 能量包络，见 beatmap.ts）。
+     ★ 它是**派生数据**：算不出来就 undefined，可视化退回纯在线模式，
+       绝不能参与任何"能不能播"的判断 —— 那一类判断只看音源。 */
+  bm?: BeatMap | null;
 }
 
 const desktop = (window as any).desktop as
@@ -187,6 +215,29 @@ let pendingSeek = 0;
 let posSavedAt = 0;
 const audio = new Audio();
 audio.preload = "metadata";
+/* ★ 变速必须"保音调"（time-stretch 而不是 resample）。
+   两个属性名都要设：Chromium 认 `preservesPitch`，而 webkit 内核 / 旧版 Electron
+   只认 `webkitPreservesPitch`。不显式打开的话，0.75× 会明显发闷、1.5× 会变成"花栗鼠"
+   —— 用户听播客/有声书最常用的就是这两档，观感差距极大。
+   这里显式设 true，并在设置面板把结果读出来给用户看（见 rateToolsMarkup），
+   因为"浏览器默认值"是随版本变化的，不能靠猜。 */
+function applyPreservePitch() {
+  let supported = false;
+  try {
+    if ("preservesPitch" in audio) {
+      (audio as any).preservesPitch = true;
+      supported = true;
+    }
+    if ("webkitPreservesPitch" in audio) {
+      (audio as any).webkitPreservesPitch = true;
+      supported = true;
+    }
+  } catch {
+    /* ignore */
+  }
+  return supported;
+}
+const PRESERVE_PITCH_SUPPORTED = applyPreservePitch();
 const listeners: (() => void)[] = [];
 
 export function onLibraryChange(fn: () => void) {
@@ -921,6 +972,94 @@ async function loadBiliAudio(s: Song, autoplay: boolean) {
   loadedId = s.id;
   if (autoplay) audio.play().catch(() => {});
 }
+/** 系统设置里的"音频质量"一行：把几件"默认行为不透明"的事摊开给用户看。
+    为什么需要这一行：
+      · 变速是否保音调（preservesPitch）是**浏览器默认值**，随版本会变，
+        而且用户完全无从得知 —— 0.75× 发闷、1.5× 变尖时只会以为"这软件不行"；
+      · 频谱要接管音频图（Web Audio 的 source → analyser → destination），
+        这件事值得写清楚，否则用户无法判断音质有没有被牺牲；
+        顺手讲明白"接管后还能做什么优化"（只剩采样率对齐）；
+      · 如果频谱因为环境原因起不来，原因必须可见（原来是彻底静默的）。 */
+export function audioQualityMarkup(): string {
+  return (
+    `<label><div><strong>PITCH ／ TIME-STRETCH</strong><span>` +
+    `变速不变调：0.75× 不发闷、1.5× 不变尖` +
+    `</span></div>` +
+    `<span id="aq-pitch" class="settings-value">读取中…</span></label>` +
+      `<label><div><strong>ANALYSER ROUTING</strong><span>` +
+    `频谱分析链路状态。采样率跟随音频设备` +
+    `</span></div>` +
+    `<span id="aq-route" class="settings-value">读取中…</span></label>` +
+    `<label><div><strong>COVER ACCENT</strong><span>` +
+    `用封面主色作为强调色` +
+    `</span></div>` +
+    `<input type="checkbox" id="aq-cover-accent" ${coverAccentOn ? "checked" : ""}/><i class="toggle"></i></label>` +
+      `<label><div><strong>BEAT PRE-ANALYSIS</strong><span>` +
+      `播放前离线分析整首（后台跑，不影响播放）：鼓点提前点亮、每 4 拍换形态、副歌预热` +
+      `</span></div>` +
+    `<span id="aq-beatmap" class="settings-value">读取中…</span>` +
+    `<input type="checkbox" id="aq-beatmap-toggle" ${beatEnabledPref ? "checked" : ""}/><i class="toggle"></i></label>`
+  );
+}
+/** 填充 audioQualityMarkup() 里的两个占位。打开设置面板后调一次。 */
+export function fillAudioQualityInfo() {
+  const pitch = document.querySelector<HTMLElement>("#aq-pitch");
+  if (pitch) {
+    if (PRESERVE_PITCH_SUPPORTED) {
+      // 再读一次真实值：属性可写、也读得出来，才是真的生效
+      const v = (audio as any).preservesPitch ?? (audio as any).webkitPreservesPitch;
+      pitch.textContent = v === false ? "⚠ 未能启用" : "✓ 已启用（保音调）";
+    } else {
+      pitch.textContent = "⚠ 此环境不支持";
+    }
+  }
+  const route = document.querySelector<HTMLElement>("#aq-route");
+  if (route) {
+    if (vizDenied) {
+      route.textContent = "频谱未启动";
+      route.title = "原因：" + (vizDenyReason || "未知") + "（播放不受影响）";
+    } else if (analyserNode && actx) {
+      const khz = (actx.sampleRate / 1000).toFixed(1);
+      route.textContent = "已接入 · " + khz + "kHz";
+      route.title =
+        `分析链路已建立：采样率跟随音频设备（${khz}kHz），避免与音源对不齐时多一级重采样。` +
+        `注意 Web Audio 图必须连到 destination，否则既无声也无频谱。`;
+    } else {
+      route.textContent = "尚未启用";
+      route.title = "首次播放时会建立分析链路";
+    }
+  }
+  fillBeatmapInfo();
+}
+/** 预分析这一行的状态：有没有乐谱、这首的 BPM、队列里还剩几首。
+    ★ 为什么要显示：这个功能"看不见"——算没算出来、算得对不对，用户无从判断。
+      把 BPM 写出来，用户一眼就能核（听感对不上就是算错了，而不是"软件玄学"）。 */
+function fillBeatmapInfo() {
+  const el = document.querySelector<HTMLElement>("#aq-beatmap");
+  if (!el) return;
+  if (!beatEnabledPref) {
+    el.textContent = "已关闭";
+    el.title = "关掉后可视化退回纯在线模式（鼓点只能被动响应，会有约 30ms 的感知延迟）";
+    return;
+  }
+  const s = currentSong();
+  const bm = beatmapOf(s);
+  const st = beatmapStatus();
+  if (bm) {
+    const n = bm.beats.length;
+    el.textContent = bm.bpm > 0 ? `✓ ${bm.bpm.toFixed(1)} BPM · ${n} 拍` : `✓ 包络已就绪（无稳定节拍）`;
+    el.title =
+      `《${s?.title || ""}》已分析：${bm.dur.toFixed(1)} 秒、` +
+      (bm.bpm > 0 ? `${bm.bpm.toFixed(1)} BPM（拍长 ${bm.period.toFixed(3)} 秒）、${n} 个拍点。` : "这首歌没有稳定的节拍网格，只用了响度包络做副歌预热。") +
+      ` 后台队列还有 ${st.queued} 首待分析。`;
+  } else if (st.busy) {
+    el.textContent = "分析中…";
+    el.title = "这首歌正在后台分析（不占用播放，算完自动生效）";
+  } else {
+    el.textContent = "尚未分析";
+    el.title = hasBeatmap(s) ? "" : "开始播放后会在后台分析当前与后面两首";
+  }
+}
 /** 系统设置里的"封面维护"一行：一键重读全部封面。
     复用 .settings-list label 那套行式版式（和 REDUCED MOTION / 播放行为三项一致）。 */
 export function coverToolsMarkup(): string {
@@ -1067,6 +1206,10 @@ function selectSong(id: string, autoplay = false) {
   invalidatePrefetch();   // 换了歌，上一轮的预取结论作废
   loadSongAudio(s, autoplay);
   spectrum?.resetPeaks();
+  /* 换曲 → 换乐谱：库里已经算好的那份立刻装上，没算过的排进后台队列。
+     ★ 顺序有讲究：resetPeaks 之后才 setBeatmap，否则"上一首的拍点"
+       会推着这一首刚清空的低频走。 */
+  refreshBeatmap();
   renderNow();
   // 让三维档案阵列与详情区跟上正在播放的这一首（播放列表与档案阵列是同一份数据）
   const index = songs.findIndex((x) => x.id === id);
@@ -1845,6 +1988,10 @@ function renderNow() {
   const kicker = document.querySelector<HTMLElement>(".detail-content .song-mode-kicker");
   if (kicker && songs.length)
     kicker.textContent = `${audio.paused ? "READY" : "PLAYING"} · ${MODE_EN[mode] ?? "LOOP"}`;
+  /* 封面换了就重算强调色。放在 renderNow 里是"最省心"的挂点 ——
+     换歌、改封面、收藏、暂停/播放都会经过这里，而 refreshCoverAccent 自带指纹判重，
+     封面没变时只是比一次字符串，几乎零开销。 */
+  refreshCoverAccent();
   renderList();
 }
 
@@ -1877,15 +2024,22 @@ function initSpectrumWorker() {
   try {
     const src = `
       const N = ${SPECTRUM_WINDOW}, B = ${SPECTRUM_BANDS}, LOG101 = Math.log10(101);
-      /* 频段映射照 1.3.0：fMin = 20Hz、fMax = 0.45 × Nyquist（随采样率变）；
-         鼓点 onset 取第 2–16 带共 15 段 —— 这两条以前都和原版不一致。 */
+      /* 频段映射照 1.3.0：fMin = 20Hz、fMax = 0.45 × Nyquist（随采样率变）。
+         鼓点段位、瞬态参数全部从 spectrum.ts 插值进来 —— 两条分析路径必须同参数，
+         否则 worker 生效时观感会和同步路径不一致。 */
       const F_MIN = ${SPECTRUM_F_MIN}, F_MAX_RATIO = ${SPECTRUM_F_MAX_RATIO};
+      const K_FROM = ${SPECTRUM_KICK_FROM}, K_TO = ${SPECTRUM_KICK_TO}, K_N = K_TO - K_FROM + 1;
+      const K_ATK = ${SPECTRUM_KICK_REF_ATTACK}, K_REL = ${SPECTRUM_KICK_REF_RELEASE};
+      const K_FLOOR = ${SPECTRUM_KICK_FLOOR}, K_GAIN = ${SPECTRUM_KICK_GAIN};
+      const T_ATK = ${SPECTRUM_TR_REF_ATTACK}, T_REL = ${SPECTRUM_TR_REF_RELEASE};
+      const T_FLOOR = ${SPECTRUM_TR_FLOOR}, T_GAIN = ${SPECTRUM_TR_GAIN};
+      const T_BOOST = ${SPECTRUM_TR_BOOST}, T_REF = ${SPECTRUM_TR_BANDS_REF}, T_FROM = ${SPECTRUM_TR_FROM};
       const hann = new Float32Array(N);
       for (let i = 0; i < N; i++) hann[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (N - 1)));
-      let bandK = null, sr = 0, kickRef = 0;
-      /* ★ 加窗后的缓冲：每 tick 只乘一遍（复用同一块，不产生垃圾）。
-         原来 \`td[i] * hann[i]\` 写在每个频段的内层循环里 —— 120 段 × 1024 点
-         等于同一件事被算 12 万次、还多读 12 万次 hann 数组。乘积顺序不变，结果逐位相同。 */
+      let bandK = null, sr = 0, kickRef = 0, transRef = 0;
+      const prevMags = new Float32Array(B);
+      const fluxPos = new Float32Array(B);
+      /* 加窗后的缓冲：每 tick 只乘一遍（复用同一块，不产生垃圾）。 */
       const tw = new Float32Array(N);
       onmessage = (e) => {
         const t0 = performance.now();
@@ -1910,14 +2064,34 @@ function initSpectrumWorker() {
         }
         const out = new Float32Array(B + 1);
         for (let b = 0; b < B; b++) out[b] = Math.log10(1 + 100 * Math.min(1, mags[b] / mx)) / LOG101;
-        /* 鼓点：1.3.0 用第 2–16 带共 15 段（旧实现误用 2–8 共 7 段，泵动跟不上拍子） */
+        /* 瞬态强调：谱通量按频段份额加回柱高（与 Spectrum.analyze 同一算法）。 */
+        let fluxSum = 0;
+        for (let b = T_FROM; b < B; b++) {
+          const d = mags[b] - prevMags[b];
+          const pos = d > 0 ? d : 0;
+          fluxPos[b] = pos;
+          prevMags[b] = mags[b];
+          fluxSum += pos;
+        }
+        const flux = fluxSum / Math.max(mx, 1e-9);
+        if (transRef <= 0) transRef = flux;
+        const trise = (flux - transRef) / Math.max(transRef, 1e-6);
+        const onset = Math.max(0, Math.min(1, (trise - T_FLOOR) * T_GAIN));
+        transRef += (flux - transRef) * (flux > transRef ? T_ATK : T_REL);
+        if (onset > 0 && fluxSum > 0) {
+          const kk = (T_BOOST * onset * T_REF) / fluxSum;
+          for (let b = T_FROM; b < B; b++) {
+            if (fluxPos[b] > 0) out[b] = Math.min(1, out[b] + fluxPos[b] * kk);
+          }
+        }
+        /* 鼓点：低频段 onset（与 Spectrum.analyze 同一公式）。 */
         let low = 0;
-        for (let b = 2; b < 17; b++) low += mags[b];
-        low /= 15;
+        for (let b = K_FROM; b <= K_TO; b++) low += mags[b];
+        low /= K_N;
         if (kickRef <= 0) kickRef = low;
         const rise = (low - kickRef) / Math.max(kickRef, 1e-6);
-        out[B] = Math.max(0, Math.min(1, (rise - 0.08) * 2.2));
-        kickRef += (low - kickRef) * 0.05;
+        out[B] = Math.max(0, Math.min(1, (rise - K_FLOOR) * K_GAIN));
+        kickRef += (low - kickRef) * (low > kickRef ? K_ATK : K_REL);
         postMessage(out, [out.buffer]);
         // 时域缓冲还回去，下一帧继续用同一块内存（不产生垃圾）
         postMessage({ __td: td, ms: performance.now() - t0 }, [td.buffer]);
@@ -1937,6 +2111,8 @@ function initSpectrumWorker() {
       /* ★ 回包**立刻**出图，不等下一帧 rAF：原来在渲染循环里消费 pendingFreq，
          平均要多等半帧（≈8ms）、最坏一帧（16.7ms）。50Hz 的节拍下这一等就是可见的滞后。 */
       if (spectrum && pendingFreq) {
+        /* 与 analysisTick 里同一条：先验按**当前**播放头取样，回包立刻出图也不能漏 */
+        spectrum.setPlayhead(audio.currentTime || 0);
         spectrum.applyBands(pendingFreq);
         dataAgeMs = Math.max(0, performance.now() - pendingSentAt);
         pendingFreq = null;
@@ -1988,6 +2164,9 @@ function stopVizAnalysis() {
    ★ 原版 drawViz() 就是每 20ms 做这一件事（requestSpectrum + computeBars），这里保持一致。 */
 function analysisTick() {
   vizTimer = null;
+  /* ★ 播放头 = 先验的取样基准，每个 tick 喂一次。
+     worker 回包那条路（onmessage 里立刻出图）也要喂 —— 它不走这个 tick。 */
+  if (spectrum) spectrum.setPlayhead(audio.currentTime || 0);
   if (!vizAnalysing()) return;
   /* 诊断：分析 tick 的实测频率（应 ≈50Hz；被节流 / 起不来时这里立刻看出来） */
   vizTickCount++;
@@ -2077,36 +2256,160 @@ function spectrumPalette(): Partial<SpectrumPalette> {
     : { light: "#c9a878", strong: "#9b7247", base: "#252820", ring: "#9b7247" };
 }
 
+/* ================= 队列级频谱预分析（"乐谱先验"） =================
+   在线的鼓点检测是**因果的**：先听到、才可能亮。一个分析窗 1024 点 ≈ 21ms，
+   加上 worker 往返与 60fps 的绘制节拍，屏幕比耳朵晚 30~50ms —— 这个延迟
+   **调参救不了**（参数只改灵敏度，改不了因果性），只能靠"提前知道"。
+   所以：播放前把整首歌离线过一遍（8kHz 单声道 + 16 段 Goertzel，见 beatmap.ts），
+   得到节拍网格与能量包络，播放时按播放头查表。三件可见的收益：
+     · 鼓点在拍点**之前** 28ms 就开始升（BEAT_PRE_ROLL）—— 视觉与听觉重新对齐；
+     · 每 4 拍换一次柱体形态 —— 可视化跟着小节走，而不是跟着噪声走；
+     · 副歌到来前 2.5 秒提前扩动态范围 —— 高潮进来时不显得突然。
+   ★ 三条铁律：
+     1. 预分析**不许碰音源**（用的是"本来就能读到的副本/源路径"，不生成任何临时文件）；
+     2. 算不出来就当没有 —— 可视化退回在线模式，**绝不影响播放**；
+     3. 只在后台跑（worker），一次一首，且队列不超过 3 首。 */
+let beatEnabledPref = true;
+export function beatmapPref(): boolean {
+  return beatEnabledPref;
+}
+export function setBeatmapPref(on: boolean) {
+  beatEnabledPref = on;
+  try {
+    localStorage.setItem("rhine-beatmap", on ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+  setBeatmapEnabled(on);
+  if (!on) spectrum?.setBeatmap(null); // 关掉就立刻回到纯在线观感
+  else refreshBeatmap();
+}
+/** 把当前曲目的乐谱装进频谱，并把"当前 + 后面两首"排进预分析队列。
+    换曲、开关切换、算完一首之后都走这里。 */
+function refreshBeatmap() {
+  const s = currentSong();
+  spectrum?.setBeatmap(beatmapOf(s));
+  if (!beatEnabledPref) return;
+  if (s) requestBeatmapNow(s);
+  const i = currentIndex();
+  if (i >= 0 && songs.length > 1) {
+    const next: Song[] = [];
+    for (let k = 1; k <= 2; k++) next.push(songs[(i + k) % songs.length]);
+    requestBeatmaps(next);
+  }
+}
+/** 预分析要读的音频文件路径。
+    ★ 顺序里**没有** playablePathOf —— 那会为主进程生成一份会话临时副本，
+     而预分析只是"想看看这首歌长什么样"，不该有任何写盘副作用。
+     拿不到就算了（B 站原始 .m4s 未必能独立解码，解不出来就是没有乐谱，仅此而已）。 */
+async function analysisPathOf(s: Song): Promise<string> {
+  const cands: string[] = [];
+  if (s.localPath) cands.push(s.localPath);
+  if (s.filePath) cands.push(s.filePath);
+  const fromUrl = fileUrlToPath(s.srcUrl || "");
+  if (fromUrl && !isStaleSessionPath(fromUrl)) cands.push(fromUrl);
+  if (s.path) cands.push(s.path);
+  for (const p of cands) {
+    if (!p || isStaleSessionPath(p)) continue;
+    if (await audioReadableExists(p)) return p;
+  }
+  return "";
+}
+function installBeatmapHooks() {
+  setBeatmapHooks({
+    sourcePath: (s) => analysisPathOf(s as Song),
+    readAudio: async (p) => (desktop?.readAudio ? await desktop.readAudio(p) : null),
+    saved: (s) => {
+      persist(s as Song);
+      /* 正在播的这首刚算完 → 立刻装上，不必等下一次换曲。
+         先验只影响观感，所以这里直接换是安全的（不会打断音频）。 */
+      const cur = currentSong();
+      if (cur && cur.id === s.id) spectrum?.setBeatmap(beatmapOf(cur));
+    },
+  });
+}
+
 async function ensureAnalyser(): Promise<AnalyserNode | null> {
-  if (analyserNode || vizDenied) return analyserNode;
+  /* 已有分析器就直接用；vizDenied 只表示"上次失败"，只要还没到尝试上限就再试。
+     注意：`createMediaElementSource` 成功过一次之后 analyserNode 就不为空，不会重复调用；
+     失败路径（构造/恢复上下文抛错）此时并没有真的接管音频，重试是安全的。 */
+  if (analyserNode) return analyserNode;
+  if (vizDenied && vizAttempts >= VIZ_MAX_ATTEMPTS) return analyserNode;
+  vizAttempts += 1;
   try {
     const Ctor: typeof AudioContext | undefined =
       (window as any).AudioContext || (window as any).webkitAudioContext;
     if (!Ctor) {
       vizDenied = true;
+      vizDenyReason = "这个环境没有 Web Audio（AudioContext 不可用）";
+      announceVizDenied();
       return null;
     }
+    /* ★★ 采样率：**什么都别传**，`new AudioContext()` 就是对的。
+       ────────────────────────────────────────────────────────────────
+       这里也踩过坑，同样是"可视化全部消失"的直接原因之一，写下来：
+
+       我一度写成 `new Ctor({ sampleRate: 0 })`，注释里还宣称"0 = 由实现选择、跟随硬件"。
+       **这是错的。** 按 Web Audio 规范（AudioContextOptions.sampleRate）：
+         · sampleRate 的合法区间是 [3000, 768000]，0 是**非法值**；
+         · 传 0 会直接抛 `NotSupportedError: The hardware sample rate provided (0)
+           is outside the range [3000, 768000]` —— 构造就失败；
+         · 规范同时写明：**不传 sampleRate 时，才使用输出设备的首选采样率**。
+       所以"跟随硬件设备速率"本来就是 `new AudioContext()`（无参）的默认行为，
+       根本不需要也不允许靠传 0 来实现。构造抛错 → 被 catch 置 vizDenied=true →
+       永久不再尝试 → **所有歌的频谱都不动**，症状与"旁路"那次一模一样。
+
+       结论：**保持无参构造**。这是这条链路上唯一正确、也最省心的写法。 */
     const ctx = new Ctor();
     if (ctx.state !== "running") await ctx.resume().catch(() => {});
     // 取不到运行中的上下文就绝不接管音频：宁可没有频谱，也不能没有声音。
     if (ctx.state !== "running") {
       vizDenied = true;
+      vizDenyReason = "音频上下文没能进入运行状态";
+      announceVizDenied();
       void ctx.close().catch(() => {});
       return null;
     }
+    /* ★★ 音频图：source → analyser → destination，**必须接回 destination**。
+       ─────────────────────────────────────────────────────────────────
+       这里曾经犯过一个错，写下来避免再犯（用户反馈"可视化失效了"就是这个原因）：
+
+       我一度以为可以"旁路分析" —— 只写 source.connect(analyser)、不接 destination，
+       理由是"<audio> 元素自身的直通输出仍然有效，扬声器照样出声"。
+       **这个前提是错的。** `createMediaElementSource()` 的真实语义是：
+         · 调用之后，元素解码出的音频**改由图输出**，元素自身的直通被**取代**（不是叠加）；
+         · 于是不接 destination = 这条音频链路的终点悬空 = **根本不出声**。
+       （至于"analyser 还在不在算"，实测/经验都表明：链路没有连到 destination 时，
+       整条图不参与渲染，AnalyserNode 也拿不到有效样本 → 频谱不动。
+       这正是"可视化失效"的直接原因。）
+
+       ⚠ 我此前在 docs/架构说明.md 里写的"旁路可行"结论是错的，已一并订正。
+       ⚠ 另外：**`createMediaElementSource()` 无法撤销** —— 一旦调用，就再也回不到
+         "元素直通扬声器"的状态了。所以"先试旁路、不行再接回来"这种兜底也不成立：
+         视频/音频图一旦被接管，只能一路接 destination 走到底。
+
+       ★ 音质优化：本函数**不做任何额外处理** —— 无参构造的 AudioContext 已经跟随
+         输出设备速率（规范行为），重采样该省的自然就省了。曾经画蛇添足传过
+         `sampleRate: 0`（非法值、直接抛错），见上面那段；不要重蹈。 */
     const source = ctx.createMediaElementSource(audio);
     const node = ctx.createAnalyser();
     node.fftSize = 1024; // 与 1.3.0 的分析窗长一致
     node.smoothingTimeConstant = 0.6;
     source.connect(node);
-    node.connect(ctx.destination);
+    node.connect(ctx.destination);   // ← 这一句必须有，否则整条链路悬空、无声且无频谱
     actx = ctx;
     analyserNode = node;
     freqData = new Uint8Array(node.frequencyBinCount);
     timeData = new Float32Array(node.fftSize);
     initSpectrumWorker();
-  } catch {
+    vizAttempts = 0;        // 成功：重试计数归零
+    vizDenied = false;
+    vizDenyReason = "";
+  } catch (e) {
     vizDenied = true;
+    vizDenyReason = String((e as any)?.message || e);
+    // 只有尝试次数用尽才真正提示并放弃；否则留给下一次 play 再试。
+    if (vizAttempts >= VIZ_MAX_ATTEMPTS) announceVizDenied();
   }
   return analyserNode;
 }
@@ -2190,6 +2493,11 @@ function vizFrame(ts: number) {
     d.bassPeakHz = bi.bassPeakHz;
     d.kickBands = bi.kickBands;
     d.sampleRate = bi.sampleRate;
+    /* 节拍先验（探针核对用）：live=0 表示这一帧没有乐谱，下面几个必须全为 0。
+       用 beatInfo() 而不是 snapshot() —— snapshot 会复制四个数组，每帧跑太重。 */
+    const b = spectrum.beatInfo();
+    d.beat = b;
+    d.bpm = b.bpm;
   }
   vizRaf = requestAnimationFrame(vizFrame);
 }
