@@ -175,6 +175,31 @@ for (let i = 0; i < bm.amp.length; i++) {
 ok(ampMin > 0, "每一拍都有强度（弱拍不归零）", "min=" + ampMin + " max=" + ampMax);
 ok(bm.beats.every((v, i) => i === 0 || v > bm.beats[i - 1]), "拍点严格递增");
 
+/* ---------- 2b. 换一个非常规速度：折叠逻辑不能把 90 读成 180 ----------
+   自相关在"倍速"上天然摇摆（90 的偶数倍谐波很强），折叠区间写错就会 90→180。
+   这条单独造一段 90 BPM 的轨来钉住它。 */
+console.log("\n=== 2b. 非常规速度：90 BPM（不能读成 180 / 45） ===");
+function makeTrackAt(bpm) {
+  const nn = Math.round(SR * 30);
+  const y = new Float32Array(nn);
+  const p = 60 / bpm;
+  for (let t = 0.25; t < 30 - 0.3; t += p) {
+    const i0 = Math.round(t * SR);
+    const len = Math.round(0.22 * SR);
+    for (let i = 0; i < len && i0 + i < nn; i++) {
+      const tt = i / SR;
+      const env = Math.exp(-tt / 0.085);
+      y[i0 + i] += env * (Math.sin(2 * Math.PI * 58 * tt) * 0.9 + Math.sin(2 * Math.PI * 43 * tt) * 0.5);
+    }
+  }
+  for (let i = 0; i < nn; i++) y[i] += 0.02 * (Math.random() * 2 - 1);
+  return y;
+}
+const bm90 = analyzeMono(makeTrackAt(90), SR);
+console.log("  90 BPM 轨 → 测出 " + bm90.bpm.toFixed(2) + " BPM，" + bm90.beats.length + " 拍（真值 45）");
+ok(near(bm90.bpm, 90, 4), "90 BPM 不被折叠成 180/45", bm90.bpm.toFixed(2));
+ok(Math.abs(bm90.beats.length - 45) <= 3, "90 BPM 的拍点数对得上", String(bm90.beats.length));
+
 /* ---------- 3. 提前点亮（这次的核心收益） ---------- */
 console.log("\n=== 3. 提前点亮：BEAT_PRE_ROLL = " + (BEAT_PRE_ROLL * 1000).toFixed(0) + "ms ===");
 const k = 20;
