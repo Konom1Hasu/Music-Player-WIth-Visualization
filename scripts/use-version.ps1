@@ -39,7 +39,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $Root     = Split-Path -Parent $PSScriptRoot
-$Versions = Join-Path $Root 'versions'
+$Versions = Join-Path $Root 'versions\archive'
 $Target   = Join-Path $Root 'app\index.html'
 $BackupDir = Join-Path $Root 'dist\版本备份'
 

@@ -80,14 +80,24 @@ $Out  = [IO.Path]::GetFullPath($Out)
 $OutDir = Split-Path -Parent $Out
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
+# ★ 无头浏览器的 profile 一律落在**系统临时目录**，不能落在 $OutDir。
+#   历史坑：profile 曾写在输出目录旁，进程退出后留下 SingletonLock，
+#   下次浏览器启动就报「无法对其数据目录执行读写操作」从而不出图
+#   （下面第 89 行的浏览器顺序注释就是这个症状的遗留对策）。
+#   profile 属于一次性垃圾，不该出现在 dist/ 或任何用户指定的输出目录里。
+$ProfRoot = Join-Path ([IO.Path]::GetTempPath()) 'rhine-shot-profiles'
+New-Item -ItemType Directory -Force -Path $ProfRoot | Out-Null
+
 if (-not (Test-Path (Join-Path $Root $Page))) {
     throw "在 $Root 里找不到 $Page —— 先构建（例如 cd app-rhine && npm run build）"
 }
 
 # ---------------------------------------------------------------- 找浏览器
 Write-Step '查找无头浏览器'
-# 顺序有讲究：本机实测 **Edge 的 --screenshot 稳定出图**；Chrome 在同样参数下会报
-# "无法对其数据目录执行读写操作" 从而不出图。所以 Edge 优先，Chrome 只作兜底。
+# 顺序有讲究：本机历史实测 **Edge 的 --screenshot 更稳**，Chrome 曾报
+# "无法对其数据目录执行读写操作" 从而不出图 —— 那个病因（profile 落在输出目录旁、
+# 残留 SingletonLock）已在 $ProfRoot 一节修掉，但仍保留 Edge 优先：Edge 在本机
+# 参数兼容性更好，Chrome 只作兜底。
 $cands = @(
     "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
     "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
@@ -142,7 +152,7 @@ try {
     $eargs = @(
         '--headless=new', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check',
         '--disable-crash-reporter', '--disable-breakpad',
-        "--user-data-dir=$(Join-Path $OutDir '_prof')",
+        "--user-data-dir=$(Join-Path $ProfRoot '_prof')",
         "--window-size=$Width,$Height",
         "--virtual-time-budget=$BudgetMs"
     )
@@ -163,7 +173,7 @@ try {
     foreach ($b in $cands) {
         Remove-Item $png -Force -ErrorAction SilentlyContinue
         # 每个浏览器用独立的 profile，避免互相锁住
-        $prof = Join-Path $OutDir ('_prof_' + [IO.Path]::GetFileNameWithoutExtension($b))
+        $prof = Join-Path $ProfRoot ('_prof_' + [IO.Path]::GetFileNameWithoutExtension($b))
         Remove-Item $prof -Recurse -Force -ErrorAction SilentlyContinue
         $tryArgs = @($eargs | Where-Object { $_ -notlike '--user-data-dir=*' }) +
                    @("--user-data-dir=$prof", "--screenshot=$png", ($url + $Page + $Query))

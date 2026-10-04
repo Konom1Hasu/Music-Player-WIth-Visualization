@@ -1,7 +1,8 @@
 # 历史版本存档
 
-这里的 12 个文件是上一次大重构之前、`musicplayer.html` 历史上各个关键节点的**逐字节快照**，
-用于可视化效果出问题时快速回滚到已知可用的状态。
+`archive/` 下的 12 个文件是上一次大重构之前、`musicplayer.html` 历史上各个关键节点的**逐字节快照**，
+用于可视化效果出问题时快速回滚到已知可用的状态。（快照统一收在 `archive/` 子目录里，
+回滚脚本 `use-version.ps1` 会自动递归查找，无需关心位置。）
 
 来源：从 DSH 会话日志（`C:\Users\KonomiHasu\.dsh\sessions\`）里把 `musicplayer.html` 的
 **全部 write/edit 操作按时间反向重放**还原出来。日志里的 `edit` 是精确字符串替换，
@@ -74,7 +75,7 @@
 手工回滚也很简单：
 
 ```powershell
-Copy-Item 'versions\Q1_preWave.html' 'app\index.html' -Force
+Copy-Item 'versions\archive\Q1_preWave.html' 'app\index.html' -Force
 .\scripts\build-portable.ps1
 ```
 
