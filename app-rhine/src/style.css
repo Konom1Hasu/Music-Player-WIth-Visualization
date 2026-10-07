@@ -784,6 +784,13 @@ button {
   font-size: 9px;
   color: #77756b;
 }
+/* ★ 2026-10-07 两端文字各自收在自己的半边里，谁过长谁省略号，不互相顶出去 */
+.detail-kicker > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .detail-content h2 {
   font-size: 40px;
   line-height: 1.12;
@@ -796,6 +803,15 @@ button {
   display: flex;
   align-items: center;
   gap: 23px;
+  /* ★ 2026-10-07 允许换行。原来是 nowrap：长 artist 配长 album 时两边互顶，
+     实测截图里两串文字直接粘成一串（"…ProductionCommittee feat.…"）。
+     改成 wrap 后各占一行，谁长谁先折，不再叠字。 */
+  flex-wrap: wrap;
+  row-gap: 2px;
+  min-width: 0;
+}
+.detail-title-cn > * {
+  min-width: 0;
 }
 .detail-title-cn > span {
   font-size: 11px;
@@ -1121,8 +1137,13 @@ button {
 #detail-content.edit-mode .song-viz {
   margin-top: 16px;
 }
+/* ★ 2026-10-07 编辑态的 canvas 没有任何宽度规则，宽度直接取自 HTML 属性
+   （636×1.2 = 763px），一样会冲出玻璃面板。改成跟着容器走，
+   并用 aspect-ratio 锁住 636:300 的比例，画布不变形。 */
 #detail-content.edit-mode .song-viz canvas {
-  height: 300px;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 636 / 300;
 }
 /* 深色主题下编辑表单的反色 */
 body.theme-dark .edit-cover-box,
@@ -2837,17 +2858,35 @@ body.rhine-night .p-search-row input {
    ★ 2026-10-03 改成**底边锚定**：内容高度会随曲名折行、歌词、按钮行变化，
      原来用 top 锚定时内容一长就往下压，实测曾与右下角的 POWERED BY 重叠
      204×24 px²（详情按钮行 y 914–960 × POWERED y 948–972）。
-     bottom: 112 → 底边锁在 y 968，内容再长也只**向上**生长；
-     与 POWERED 的顶边（y 994）留 26px，不会再压住它。
-     顶到多高是安全的：系统导航那一行在 y 124–152，而详情模式下它是淡出的。 */
+     bottom 锚定后底边锁住，内容再长也只**向上**生长。
+     ⚠️ 当时这段写着"详情模式下系统导航是淡出的"—— 实测**不成立**：
+        `[data-mode="detail"] .system-nav` 给的是 opacity: 1，
+        导航栏一直可见；而且它 z-index 6 > `.detail-ui` 的 4，是压在面板之上的。 */
 .detail-content {
   top: auto;
-  bottom: 112px;
+  /* ★ 2026-10-07 顶边让开导航栏、底边让开 POWERED BY：
+       底边 100 → y 980，与 POWERED 顶边（y 994）留 14px；
+       可用高 = 1080 − 100(底) − 160(顶) = 820px。
+     原来只靠 bottom 锚定、内容无限向上长，超长歌名时面板顶边实测到 y=-100
+     （整个跑出 1920×1080 画布），导航栏的 TRACK INDEX / ＋SAVED 就直接压在
+     歌名与 artist 那一行上（截图实证）。现在限高 820，超高时面板内滚动。 */
+  bottom: 100px;
+  max-height: calc(100% - 260px);
+  /* overflow-y 一旦不是 visible，overflow-x 会被规范强制算成 auto
+     （可见值不能与不可见值混用）—— 显式写死 hidden，免得万一横向溢出
+     再冒一条横向滚动条。 */
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(140, 132, 116, 0.45) transparent;
 }
 #detail-content.song-mode .song-head {
   display: flex;
   gap: 26px;
-  margin-top: 12px;
+  /* ★ 2026-10-07 12 → 8 → 6：为把常态内容压进面板可用高（见 .detail-content 的限高说明），
+     逐段收 2~4px。单看每处都不显眼，整列合计约 20px，普通歌名不再触发滚动。 */
+  margin-top: 6px;
 }
 #detail-content.song-mode .song-cover {
   width: 70px;
@@ -2872,13 +2911,15 @@ body.rhine-night .p-search-row input {
   font-size: 34px;
   line-height: 1.14;
   letter-spacing: -1px;
-  margin: 0 0 9px;
+  margin: 0 0 4px;
   max-width: 100%;
   overflow-wrap: anywhere;
 }
 #detail-content.song-mode .detail-title-cn {
   font-size: 18px;
   gap: 18px;
+  flex-wrap: wrap;
+  row-gap: 2px;
 }
 #detail-content.song-mode .detail-title-cn span {
   font-size: 11px;
@@ -2886,13 +2927,15 @@ body.rhine-night .p-search-row input {
   color: #807b70;
 }
 #detail-content.song-mode .detail-rule {
-  margin-top: 18px;
+  margin-top: 10px;
 }
-/* 元数据改成一行内联（原来 2×2 网格占 104px，现在 24px） */
+/* 元数据改成一行内联（原来 2×2 网格占 104px，现在 24px）。
+   ★ 2026-10-07 列间距 34 → 18：34px 时正常曲目也会折成两行（实测 h=39），
+     收到 18 后四项排得下（实测 h=21），省 18px 高度。 */
 #detail-content.song-mode .metadata {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 34px;
+  gap: 4px 18px;
   margin: 0;
 }
 #detail-content.song-mode .metadata > div {
@@ -2909,21 +2952,28 @@ body.rhine-night .p-search-row input {
   font-size: 13px;
 }
 #detail-content.song-mode .song-viz {
-  margin-top: 14px;
+  margin-top: 8px;
 }
 /* 频谱画布与歌词列表共用同一块舞台：同一时刻只显一个，尺寸完全一致 ——
    切换时高度不跳、下方轴线与字幕也不位移。 */
 #detail-content.song-mode .song-viz-body {
   position: relative;
-  width: 636px;
-  height: 477px;
-  margin-top: 12px;
+  /* ★ 2026-10-07 跟随容器，不再写死 636px。
+     面板是 width:636 + padding:26（border-box）→ 内容区实际只有 584px，
+     写死 636 会让舞台（连同画布）向右冲出玻璃面板 26px
+     （实测：舞台右边界 1319，面板右边界 1299，差值正好是一个 padding）。
+     改 100% 让宽度跟着面板走，高度用 aspect-ratio 锁住原来的 636:477 比例，
+     画布不变形 —— canvas 的像素尺寸仍是 954×715.5，CSS 只负责缩放呈现。 */
+  width: 100%;
+  aspect-ratio: 636 / 477;
+  height: auto;
+  margin-top: 6px;
   overflow: hidden;
 }
 #detail-content.song-mode .song-viz-body canvas {
   display: block;
-  width: 636px;
-  height: 477px;
+  width: 100%;
+  height: 100%;
   border-bottom: 1px solid #bdb8ad;
 }
 
@@ -2933,7 +2983,7 @@ body.rhine-night .p-search-row input {
   align-items: center;
   justify-content: space-between;
   gap: 18px;
-  margin-top: 14px;
+  margin-top: 8px;
 }
 .view-toggle {
   display: inline-flex;
@@ -3060,14 +3110,14 @@ body.rhine-night .p-search-row input {
 .song-viz-axis {
   display: flex;
   justify-content: space-between;
-  margin-top: 9px;
+  margin-top: 5px;
   font-size: 10px;
   letter-spacing: 0.9px;
   color: #807b70;
 }
 /* 当前歌词：单行字幕，跟着进度整行替换 */
 .song-lyric-line {
-  margin-top: 13px;
+  margin-top: 11px;
   min-height: 24px;
   font-size: 16px;
   line-height: 24px;
@@ -3250,10 +3300,10 @@ body.theme-dark .song-cover {
   color: var(--p-accent);
 }
 #detail-content.song-mode .detail-actions {
-  margin-top: 18px;
+  margin-top: 12px;
 }
 #detail-content.song-mode .detail-footnote {
-  margin-top: 16px;
+  margin-top: 10px;
 }
 
 /* ============================================================
@@ -3276,8 +3326,10 @@ body.theme-dark .song-cover {
 /* ---- 详情面板：右侧那块内容（曲目信息 + 频谱/歌词） ---- */
 #detail-content.song-mode,
 #detail-content.edit-mode {
-  /* 面板只是一层"玻璃片"：内边距给出来，内容不再贴着边缘 */
-  padding: 26px 26px 24px;
+  /* 面板只是一层"玻璃片"：内边距给出来，内容不再贴着边缘。
+     ★ 2026-10-07 纵向 26/24 → 20/18：横向保持 26（频谱宽度靠它算，动它会让
+       画布高度跟着变），只收纵向这 12px，配合下面各段间距一起把内容压进可用高。 */
+  padding: 20px 26px 18px;
   border-radius: 14px;
   background: rgba(243, 241, 235, 0.7);
   border: 1px solid rgba(255, 255, 255, 0.55);
