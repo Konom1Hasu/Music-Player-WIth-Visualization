@@ -3,13 +3,13 @@
  * —— 元素的类名、背景色、是否有 backdrop-filter、以及它在屏幕上的区域大小。
  *
  * 目的：做"玻璃质感"之前先摸清现状，别凭猜去改 CSS。
- * 用法：node scripts\面板表面清点.cjs
+ * 用法：node scripts\探针\面板表面清点.cjs
  */
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
-const root = path.resolve(__dirname, '..');
+const root = path.resolve(__dirname, '..', '..');   // 本脚本在 scripts\探针\ 下，仓库根要上两级
 const EXE = [
   path.join(root, 'dist', '音乐播放器-win32-x64', '音乐播放器.exe'),
   path.join(root, 'dist', '音乐播放器-win32-x64', 'electron.exe'),

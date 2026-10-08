@@ -11,7 +11,7 @@
       2. 用无头 Chromium 渲染并截图（`--screenshot`）
       3. 把 PNG 转成 ASCII 灰度图打印出来，于是"读不了图"的会话也能实际看到布局
 
-    第 3 步由 scripts\截图转文本.js 完成（纯 Node 实现 PNG 解码，无第三方依赖）。
+    第 3 步由 scripts\探针\截图转文本.js 完成（纯 Node 实现 PNG 解码，无第三方依赖）。
 
 .PARAMETER Root
     要渲染的目录（含 index.html）。默认 app-rhine\dist。
@@ -44,11 +44,11 @@
 
 .EXAMPLE
     # 渲染 RhineLabUI 底座（完整片头 + 三维阵列）
-    .\scripts\渲染快照.ps1 -BudgetMs 60000 -Swiftshader
+    .\scripts\探针\渲染快照.ps1 -BudgetMs 60000 -Swiftshader
 
 .EXAMPLE
     # 渲染封面 3D 的离线桩环境（需先生成 dist\_cover3d）
-    .\scripts\渲染快照.ps1 -Root dist\_cover3d -BudgetMs 8000 -Swiftshader -Cols 104
+    .\scripts\探针\渲染快照.ps1 -Root dist\_cover3d -BudgetMs 8000 -Swiftshader -Cols 104
 #>
 [CmdletBinding()]
 param(
@@ -70,7 +70,7 @@ function Write-Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Write-Ok($m)   { Write-Host "    $m" -ForegroundColor Green }
 function Write-Warn2($m){ Write-Host "    $m" -ForegroundColor Yellow }
 
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)   # scripts\探针\ → 仓库根要上两级
 if (-not $Root) { $Root = Join-Path $RepoRoot 'app-rhine\dist' }
 if (-not $Out)  { $Out  = Join-Path $RepoRoot 'dist\快照.png' }
 # ★ 一律转成绝对路径：`--screenshot=相对路径` 会被浏览器按**它自己的 CWD** 解析，

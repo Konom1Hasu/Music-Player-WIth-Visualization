@@ -1,13 +1,13 @@
 /*
  * 玻璃质感截图：驱动产物 exe，进详情态截一张、打开设置弹层截一张。
- * 用法：node scripts\玻璃质感截图.cjs
+ * 用法：node scripts\探针\玻璃质感截图.cjs
  */
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { spawn, execSync } = require('node:child_process');
 
-const root = path.resolve(__dirname, '..');
+const root = path.resolve(__dirname, '..', '..');   // 本脚本在 scripts\探针\ 下，仓库根要上两级
 const EXE = [
   path.join(root, 'dist', '音乐播放器-win32-x64', '音乐播放器.exe'),
   path.join(root, 'dist', '音乐播放器-win32-x64', 'electron.exe'),

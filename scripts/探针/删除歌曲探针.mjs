@@ -5,8 +5,8 @@
  *      再读行数 / IndexedDB / 播放条，判断"删掉了没有、删干净了没有"。
  * 同时捕获页面报错（脚本注入在 </head> 之后，能第一时间拿到 error 事件）。
  *
- * 用法：node scripts\删除歌曲探针.mjs [dist 目录]   → 生成 <dist>\_del.html
- *   起 scripts\观测服务.js <dist>，无头浏览器打开 http://…/_del.html
+ * 用法：node scripts\探针\删除歌曲探针.mjs [dist 目录]   → 生成 <dist>\_del.html
+ *   起 scripts\探针\观测服务.js <dist>，无头浏览器打开 http://…/_del.html
  */
 import fs from "node:fs";
 import path from "node:path";

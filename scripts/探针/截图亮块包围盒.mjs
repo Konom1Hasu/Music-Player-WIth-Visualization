@@ -2,7 +2,7 @@
  * 截图亮块包围盒：找出画面里"亮块"（模型卡片 / 高光面板）的像素范围，
  * 用来量"播放条挡住模型的哪一段"。
  *
- * 用法：node scripts\截图亮块包围盒.mjs <png> [--from y] [--min 亮度阈值] [--x0 a] [--x1 b]
+ * 用法：node scripts\探针\截图亮块包围盒.mjs <png> [--from y] [--min 亮度阈值] [--x0 a] [--x1 b]
  *   默认只统计 y >= --from（默认 0）的亮像素，返回整体包围盒与逐行亮像素计数最高的几行。
  */
 import fs from "node:fs";
@@ -10,7 +10,7 @@ import zlib from "node:zlib";
 
 const file = process.argv[2];
 if (!file || !fs.existsSync(file)) {
-  console.error("用法：node scripts\\截图亮块包围盒.mjs <png> [--from y] [--min l] [--x0 a] [--x1 b]");
+  console.error("用法：node scripts\\探针\\截图亮块包围盒.mjs <png> [--from y] [--min l] [--x0 a] [--x1 b]");
   process.exit(2);
 }
 const arg = (k, d) => {

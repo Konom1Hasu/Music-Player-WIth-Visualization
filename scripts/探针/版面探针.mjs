@@ -3,8 +3,8 @@
  * 让它把各面板的真实几何（getBoundingClientRect 归一化到 1920×1080 基准）
  * POST 回观测服务。用来回答"哪块压住了哪块"这类问题 —— 比读截图可靠。
  *
- * 用法：node scripts\版面探针.mjs [dist 目录]
- *   然后起 scripts\观测服务.js <dist>，用无头浏览器打开
+ * 用法：node scripts\探针\版面探针.mjs [dist 目录]
+ *   然后起 scripts\探针\观测服务.js <dist>，用无头浏览器打开
  *   http://…/_layout.html?scene=archive&time=20
  *
  * 量什么（2026-10-03 扩展，起因是用户"界面太紧凑，主要是避免各部分的遮挡"）：

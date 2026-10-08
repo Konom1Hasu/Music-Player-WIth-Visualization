@@ -2,7 +2,7 @@
  * 截图行/列亮度分析：把 PNG 按行（或列）统计亮度，用来量"画面里的东西到底在哪个像素带上"。
  * 拍一张快照就能回答"播放条挡住了模型的哪一段"这类版面问题。
  *
- * 用法：node scripts\截图行亮度.mjs <png> [x0 x1] [--rows|--cols]
+ * 用法：node scripts\探针\截图行亮度.mjs <png> [x0 x1] [--rows|--cols]
  *   给了 x0 x1 就只统计这一横向区间（例如只看模型所在的列范围）。
  */
 import fs from "node:fs";
@@ -10,7 +10,7 @@ import zlib from "node:zlib";
 
 const file = process.argv[2];
 if (!file || !fs.existsSync(file)) {
-  console.error("用法：node scripts\\截图行亮度.mjs <png> [x0 x1] [--rows|--cols]");
+  console.error("用法：node scripts\\探针\\截图行亮度.mjs <png> [x0 x1] [--rows|--cols]");
   process.exit(2);
 }
 const nums = process.argv.slice(3).filter((a) => /^\d+$/.test(a)).map(Number);

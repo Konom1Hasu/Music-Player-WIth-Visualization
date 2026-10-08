@@ -1,7 +1,7 @@
 // 观测探针：注入到构建产物里，读"点歌续播"与"频谱帧率/毛刺"两件事的实测数据。
-// 用法（由 scripts\生成观测探针.ps1 调用，必须在 npm run build 之后）：
-//   node scripts\生成观测探针.mjs <dist 目录>
-// 产物：<dist>\_probe.html，配合 scripts\观测探针.ps1 起服务 + 无头渲染。
+// 用法（手动调用，必须在 npm run build 之后）：
+//   node scripts\探针\生成观测探针.mjs <dist 目录>
+// 产物：<dist>\_probe.html，配合 scripts\探针\观测服务.js 起服务 + 无头渲染。
 import fs from "node:fs";
 import path from "node:path";
 

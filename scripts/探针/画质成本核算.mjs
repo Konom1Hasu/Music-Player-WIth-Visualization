@@ -2,7 +2,7 @@
    目的：把「性能档糊」「原始档卡」两个主观感受换成可比较的数字 ——
    每档实际渲染多少像素、每帧要跑几遍全屏 pass。
 
-   用法： node scripts/画质成本核算.mjs
+   用法： node scripts/探针/画质成本核算.mjs
 */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -10,7 +10,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(here, "..");
+const root = path.resolve(here, "..", "..");   // 本脚本在 scripts\探针\ 下，仓库根要上两级
 
 /* render-quality.ts 是 TS，先用 esbuild 打成临时 mjs 再 import（与 画质迁移验证.mjs 同法） */
 const out = path.join(root, "app-rhine", ".quality-cost.mjs");

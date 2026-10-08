@@ -5,12 +5,12 @@
    - 相机
    这样就能"紧贴 Blender 文件"定 UI 的比例、配色与部件命名。
 
-   用法：node scripts\glb-inspect.js <file.glb> [--colors] [--tree] [--bounds] */
+   用法：node scripts\探针\glb-inspect.js <file.glb> [--colors] [--tree] [--bounds] */
 'use strict';
 const fs = require('fs');
 
 const file = process.argv[2];
-if (!file) { console.log('用法: node scripts\\glb-inspect.js <file.glb> [--tree] [--bounds] [--accessors]'); process.exit(2); }
+if (!file) { console.log('用法: node scripts\\探针\\glb-inspect.js <file.glb> [--tree] [--bounds] [--accessors]'); process.exit(2); }
 const flags = process.argv.slice(3);
 const wantTree = flags.includes('--tree');
 const wantBounds = flags.includes('--bounds') || flags.length === 0;

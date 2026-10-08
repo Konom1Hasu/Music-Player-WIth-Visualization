@@ -83,7 +83,7 @@ const wantColor = process.argv.includes('--color');
 const wantInvert = process.argv.includes('--invert');
 const cropArg = process.argv.find(a => a.startsWith('--crop='));
 if (!file) {
-    console.log('用法: node scripts\\截图转文本.js <图片> [列数] [--color] [--invert] [--auto] [--edge] [--hist] [--crop=x0,y0,x1,y1]');
+    console.log('用法: node scripts\\探针\\截图转文本.js <图片> [列数] [--color] [--invert] [--auto] [--edge] [--hist] [--crop=x0,y0,x1,y1]');
     process.exit(2);
 }
 

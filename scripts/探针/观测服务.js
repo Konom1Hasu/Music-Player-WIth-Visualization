@@ -1,6 +1,6 @@
 // 观测用的静态服务：托管 dist，并把页面 POST 到 /metrics 的正文写到 stdout（无管道，直接继承控制台）。
-// 与 scripts\渲染快照.ps1 里的内联版本同源，额外多一个 /metrics 收集。
-// 用法：node scripts\观测服务.js <root>
+// 与 scripts\探针\渲染快照.ps1 里的内联版本同源，额外多一个 /metrics 收集。
+// 用法：node scripts\探针\观测服务.js <root>
 const http = require("http");
 const fs = require("fs");
 const path = require("path");

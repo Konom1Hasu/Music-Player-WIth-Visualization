@@ -8,8 +8,8 @@
  *   ③ 改标题 → 点 SAVE → 核对详情面板与播放条是否同步，以及 IndexedDB 里是否落库。
  * 全程只读 DOM 与 IndexedDB，不改产品代码。
  *
- * 用法：node scripts\曲目编辑探针.mjs [dist 目录]   → 生成 <dist>\_edit.html
- *   然后起 scripts\观测服务.js <dist>，用无头浏览器打开 http://…/_edit.html?scene=detail
+ * 用法：node scripts\探针\曲目编辑探针.mjs [dist 目录]   → 生成 <dist>\_edit.html
+ *   然后起 scripts\探针\观测服务.js <dist>，用无头浏览器打开 http://…/_edit.html?scene=detail
  */
 import fs from "node:fs";
 import path from "node:path";

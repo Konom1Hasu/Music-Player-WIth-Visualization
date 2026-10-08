@@ -3,14 +3,14 @@
  * 逐个元素量「内容宽 vs 容器宽」「右边界 vs 详情区右边界」，
  * 把越界/被裁切的元素揪出来，并在截图前打印当时 DOM 状态（截图与断言同一个瞬间）。
  *
- * 用法：node scripts\详情溢出探针.cjs
+ * 用法：node scripts\探针\详情溢出探针.cjs
  */
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { spawn, execSync } = require('node:child_process');
 
-const root = path.resolve(__dirname, '..');
+const root = path.resolve(__dirname, '..', '..');   // 本脚本在 scripts\探针\ 下，仓库根要上两级
 const EXE = [
   path.join(root, 'dist', '音乐播放器-win32-x64', '音乐播放器.exe'),
   path.join(root, 'dist', '音乐播放器-win32-x64', 'electron.exe'),

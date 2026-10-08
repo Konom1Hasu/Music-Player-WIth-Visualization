@@ -9,7 +9,7 @@
  *   · 实测 fps 应接近显示器刷新率（本机 165Hz）；
  *   · 帧间隔 p90 不应显著大于中位数（否则是"平均高但有卡顿"）。
  *
- * 用法：node scripts\帧率探针.cjs [采样秒数，默认 3]
+ * 用法：node scripts\探针\帧率探针.cjs [采样秒数，默认 3]
  *      ★ 必须**有头**运行：headless 下 rAF 会停摆/被降频，量出来的帧率是假的。
  */
 const fs = require('node:fs');
@@ -17,7 +17,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { spawn, execSync } = require('node:child_process');
 
-const root = path.resolve(__dirname, '..');
+const root = path.resolve(__dirname, '..', '..');   // 本脚本在 scripts\探针\ 下，仓库根要上两级
 const EXE = [
   path.join(root, 'dist', '音乐播放器-win32-x64', '音乐播放器.exe'),
   path.join(root, 'dist', '音乐播放器-win32-x64', 'electron.exe'),
@@ -79,7 +79,7 @@ const RE = /DevTools listening on (ws:\/\/[^\s]+)/;
      所以设完要重新加载页面（下面用 CDP 的 Page.reload）。
      ★ 而 `__spectrum` / `__rhineViz` 只在**详情面板渲染时**才挂到 window 上
      （频谱实例跟着详情画布一起重建），所以必须先塞一首歌、再进详情态 ——
-     这与 scripts\详情溢出探针.cjs 走的是同一条进场路径。 */
+     这与 scripts\探针\详情溢出探针.cjs 走的是同一条进场路径。 */
   await ev("localStorage.setItem('rhine-diag','1');localStorage.setItem('rhine-viztest','1');'ok'");
 
   /* 塞一首歌，否则进不了详情态 */
