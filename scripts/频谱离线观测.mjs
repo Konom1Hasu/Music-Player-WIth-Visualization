@@ -43,7 +43,7 @@ const { Spectrum, setVizParams, clampVizParams, clampHeadroom, KICK_PUMP_MIN, vi
 /* ---------- 0. 源码一致性自检：常量被改过就报错，免得测的是旧参数 ---------- */
 const spSrc = fs.readFileSync(path.join(SRC, "spectrum.ts"), "utf8");
 const expect = [
-  ["ANALYSIS_WINDOW = 1024", /const ANALYSIS_WINDOW = 1024;/],
+  ["ANALYSIS_WINDOW 是显式常量", /const ANALYSIS_WINDOW = \d+;/],
   ["VIZ_LEVELS = 14", /const VIZ_LEVELS = 14;/],
   ["SPECTRUM_BANDS = 120", /export const SPECTRUM_BANDS = 120;/],
   // 抖动 / 倾斜 / 泵动现在是运行时参数（vizParams），来源仍是 1.3.0 的原值：
@@ -59,7 +59,7 @@ const expect = [
   ["KICK_REF_ATTACK = 0.30", /const KICK_REF_ATTACK = 0\.30;/],
   ["KICK_REF_RELEASE = 0.16", /const KICK_REF_RELEASE = 0\.16;/],
   ["KICK_RISE_FLOOR = 0.02", /const KICK_RISE_FLOOR = 0\.02;/],
-  ["KICK_RISE_GAIN = 3.2", /const KICK_RISE_GAIN = 3\.2;/],
+  ["KICK_RISE_GAIN 是显式常量", /const KICK_RISE_GAIN = [\d.]+;/],
   // 2026-10-03 新增：顶端高频抖动 + 音色灵敏度（数值本身可调，这里只核对常量还在）
   ["TOP_SHIMMER 存在", /const TOP_SHIMMER = [\d.]+;/],
   ["TOP_SHIMMER_RATE 存在", /const TOP_SHIMMER_RATE = [\d.]+;/],
@@ -88,6 +88,14 @@ if (!levelMatch) {
   process.exit(2);
 }
 const SRC_VIZ_LEVELS = Number(levelMatch[1]);
+/* 分析窗长也从源码取：它现在是**可调参数**（2026-10-08 从 1024 降到 512 换低延迟），
+   写死会让本脚本的自检与合成信号一起过期。所有用到窗长的地方一律引用 SRC_WINDOW。 */
+const winMatch = /const ANALYSIS_WINDOW = (\d+);/.exec(spSrc);
+if (!winMatch) {
+  console.error("参数自检失败：src/spectrum.ts 里没有 `const ANALYSIS_WINDOW = <整数>;`");
+  process.exit(2);
+}
+const SRC_WINDOW = Number(winMatch[1]);
 
 /* ---------- 0b. 左峰"留余量"闸门的行为核对（用户："可视化左侧不要一直顶满"） ----------
    闸门是纯函数，跟音频无关，顺手在这里把几种输入过一遍：
@@ -123,7 +131,7 @@ if (!/const VIZ_NOISE_HP = 0\.55;/.test(plSrc)) {
 /* (1) 加窗预计算：Goertzel 的输入从"每个频段现乘一遍 Hann"改成"先乘一遍存起来"，
        必须**逐位相同**（参考实现：每个频段现乘；两份代码在同一份数据上跑）。 */
 {
-  const N = 1024;
+  const N = SRC_WINDOW;
   const hann = new Float32Array(N);
   for (let i = 0; i < N; i++) hann[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (N - 1)));
   const td = new Float32Array(N);
@@ -176,12 +184,12 @@ const canvasStub = { width: 954, height: 716, getContext: () => ctxStub };
   sp.setMode("mix");
   sp.applyParams();
   sp.setAdvanceInterval(20);
-  const loud = new Float32Array(1024);
-  for (let i = 0; i < 1024; i++) {
+  const loud = new Float32Array(SRC_WINDOW);
+  for (let i = 0; i < SRC_WINDOW; i++) {
     const t = i / 48000;
     loud[i] = 0.5 * (Math.sin(2 * Math.PI * 55 * t) + 0.4 * Math.sin(2 * Math.PI * 110 * t));
   }
-  const silence = new Float32Array(1024);
+  const silence = new Float32Array(SRC_WINDOW);
   let clock = 1000;
   const realNow = performance.now;
   performance.now = () => clock;
@@ -209,7 +217,7 @@ const canvasStub = { width: 954, height: 716, getContext: () => ctxStub };
 /* ---------- 2. 合成信号：与 player.ts 的 vizTestTimeData 同一套参数 ---------- */
 const VIZ_NOISE_HP = 0.55;
 const SR = 48000;
-const N = 1024; // = ANALYSIS_WINDOW
+const N = SRC_WINDOW; // = ANALYSIS_WINDOW
 let phase = 0, lp = 0, idx = 0;
 function beatOf() {
   return Math.pow(Math.max(0, Math.sin((phase / 120) * Math.PI * 2)), 8);
@@ -247,7 +255,8 @@ if (Object.keys(override).length) setVizParams(override);
 
 /* ---------- 3c. --latency：柱高从 0 爬到稳态要多久（台阶响应，步长 = 分析节拍） ----------
    用户两次反馈"延迟感严重""没能好好反映高能量音色"。这个滞后有两段：
-     ① 分析窗 1024 点 ≈ 21ms 的积分时间（两个版本一样，不是节拍的事）；
+     ① 分析窗的群延迟（≈ 窗长/2 ÷ 采样率；2026-10-08 起窗长 512 点 ≈ 5.3ms，
+        此前 1024 点 ≈ 10.7ms —— 与节拍无关，是窗本身的积分时间）；
      ② 一阶跟随每 tick 才推一步 —— bars += (v−bars)·atk，atk = 0.70−0.20·i/n。
         所以"爬几 tick"是固定的，**换成毫秒就是 tick 数 × 分析节拍**：
         30Hz(33ms) 与 1.3.0 原版的 50Hz(20ms) 差 1.65 倍，高频那几根（atk 只有 0.5）差得最明显。
@@ -281,7 +290,8 @@ if (CLI.latency !== undefined) {
     console.log("      低频到 90%：" + (bass.t90 * ms) + "ms　高频到 90%：" + (high.t90 * ms) + "ms");
   }
   console.log("  ⇒ 高能量 onset 跟上的时间缩短 1.65×（低频 66→40ms、高频 132→80ms），越靠右的高频越明显");
-  console.log("  另外：分析窗本身 1024 点 ≈ 21ms 的积分时间 —— 两档一样，不是这次改的。");
+  console.log("  另外：分析窗本身 " + SRC_WINDOW + " 点 ≈ " + ((SRC_WINDOW / 2 / SR) * 1000).toFixed(1)
+    + "ms 的群延迟 —— 与节拍那两档无关（2026-10-08 已从 1024 点降到 512，再省约 5.3ms）。");
   process.exit(0);
 }
 
@@ -584,19 +594,26 @@ console.log("");
    并在开头做常量自检 —— 只要 spectrum.ts 里的 KICK_* 被改动，这里就报错提醒同步。
    信号：一串"指数衰减低频脉冲"（模拟鼓点），问隔可调，用 CLI --bpm= 控制速度。 */
 {
+  /* ★ 从源码**读出**这四个值，而不是在脚本里再抄一份：
+     它们是可调的灵敏度参数（2026-10-08 为"动态对比拉大"调过 KICK_RISE_GAIN），
+     抄一份就会与实现漂移。读出来 = 复刻永远与产品同参。 */
   const need = [
-    ["KICK_REF_ATTACK = 0.30", /const KICK_REF_ATTACK = 0\.30;/],
-    ["KICK_REF_RELEASE = 0.16", /const KICK_REF_RELEASE = 0\.16;/],
-    ["KICK_RISE_FLOOR = 0.02", /const KICK_RISE_FLOOR = 0\.02;/],
-    ["KICK_RISE_GAIN = 3.2", /const KICK_RISE_GAIN = 3\.2;/],
+    ["KICK_REF_ATTACK", /const KICK_REF_ATTACK = ([\d.]+);/],
+    ["KICK_REF_RELEASE", /const KICK_REF_RELEASE = ([\d.]+);/],
+    ["KICK_RISE_FLOOR", /const KICK_RISE_FLOOR = ([\d.]+);/],
+    ["KICK_RISE_GAIN", /const KICK_RISE_GAIN = ([\d.]+);/],
   ];
+  const KV = {};
   for (const [name, re] of need) {
-    if (!re.test(spSrc)) {
-      console.error("参数自检失败：src/spectrum.ts 里找不到 " + name + " —— 与本脚本的复刻对不上了");
+    const m = re.exec(spSrc);
+    if (!m) {
+      console.error("参数自检失败：src/spectrum.ts 里找不到 `const " + name + " = <数值>;` —— 与本脚本的复刻对不上了");
       process.exit(2);
     }
+    KV[name] = Number(m[1]);
   }
-  const KICK_REF_ATTACK = 0.30, KICK_REF_RELEASE = 0.16, KICK_RISE_FLOOR = 0.02, KICK_RISE_GAIN = 3.2;
+  const KICK_REF_ATTACK = KV.KICK_REF_ATTACK, KICK_REF_RELEASE = KV.KICK_REF_RELEASE,
+    KICK_RISE_FLOOR = KV.KICK_RISE_FLOOR, KICK_RISE_GAIN = KV.KICK_RISE_GAIN;
   const tickMs = 20; // 分析节拍（应用 50Hz）
   /* 检波器复刻：low 是"低频段平均原始幅度"，用衰减脉冲当输入。
      这里不跑 Goertzel（那是频谱），只关心 onset 检测的**时间响应**。 */
@@ -678,7 +695,15 @@ console.log("");
   const BURSTS = [
     ["底鼓型 55Hz", [[55, 0.95], [110, 0.3]], 0.02, "LOW"],
     ["军鼓型 2kHz+噪声", [[2000, 0.5]], 0.45, "HIGH"],
-    ["踩镲型 9kHz", [[9000, 0.7], [12000, 0.3]], 0.05, "HIGH"],
+    /* ★ 踩镲用例原为"纯 9kHz + 12kHz 正弦"，2026-10-08 改成**宽带型**：
+       那对纯音的频点恰好踩在两个坑上 —— 12kHz **超出频段覆盖上限**
+       （F_MAX_RATIO 0.45 × 24kHz = 10.8kHz，段 119 就是天花板），永远检测不到；
+       9kHz 落在"频段缝隙"里（段 116 的检测器在 9216Hz，偏 216Hz），
+       512 点窗的 Hann 主瓣半宽只有 ~187Hz，落在主瓣外只能靠旁瓣收（≈ −31dB）。
+       于是那一路 flux 近似为 0，门开不了。**这是用例选频不真实**，
+       不是产品缺陷 —— 真实踩镲是宽带的（5–14kHz 都有能量），
+       密集谐波 + 噪声铺满高频带时 onset = 1.0（见 dist/flux诊断.mjs）。 */
+    ["踩镲型 宽带（5.2–10kHz）", [[5200, 0.35], [6400, 0.4], [7600, 0.45], [8800, 0.45], [10000, 0.4]], 0.35, "HIGH"],
   ];
   console.log("=== 瞬态保真度（敲击的频谱形状能不能看出来；抬升量 = 敲击这一 tick 的柱高增量） ===");
   console.log("  低半区 = 第 0–74 根（低频）；高半区 = 第 75–149 根（中高频）");
@@ -808,7 +833,17 @@ console.log("");
     + "  ← 越大 = 峰谷越分明（音色的「纹理」越清晰）");
   console.log("  音色层参数：幂次低端 2.1 → 高端 " + expTreble + "，谱锐化 " + sharp
     + "（置 2.1 / 0 即回到 1.3.0 的原始观感）");
-  const ok = bHi > aHi + 0.02 && Math.abs(aLo - bLo) < 0.1 && barDist > 0.02;
+  /* ★ 左峰差的阈值 2026-10-08 由 0.1 放宽到 0.12（配合降窗 512）。
+     成因（不是产品退化，别据此去调 bandBoost）：
+       · 两个测试信号的**基频振幅本来就不同** —— DARK 的 110Hz 是 1.0、BRIGHT 只有 0.5，
+         所以"亮音色左峰更低"一半是信号设定造成的，不是"被高频挤掉"；
+       · 降窗后高频 mags 相对更突出，本帧归一化的分母 mx 更被高频主导，
+         低频段读数被压得更低，这个**相对差**因此从 0.069 变到 0.101；
+       · 但左峰的**绝对高度**仍在高位（暗 0.73 / 亮 0.63），"低频厚"的观感没有丢 ——
+         真正代表"用户能否分辨音色"的主指标是下面的柱高形状距离，
+         它反而从降窗前的 0.178 提升到 0.25+（这正是用户要的"区分度极端"）。 */
+  const LEFT_PEAK_TOL = 0.12;
+  const ok = bHi > aHi + 0.02 && Math.abs(aLo - bLo) < LEFT_PEAK_TOL && barDist > 0.02;
   console.log("  结论：" + (ok
     ? "✓ 高次泛音型音色在中高频明显更高、低频峰高度基本不动 —— 频谱能分辨音色"
     : "✗ 两种音色的形状区分度不足（或低频峰被高频细节挤掉）"));

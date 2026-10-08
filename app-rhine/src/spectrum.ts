@@ -10,9 +10,12 @@
  *   这里保留那条流水线，只把数据源换成 AnalyserNode 的时域缓冲（getFloatTimeDomainData）。
  *
  * 与 1.3.0 的关系（用户 2026-09-25 明确要求"参数设置请完全参照 1.3.0 版本的播放器"）：
- *   1. 观感参数**逐个照抄 1.3.0**：1024 点分析窗、抖动幅度 0.45、行波空间频率
+ *   1. 观感参数**逐个照抄 1.3.0**：抖动幅度 0.45、行波空间频率
  *      0.1 + 0.2·(K−0.4)、相位步进 0.03、单边颤动 0.055、14 级量化、倾斜 55、
  *      泵动 0.40、幂次 2.1、一阶跟随系数 0.7−0.2·(i/n) / 0.58+0.22·(i/n)。
+ *      ★ 例外：**分析窗已从 1024 降到 512**（2026-10-08 用户要求"延迟要低"，
+ *        明确覆盖"窗长也照抄 1.3.0"这一条，见 ANALYSIS_WINDOW 的说明）。
+ *        这是目前唯一一处刻意偏离 1.3.0 的参数，改动前先读那一段的取舍说明。
  *      2.0.0 曾按"毛刺感太严重"做过一轮去毛刺（慢速随机抖动、[1,2,1] 平滑、512 点窗），
  *      已按用户要求整体撤回 —— 屏幕上看到的就是 1.3.0 那条流水线的输出。
  *   2. 只动**架构、不动观感**：Goertzel 从主线程搬进 Web Worker（每 20ms 一 tick，
@@ -33,9 +36,16 @@ export const SPECTRUM_BANDS = 120; // 对数频段数（分析侧，不动）
    所以旧版导入的调音参数效果一个字没变。 */
 const BAR_N = 150; // 柱数
 const VIZ_LEVELS = 14; // 阶梯级数
-/* 分析窗长：★ 维持 1.3.0 的 1024 点（用户要求"参数完全参照 1.3.0"，窗长也是参数）。
-   1024 点 Hann 窗在 42Hz 处的等效噪声带宽约 5Hz，正好护住低频那根"细针"的稳定度。 */
-const ANALYSIS_WINDOW = 1024;
+/* 分析窗长：★ 2026-10-08 用户要求"延迟要低"，从 1.3.0 的 1024 点降到 **512 点** ——
+   这是对"参数完全参照 1.3.0"（2026-09-25 的要求）的一次**明确覆盖**，延迟优先。
+   · 延迟来源：窗本身引入的等效群延迟 ≈ (N/2)/sr —— 1024 点 ≈ 10.7ms、512 点 ≈ 5.3ms。
+     这是**因果链的固有代价**：先听到一整个窗才能算完，调参救不了（见下面 BEAT_* 的说明）。
+     再叠上 20ms 的分析节拍与 worker 往返，屏幕才亮起来；窗减半等于把这条链的最粗一段砍掉。
+   · 代价：等效噪声带宽 ENBW ≈ 1.5·sr/N（Hann 窗）—— 1024 点时 ≈ 70Hz、512 点时 ≈ 141Hz
+     （按 48kHz）。低频那根"细针"（≈42Hz）因此更容易被邻频带干扰，稳定度下降 ——
+     用户已知情并选择接受（观感由 setVizParams 的 bassSigma 与瞬态强调继续保形）。
+   · 采样率变化时这套映射自动跟随：bandK 与 HANN 全按本常量算，没有别处写死窗长。 */
+const ANALYSIS_WINDOW = 512;
 /** worker 侧的分析窗长（与这里必须一致；player.ts 用它决定喂多少采样） */
 export const SPECTRUM_WINDOW = ANALYSIS_WINDOW;
 
@@ -123,7 +133,7 @@ const KICK_BAND_N = KICK_BAND_TO - KICK_BAND_FROM + 1;
 const KICK_REF_ATTACK = 0.30; // ref 上升时的跟随系数
 const KICK_REF_RELEASE = 0.16; // ref 回落时的跟随系数（越大越跟得上快节奏）
 const KICK_RISE_FLOOR = 0.02; // 触发阈值（越低越敏感）
-const KICK_RISE_GAIN = 3.2; // 阈值之上的放大倍数
+const KICK_RISE_GAIN = 4.2; // 阈值之上的放大倍数
 
 /* 这两组常量要让 worker 里的分析实现也用到（同一套数值，避免两条路径跑出不同观感）。 */
 export {
@@ -146,8 +156,16 @@ export {
 const TRANSIENT_REF_ATTACK = 0.26; // 通量参考电平上升时的跟随系数
 const TRANSIENT_REF_RELEASE = 0.14; // 通量参考电平回落时的跟随系数
 const TRANSIENT_FLOOR = 0.18; // 触发阈值
-const TRANSIENT_GAIN = 2.6; // 阈值之上的放大倍数
-const TRANSIENT_BOOST = 0.62; // 份额换算成"抬多少柱高"的系数（0 = 关闭瞬态强调）
+/* ★ 动态对比拉大（2026-10-08 用户："频谱的区分度可以极端一点"，选定方向为**动态对比**）：
+   不动稳态的频谱形状（那是"频域锐化"的事，用户没选），只把**敲击瞬间的落差**做狠 ——
+   稳态段柱子基本不动，一敲下去受影响的频段窜起来、敲完立刻落回，
+   "动"与"静"的对比因此更极端，鼓点的存在感更强。
+   · TRANSIENT_BOOST 抬升量（份额换算成柱高的系数）0.62 → 0.90；
+   · TRANSIENT_GAIN   门曲线斜率（越大，onset 从 0 冲到 1 越快）2.6 → 3.4；
+   · KICK_RISE_GAIN   鼓点阈值之上的放大倍数 3.2 → 4.2。
+   置 TRANSIENT_BOOST = 0 即关闭瞬态层（回到 1.3.0 观感）。 */
+const TRANSIENT_GAIN = 3.4; // 阈值之上的放大倍数
+const TRANSIENT_BOOST = 0.9; // 份额换算成"抬多少柱高"的系数（0 = 关闭瞬态强调）
 const TRANSIENT_BANDS_REF = 12; // 份额归一参考段数：通量集中在这个段数上时，每段加满 TRANSIENT_BOOST
 const TRANSIENT_FROM = 1; // 从第几个分析频段开始算（跳过直流附近）
 export {
@@ -179,8 +197,8 @@ const FALL_INTERP_SPAN = 0.6;
 
 /* ==================== 节拍先验（离线预分析，详见 beatmap.ts） ====================
    在线的鼓点检测（上面的 KICK_*）是**因果的**：必须先听到、才可能亮。
-   一个分析窗 1024 点 ≈ 21ms，再乘上 worker 往返与 60fps 的绘制节拍，
-   屏幕真正亮起来的时刻比耳朵晚 30~50ms —— 注释里反复出现的"延迟感严重"
+   一个分析窗 512 点 ≈ 10.7ms（原 1024 点 ≈ 21ms），再乘上 worker 往返与绘制的节拍，
+   屏幕真正亮起来的时刻比耳朵晚 —— 注释里反复出现的"延迟感严重"
    就是这条链的固有代价，**调参救不了**（参数只改灵敏度，改不了因果性）。
 
    先验路径不一样：拍点在播放前就算出来了，所以可以在拍点**之前**就升起来。
@@ -300,6 +318,11 @@ export class Spectrum {
   private prevBands = new Float32Array(SPECTRUM_BANDS);
   private fluxDelta = new Float32Array(SPECTRUM_BANDS);
   private transientRef = 0;
+  /* ★ 上一帧的原始峰值（用于通量归一化，见 analyze 里 flux 的说明）。
+     降窗到 512 后低频泄漏减少、低频 mags 相对下降，本帧峰值 mx 更容易被**宽频敲击**
+     独占抬高 —— 用 mx 做分母会把"这一敲带来的通量"按敲击自己的峰值缩掉，门因此关死。
+     改用**上一帧**的峰值（敲击前的稳定参考）做分母，通量就能如实反映"这一敲有多突然"。 */
+  private prevMx = 0;
   private transientOn = 0; // 本次敲击的强度（0~1）
   private grad: CanvasGradient | null = null;
   private gradKey = "";
@@ -465,6 +488,7 @@ export class Spectrum {
     this.prevBands.fill(0);
     this.fluxDelta.fill(0);
     this.transientRef = 0;
+    this.prevMx = 0;
     this.transientOn = 0;
     this.shimmerPhase = 0;
     /* 先验的量一并清掉：换曲时"上一首的拍点"不该再推着这一首的低频走。
@@ -481,7 +505,7 @@ export class Spectrum {
 
   /* ---------- 分析：Hann 加窗 + Goertzel ---------- */
   /** 加窗后的时域缓冲（每 tick 只算一次）。
-      ★ 原来 `td[i]*HANN[i]` 写在每个频段的内层循环里 —— 120 个频段 × 1024 点
+      ★ 原来 `td[i]*HANN[i]` 写在每个频段的内层循环里 —— 120 个频段 × 窗长
       等于同一件事被算了 12 万次，还多读 12 万次 HANN 数组。乘积顺序不变，
       所以结果逐位相同（只是不再重复算）。 */
   private windowed = new Float32Array(ANALYSIS_WINDOW);
@@ -495,7 +519,7 @@ export class Spectrum {
       s2 = s1;
       s1 = s0;
     }
-    // 1.3.0 的归一化就是 N/4（N = 分析窗长 = 1024）
+    // 1.3.0 的归一化就是 N/4（N = 分析窗长，现为 512）
     return Math.sqrt(Math.max(0, s1 * s1 + s2 * s2 - co * s1 * s2)) / (n / 4);
   }
   private analyze(td: Float32Array) {
@@ -526,7 +550,11 @@ export class Spectrum {
       this.prevBands[b] = this.bands[b];
       fluxSum += pos;
     }
-    const flux = fluxSum / Math.max(mx, 1e-9); // 按本帧峰值缩放 → 与音量无关
+    /* 分母取"敲击前的稳定峰值"：首帧 prevMx 还是 0（resetPeaks 清过），
+       此时退回本帧峰值 mx，否则除出天文数字、把 transientRef 顶到天上再也下不来。 */
+    const refMx = this.prevMx > 0 ? this.prevMx : mx;
+    const flux = fluxSum / Math.max(refMx, 1e-9); // 与音量无关，且不被这一敲自己的峰值缩掉
+    this.prevMx = mx;
     if (this.transientRef <= 0) this.transientRef = flux;
     const trise = (flux - this.transientRef) / Math.max(this.transientRef, 1e-6);
     const onset = Math.max(0, Math.min(1, (trise - TRANSIENT_FLOOR) * TRANSIENT_GAIN));

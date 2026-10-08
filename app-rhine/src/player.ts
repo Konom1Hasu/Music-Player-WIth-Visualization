@@ -1995,7 +1995,7 @@ function renderNow() {
   renderList();
 }
 
-/* 频谱计算搬到 Web Worker：120 段 × 1024 点的 Goertzel 每次约 12 万次乘加，
+/* 频谱计算搬到 Web Worker：120 段 × 窗长的 Goertzel 每次约十万次乘加，
    放主线程会跟三维场景抢帧。worker 失败就退回同步计算（见 analysisTick）。
    ★ 分析节拍 = **1.3.0 的 50Hz**（见下面 VIZ_ANALYSIS_MS 的注释）：
      原来 `ts - workerSentAt >= 33` 让屏幕上的柱高最多滞后一帧半 + worker 往返，
@@ -2036,7 +2036,7 @@ function initSpectrumWorker() {
       const T_BOOST = ${SPECTRUM_TR_BOOST}, T_REF = ${SPECTRUM_TR_BANDS_REF}, T_FROM = ${SPECTRUM_TR_FROM};
       const hann = new Float32Array(N);
       for (let i = 0; i < N; i++) hann[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (N - 1)));
-      let bandK = null, sr = 0, kickRef = 0, transRef = 0;
+      let bandK = null, sr = 0, kickRef = 0, transRef = 0, prevMx = 0;
       const prevMags = new Float32Array(B);
       const fluxPos = new Float32Array(B);
       /* 加窗后的缓冲：每 tick 只乘一遍（复用同一块，不产生垃圾）。 */
@@ -2073,7 +2073,11 @@ function initSpectrumWorker() {
           prevMags[b] = mags[b];
           fluxSum += pos;
         }
-        const flux = fluxSum / Math.max(mx, 1e-9);
+        /* 归一化用**上一帧**峰值（首帧退回本帧）：与 Spectrum.analyze 同一算法，
+           否则 worker 生效时观感会和同步路径不一致（见 spectrum.ts 的 prevMx 说明）。 */
+        const refMx = prevMx > 0 ? prevMx : mx;
+        const flux = fluxSum / Math.max(refMx, 1e-9);
+        prevMx = mx;
         if (transRef <= 0) transRef = flux;
         const trise = (flux - transRef) / Math.max(transRef, 1e-6);
         const onset = Math.max(0, Math.min(1, (trise - T_FLOOR) * T_GAIN));
@@ -2196,7 +2200,7 @@ function analysisTick() {
   }
   if (VIZ_TEST) {
     if (!spectrum) return;
-    if (!timeData) timeData = new Float32Array(1024);
+    if (!timeData) timeData = new Float32Array(SPECTRUM_WINDOW);
     vizTestTimeData(timeData);
     spectrum.update(timeData, actx?.sampleRate);
   } else if (analyserNode && spectrum) {
@@ -2233,7 +2237,7 @@ function armSpectrumWatchdog() {
 /* ?viztest=1：不播音乐，用合成信号跑频谱 —— 用来在无音频的环境里核对频谱观感。
    信号要有**真实音乐的频谱形状**：粉噪打底（每倍频程 −3dB，高频自然衰减）＋ 一条低频
    基音与它的谐波 ＋ 每 4 秒一次的鼓点包络。
-   早先这里是"55Hz + 440Hz + 2.4kHz 三个纯音"——纯音经过 1024 点 Hann 加窗后
+   早先这里是"55Hz + 440Hz + 2.4kHz 三个纯音"——纯音经过 Hann 加窗后
    旁瓣泄漏很宽，120 个对数频段的读数几乎一样大，本帧峰值归一后全部贴到 1.0，
    看起来就是"柱子全顶满"，完全没法用来看观感。 */
 let vizTestPhase = 0;
@@ -2248,7 +2252,7 @@ function vizTestTimeData(out: Float32Array) {
   for (let i = 0; i < n; i++) {
     const t = (vizNoiseIdx + i) / sr;
     /* 频谱形状要**像真实音乐**：低频厚、高频薄（一阶低通 ＝ −6dB/oct，再叠白噪垫底）。
-       早先用"三个纯音"，1024 点 Hann 加窗后旁瓣泄漏很宽，120 个对数频段读数几乎一样，
+       早先用"三个纯音"，Hann 加窗后旁瓣泄漏很宽，120 个对数频段读数几乎一样，
        本帧峰值归一后整排都贴到 1.0，看起来就是"柱子全顶满"——完全没法用来看观感。 */
     vizNoiseLp += (Math.random() * 2 - 1 - vizNoiseLp) * VIZ_NOISE_HP;
     let s = vizNoiseLp * 0.9 + (Math.random() * 2 - 1) * 0.1;
@@ -2274,7 +2278,7 @@ function spectrumPalette(): Partial<SpectrumPalette> {
 }
 
 /* ================= 队列级频谱预分析（"乐谱先验"） =================
-   在线的鼓点检测是**因果的**：先听到、才可能亮。一个分析窗 1024 点 ≈ 21ms，
+   在线的鼓点检测是**因果的**：先听到、才可能亮。一个分析窗 512 点 ≈ 10.7ms，
    加上 worker 往返与 60fps 的绘制节拍，屏幕比耳朵晚 30~50ms —— 这个延迟
    **调参救不了**（参数只改灵敏度，改不了因果性），只能靠"提前知道"。
    所以：播放前把整首歌离线过一遍（8kHz 单声道 + 16 段 Goertzel，见 beatmap.ts），
@@ -2410,7 +2414,7 @@ async function ensureAnalyser(): Promise<AnalyserNode | null> {
          `sampleRate: 0`（非法值、直接抛错），见上面那段；不要重蹈。 */
     const source = ctx.createMediaElementSource(audio);
     const node = ctx.createAnalyser();
-    node.fftSize = 1024; // 与 1.3.0 的分析窗长一致
+    node.fftSize = SPECTRUM_WINDOW; // 跟随分析窗长（spectrum.ts 的 ANALYSIS_WINDOW；AnalyserNode 要求它是 2 的幂）
     node.smoothingTimeConstant = 0.6;
     source.connect(node);
     node.connect(ctx.destination);   // ← 这一句必须有，否则整条链路悬空、无声且无频谱
@@ -2470,15 +2474,19 @@ function vizFrame(ts: number) {
      ★ 分析（Goertzel + 一阶跟随 + 抖动）**不在这一条循环里**：由 analysisTick() 每 20ms 驱动
      （1.3.0 的 50Hz，见 VIZ_ANALYSIS_MS 的注释）；rAF 只负责重画与回落。 */
   const dt = vizLast ? Math.min(0.1, (ts - vizLast) / 1000) : 0.033;
-  const budget = VIZ_TEST || !audio.paused ? 15 : 64;
+  /* ★ 帧率解锁（2026-10-08 用户："帧率要高"）：播放中**不再手动节流**。
+     原来播放中也卡 15ms 的门 —— 60Hz 屏上 rAF 步长 16.7ms 恰好放行，看不出问题；
+     但本机是 **165Hz 屏（rAF 步长 6.06ms）**，15ms 的门等于"每三帧才画一次"，
+     实际帧率被削到 ~55fps。现在跟着 rAF 走满刷新率。
+     暂停后仍降到 64ms（≈15fps）：收起动画本身就是频谱的一部分，停掉会让画面僵住，
+     但没必要按满帧率跑没人看的画面。 */
+  const busy = VIZ_TEST || !audio.paused;
+  const budget = busy ? 0 : 64;
   if (ts - vizLast < budget) {
     vizRaf = requestAnimationFrame(vizFrame);
     return;
   }
   vizLast = ts;
-  /* 播放中按 60fps 渲染；暂停后降到 15fps —— 不用停循环，收起动画本身就是频谱的一部分，
-     停掉的话暂停瞬间画面会僵在最后一帧。 */
-  const busy = VIZ_TEST || !audio.paused;
   if (spectrum) {
     if (!busy) spectrum.decay();
     spectrum.render(dt);
@@ -3502,7 +3510,7 @@ export function mountSongDetail(root: ParentNode) {
         (window as any).__spectrum = spectrum;
         // 合成信号的峰值：用来核对 ?viztest=1 的时域数据到底有没有在跑
         (window as any).__vizTestProbe = () => {
-          const out = new Float32Array(1024);
+          const out = new Float32Array(SPECTRUM_WINDOW);
           const beat = vizTestTimeData(out);
           let peak = 0;
           for (let i = 0; i < out.length; i++) peak = Math.max(peak, Math.abs(out[i]));
