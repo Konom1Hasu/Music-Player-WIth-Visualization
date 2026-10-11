@@ -969,6 +969,21 @@ export class Spectrum {
     this.kickEnergy = freq.length > SPECTRUM_BANDS && isFinite(freq[SPECTRUM_BANDS]) ? freq[SPECTRUM_BANDS] : 0;
     this.advance();
   }
+  /** ★ SelfMusic 参考算法的接入点（用户："可视化算法可以读取 D 盘的 SelfMusic 项目文件作为参考"）：
+      外部（`selfmusic-spectrum.ts` 的 `SpectrumEngine`）算好的柱高直接交给渲染层。
+      走这条路时内部那条 1.3.0 流水线（analyze / advance / 各层增益）**不执行** ——
+      画布、峰值线、五种样式、绘制插值全部照旧复用同一份 `bars`/`display`。
+      调用方负责把引擎输出的频段数重采样到 BAR_N。 */
+  applyExternalBars(src: ArrayLike<number>) {
+    const n = Math.min(BAR_N, src.length);
+    this.prevBars.set(this.bars);
+    for (let i = 0; i < n; i++) {
+      const v = Math.max(0, Math.min(1, src[i]));
+      this.bars[i] = v;
+      this.peaks[i] = Math.max(this.peaks[i] * PEAK_DECAY, v);
+    }
+    this.lastAdvanceAt = performance.now();
+  }
   /** 没有音频时把柱高收到静默状态 */
   decay() {
     let live = false;

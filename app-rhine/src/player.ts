@@ -1,6 +1,8 @@
 // 音乐播放器：把本地音乐库映射成"档案"，驱动三维档案阵列，并提供传输控制。
 // 后端能力（NCM 解密 / B 站缓存 / 读封面 / 歌词 / 读音频）复用 Electron 的 window.desktop。
 import { setRecords, type ArchiveRecord } from "./data";
+/* ★ SelfMusic 参考算法：来源 D:\SelfMusic\web\spectrum.mjs（见该文件头注释） */
+import { SpectrumEngine as SelfSpectrumEngine } from "./selfmusic-spectrum";
 import {
   Spectrum,
   analysisWindow,
@@ -2020,6 +2022,50 @@ let dataAgeMs = 0; // 诊断：屏幕上这份频谱数据是多久之前喂进�
    节拍由**自己这条定时器**驱动，不挂在 rAF 上：rAF 的 16.7ms 步长会把 20ms 的门变成 33ms。
    rAF 那条循环只负责重画。 */
 const VIZ_ANALYSIS_MS = 20;
+/* ★★ 频谱算法档位（2026-10-11）：用户："可视化算法可以读取 D 盘的 SelfMusic 项目文件作为参考"。
+   `selfmusic` = D:\SelfMusic\web\spectrum.mjs 那套（Hann 4096 · 96 对数频段 · 分层窗长 ·
+   倾斜/U 形权重/逐带 AGC/细节形变/顶端软膝/融合音色强调，共 97 项自测）；
+   `legacy` = 本项目原来那条 1.3.0 流水线（v2.7.0 观感）。
+   切换方式：localStorage `rhine-viz-algo` = 'legacy' 回退；默认 selfmusic。
+   ⚠ 走 selfmusic 时分析窗要 4096 点（见 ensureAnalyser 的 fftSize），且不再用那个 120 段 worker。 */
+const LS_VIZ_ALGO = "rhine-viz-algo";
+/** 画布柱数：与 spectrum.ts 的 BAR_N 一致（重采样目标） */
+const BAR_N_REF = 150;
+/** SelfMusic 引擎的分析窗长（它要求 4096 点；分层窗 1024/2048/4096 在引擎内部） */
+const SPECTRUM_WINDOW_REF = 4096;
+let vizAlgo: "selfmusic" | "legacy" = (() => {
+  try {
+    return localStorage.getItem(LS_VIZ_ALGO) === "legacy" ? "legacy" : "selfmusic";
+  } catch {
+    return "selfmusic";
+  }
+})();
+/** SelfMusic 引擎实例（懒建；算法档 = legacy 时永不创建） */
+let refEngine: { push(d: Float32Array): void; compute(): Float32Array; bands?: number } | null = null;
+let refBarsBuf: Float32Array | null = null;
+/** 把 SelfMusic 引擎的 96 段重采样到画布的 BAR_N 柱，再交给渲染层 */
+function refSpectrumTick(td: Float32Array) {
+  if (!spectrum) return;
+  const sr = actx?.sampleRate ?? 48000;
+  if (!refEngine) {
+    refEngine = new SelfSpectrumEngine({ sampleRate: sr, bands: 96, fftSize: SPECTRUM_WINDOW_REF });
+  }
+  const eng = refEngine;
+  if (!eng) return;
+  if (!refBarsBuf || refBarsBuf.length !== BAR_N_REF) refBarsBuf = new Float32Array(BAR_N_REF);
+  const out = refBarsBuf;
+  eng.push(td);
+  const h = eng.compute(); // Float32Array(bands) 0..1
+  const B = h.length;
+  for (let i = 0; i < BAR_N_REF; i++) {
+    const x = (i / (BAR_N_REF - 1)) * (B - 1);
+    const i0 = Math.floor(x);
+    const i1 = Math.min(B - 1, i0 + 1);
+    const f = x - i0;
+    out[i] = h[i0] * (1 - f) + h[i1] * f;
+  }
+  spectrum.applyExternalBars(out);
+}
 function initSpectrumWorker() {
   try {
     const src = `
@@ -2206,7 +2252,11 @@ function analysisTick() {
   } else if (analyserNode && spectrum) {
     if (!timeData) timeData = new Float32Array(analyserNode.fftSize);
     analyserNode.getFloatTimeDomainData(timeData);
-    if (spectrumWorker && workerEver) {
+    /* ★ SelfMusic 参考算法（见 selfmusic-spectrum.ts 的文件头）：与内部流水线互换，
+       由 `rhine-viz-algo` 决定走哪条；默认 selfmusic，写 'legacy' 即回退旧观感。 */
+    if (vizAlgo === "selfmusic") {
+      refSpectrumTick(timeData);
+    } else if (spectrumWorker && workerEver) {
       const n = analysisWindow(timeData);
       let buf = tdBufs.length ? (tdBufs[tdRotate++ % tdBufs.length] as Float32Array) : null;
       if (!buf || buf.length !== n) buf = new Float32Array(n);
@@ -2414,7 +2464,9 @@ async function ensureAnalyser(): Promise<AnalyserNode | null> {
          `sampleRate: 0`（非法值、直接抛错），见上面那段；不要重蹈。 */
     const source = ctx.createMediaElementSource(audio);
     const node = ctx.createAnalyser();
-    node.fftSize = SPECTRUM_WINDOW; // 跟随分析窗长（spectrum.ts 的 ANALYSIS_WINDOW；AnalyserNode 要求它是 2 的幂）
+    /* 分析窗长：SelfMusic 那套要 4096 点（低频分辨率更好、快鼓点分得开）；
+       原来的内部流水线仍是 1024。AnalyserNode 要求 2 的幂。 */
+    node.fftSize = vizAlgo === "selfmusic" ? SPECTRUM_WINDOW_REF : SPECTRUM_WINDOW;
     node.smoothingTimeConstant = 0.6;
     source.connect(node);
     node.connect(ctx.destination);   // ← 这一句必须有，否则整条链路悬空、无声且无频谱
