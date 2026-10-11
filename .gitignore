@@ -8,6 +8,10 @@ build/
 # 不入库 —— 源在 app-rhine/dist（也由 npm run build 重新生成）。
 app/ui/
 
+# B 站缓存文件夹（放在这里只当"参考素材"：频谱对照用的那段视频与音轨，122 MB）
+# 不入库，也不参与文档一致性检查里的"顶层条目"清点。
+26694583166/
+
 # ===== 依赖 =====
 node_modules/
 package-lock.json
