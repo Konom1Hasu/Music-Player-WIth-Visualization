@@ -2048,7 +2048,28 @@ function refSpectrumTick(td: Float32Array) {
   if (!spectrum) return;
   const sr = actx?.sampleRate ?? 48000;
   if (!refEngine) {
-    refEngine = new SelfSpectrumEngine({ sampleRate: sr, bands: 96, fftSize: SPECTRUM_WINDOW_REF });
+    /* ★ 用户："将频谱分布稍微铺散开一些"。
+       量化口径（`dist\_ref视频帧\_spread.mjs`：同一段参考原声、8 秒、20ms/tick，
+       指标是"高度 >0.25 的柱占比 / 右三分之一÷左三分之一 / 中÷左 / 离散度 / 顶满占比"）：
+
+         档位                                   亮点柱%  右/左   中/左   离散度  顶满%
+         引擎默认                                23.9   0.390  0.599  0.199  2.0
+         U 形权重加强 endsGain2.4/midCut.10       22.9   0.242  0.554  0.207  2.2   ← 反而更挤在左边
+         ★ 逐带 AGC 加强 rel1.5 / from0.30        26.8   0.443  0.711  0.197  2.0   ← 本档
+         组合（U 形 + AGC + 倾斜 0.15）            25.7   0.334  0.694  0.202  2.1
+         倾斜归零 + U 形 2.4                      23.5   0.330  0.615  0.200  2.0
+
+       ⇒ 只有"逐带慢包络 AGC"能真正把分布铺开：立起来的柱更多（+2.9 个点）、
+         能量往中/右铺（右/左 0.390→0.443、中/左 0.599→0.711），
+         而离散度不变（没摊平成墙）、顶满比例不变（没削顶）。
+         U 形权重（endsGain/midCut）是反效果 —— 它把能量又推回左端，故保持默认。 */
+    refEngine = new SelfSpectrumEngine({
+      sampleRate: sr,
+      bands: 96,
+      fftSize: SPECTRUM_WINDOW_REF,
+      bandAgcRel: 1.5, // 逐带慢包络的抬升量（默认 1.15）
+      bandAgcFrom: 0.3, // 从这一归一化频率起生效（默认 0.55；下探到中频）
+    });
   }
   const eng = refEngine;
   if (!eng) return;
