@@ -233,6 +233,18 @@ const SPREAD_TAPS = [0.1, 0.2, 0.4, 0.2, 0.1]; // 与引擎 DEFAULT_SMOOTH_TAPS 
 const MERGE_R = 3;
 const MERGE_POST_PASSES = 2;
 
+/* ★ 保峰（2026-10-12 三轮，用户："在这个算法基础上，和原来的频谱融合起来"）。
+   融合（闭运算 + 补铺散）在填谷的同时会把峰磨圆、削低 —— 这正是上一轮要的"平缓"，
+   但也丢了原来（铺散版）峰的高度与形状。保峰 = 融合之后再对照闭运算之前的快照，
+   把"原来更高的柱位"（峰区）按 MERGE_KEEP 比例还回来：**谷用融合的、峰用原版的**。
+   MERGE_KEEP = 1 → out = max(铺散版, 融合版)（用户定档的「保峰·全」）——
+   峰值线与柱体照旧共用同一条曲线，不会脱节。
+   0 = 关闭（回退到纯融合）；0<K<1 = 只还一部分（K=0.5 即定档页的「保峰·半」）。
+   定档依据：同一段真实音乐（190.0s 起 8s，79 帧）七档渲染对比（dist\混融对比.html）：
+   谷深 0.059（同融合版）、高尖 0.35（保留铺散版的 81%）、最高柱 0.845（回到铺散版水平）。
+   注入点在补铺散之后、峰值线之前（仅在显示层；分析、包络、AGC、引擎输出一行不动）。 */
+const MERGE_KEEP: number = 1;
+
 /** 铺散的一遍实现：`dst[i] = Σ taps[j]·src[clamp(i + j − 2)]`。
     边界用**端点钳制**（不是引擎 smoothAcrossBands 的零填充）—— 与用户定档时看的
     渲染脚本（scripts\探针\_帧渲染.cjs 的 smoothF）逐位同口径；零填充会让最左/最右
@@ -387,6 +399,9 @@ export class Spectrum {
   /* ★ 铺散（SPREAD_PASSES 遍 5 抽头平滑）的双缓冲之一：bars 与它轮转，
      避免每 tick 新建数组；SPREAD_PASSES 为偶数时末遍结果天然落回 bars。 */
   private spreadBuf = new Float32Array(BAR_N);
+  /* ★ 保峰的"闭运算前快照"：存融合（闭运算 + 补铺散）之前的柱高（= 铺散输出），
+     融合完成后把峰区还回来（见文件头 MERGE_KEEP 的说明）。 */
+  private keepBuf = new Float32Array(BAR_N);
   private lastAdvanceAt = 0;
   private advanceIntervalMs = 20;
   /* 按量化级分桶用的容器（每帧复用，避免每帧新建数组） */
@@ -1091,6 +1106,8 @@ export class Spectrum {
        顺序 = spread×SPREAD_PASSES → close(R) → spread×MERGE_POST_PASSES ——
        与用户定档看的探针变换逐位同口径。 */
     if (MERGE_R > 0) {
+      /* ★ 保峰快照 = 闭运算之前的柱高（铺散输出）—— 见文件头 MERGE_KEEP 的说明 */
+      if (MERGE_KEEP > 0) this.keepBuf.set(this.bars);
       mergeClose(this.bars, this.spreadBuf);
       let cur: Float32Array = this.bars;
       let alt: Float32Array = this.spreadBuf;
@@ -1099,6 +1116,21 @@ export class Spectrum {
         const t = cur; cur = alt; alt = t;
       }
       if (cur !== this.bars) this.bars.set(cur);
+      /* 保峰：把"原来更高的柱位"（峰区）还回来 —— 谷用融合的、峰用原版的。
+         K ≥ 1 时直接取快照值（与定档探针 Math.max 逐位同口径，不做额外算术）；
+         0<K<1 时按比例还。 */
+      if (MERGE_KEEP >= 1) {
+        for (let i = 0; i < BAR_N; i++) {
+          const k = this.keepBuf[i];
+          if (k > this.bars[i]) this.bars[i] = k;
+        }
+      } else if (MERGE_KEEP > 0) {
+        for (let i = 0; i < BAR_N; i++) {
+          const k = this.keepBuf[i];
+          const b = this.bars[i];
+          if (k > b) this.bars[i] = b + (k - b) * MERGE_KEEP;
+        }
+      }
     }
     /* ③ 峰值线跟着（铺散+融合）后的值走：标记与柱顶同步 → 不会脱节成"浮空碎屑" */
     for (let i = 0; i < n; i++) {
