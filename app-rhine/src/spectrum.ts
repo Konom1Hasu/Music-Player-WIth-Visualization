@@ -218,6 +218,21 @@ const PEAK_MARK_MIN = 0.12;
 const SPREAD_PASSES = 2;
 const SPREAD_TAPS = [0.1, 0.2, 0.4, 0.2, 0.1]; // 与引擎 DEFAULT_SMOOTH_TAPS 同支（和恰为 1）
 
+/* ★ 顶端融合（2026-10-12 二轮，用户："顶端曲线平缓一点，可以将几个峰融合"）。
+   现象：铺散 ×2 之后每个峰仍各自独立、峰尖偏锐（"顶端曲线"不够平缓）。
+   做法：**灰度闭运算**（先膨胀后腐蚀，半径 MERGE_R）—— 只把"窄谷"填浅：相邻峰之间的
+   谷底抬起来 → 几座塔并成更缓的丘；孤立峰与宽隔断（如低频塔与中频墙之间的大空谷）
+   在闭运算下按数学性质保持原形，不会被误填。之后再补 MERGE_POST_PASSES 遍铺散，
+   把闭运算留下的平台边角圆化。
+   顺序与用户定档看的探针变换（spread×2 → close(R=3) → spread×2）逐位同口径：
+   注入点在铺散之后、峰值线之前（仅在显示层；分析、包络、AGC、引擎输出一行不动）。
+   定档依据：同一段真实音乐（190.0s 起 8s，79 帧）七档渲染对比（dist\顶融对比.html），
+   用户选「中」——峰数/帧 8.6→3.4、近邻谷深 0.148→0.096、顶端尖锐度 0.015→0.010、
+   最高柱 0.845→0.796（高度基本守住）；轻档变化太小、强/极档细节过少。
+   0 = 关闭（回退到纯铺散）。 */
+const MERGE_R = 3;
+const MERGE_POST_PASSES = 2;
+
 /** 铺散的一遍实现：`dst[i] = Σ taps[j]·src[clamp(i + j − 2)]`。
     边界用**端点钳制**（不是引擎 smoothAcrossBands 的零填充）—— 与用户定档时看的
     渲染脚本（scripts\探针\_帧渲染.cjs 的 smoothF）逐位同口径；零填充会让最左/最右
@@ -235,6 +250,32 @@ function spreadOnce(src: Float32Array, dst: Float32Array) {
       s += taps[j] * src[k];
     }
     dst[i] = s;
+  }
+}
+
+/** 顶端融合的核心：灰度闭运算（膨胀 → 腐蚀），半径 MERGE_R。
+    只有"窄谷"会被填浅（两侧都有更高的邻域时，谷底被抬到邻域的高水位）；
+    宽隔断与孤立峰保持原形（闭运算的数学性质；与定档探针的 closeOp 逐位同口径）。
+    边界与铺散一致：端点钳制。双缓冲：膨胀结果进 tmp，腐蚀结果写回 src。 */
+function mergeClose(src: Float32Array, tmp: Float32Array) {
+  const R = MERGE_R;
+  for (let i = 0; i < BAR_N; i++) {
+    let m = -1;
+    for (let k = i - R; k <= i + R; k++) {
+      const j = k < 0 ? 0 : k >= BAR_N ? BAR_N - 1 : k;
+      const v = src[j];
+      if (v > m) m = v;
+    }
+    tmp[i] = m;
+  }
+  for (let i = 0; i < BAR_N; i++) {
+    let m = 2;
+    for (let k = i - R; k <= i + R; k++) {
+      const j = k < 0 ? 0 : k >= BAR_N ? BAR_N - 1 : k;
+      const v = tmp[j];
+      if (v < m) m = v;
+    }
+    src[i] = m;
   }
 }
 
@@ -1046,7 +1087,20 @@ export class Spectrum {
       }
       if (cur !== this.bars) this.bars.set(cur);
     }
-    /* ③ 峰值线跟着铺散后的值走：标记与柱顶同步 → 不会脱节成"浮空碎屑" */
+    /* ②b 顶端融合：闭运算填窄谷（几个峰并成缓丘，见文件头 MERGE_R 的说明）+ 补铺散圆化。
+       顺序 = spread×SPREAD_PASSES → close(R) → spread×MERGE_POST_PASSES ——
+       与用户定档看的探针变换逐位同口径。 */
+    if (MERGE_R > 0) {
+      mergeClose(this.bars, this.spreadBuf);
+      let cur: Float32Array = this.bars;
+      let alt: Float32Array = this.spreadBuf;
+      for (let p = 0; p < MERGE_POST_PASSES; p++) {
+        spreadOnce(cur, alt);
+        const t = cur; cur = alt; alt = t;
+      }
+      if (cur !== this.bars) this.bars.set(cur);
+    }
+    /* ③ 峰值线跟着（铺散+融合）后的值走：标记与柱顶同步 → 不会脱节成"浮空碎屑" */
     for (let i = 0; i < n; i++) {
       const v = this.bars[i];
       this.peaks[i] = Math.max(this.peaks[i] * PEAK_DECAY, v);
