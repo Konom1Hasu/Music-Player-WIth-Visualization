@@ -195,6 +195,16 @@ const PEAK_DECAY = 0.9;
    又不会完全取消插值（完全取消会让 20ms/60fps 的错拍重新显形，见 render() 的说明）。 */
 const FALL_INTERP_SPAN = 0.6;
 
+/* ★ 峰值标记的"显示门槛"（2026-10-12，SelfMusic 档接入后发现）。
+   新算法每拍有一个"低频冲击块"（lowSurge：左 10 根 ×13、其余 ×0.38）——
+   非低频柱被瞬间压暗 62%，而峰值线按 PEAK_DECAY 慢慢追。
+   实测（频谱画面观测 24 帧）：脱离柱顶 >0.01 的柱均值 101/150、峰值最多悬空 430px
+   （画布才 716px）—— 如果照旧"每根柱都画一个 2px 方块"，画面上就是一片**浮空碎屑**。
+   门槛取 0.12：脱离不到这个幅度的峰值标记**根本不画**（它们本来就贴着柱顶、看不出是两条），
+   只剩"真的掉下来过"的那几十根柱带标记 —— 指示的意义保住了，碎屑感没了。
+   置一个大于 1 的值即整条峰值线不画（备选档）。 */
+const PEAK_MARK_MIN = 0.12;
+
 /* ==================== 节拍先验（离线预分析，详见 beatmap.ts） ====================
    在线的鼓点检测（上面的 KICK_*）是**因果的**：必须先听到、才可能亮。
    一个分析窗 512 点 ≈ 10.7ms（原 1024 点 ≈ 21ms），再乘上 worker 往返与绘制的节拍，
@@ -238,7 +248,7 @@ const JITTER_HEADROOM_MIN = 0.28;
    方块来自 fillRect 的平顶；连续曲线来自把相邻柱连成一条线。
    这里改成：每根柱顶再叠加一段**小幅高频起伏的尖**（按柱序做确定性伪随机），
    顶边因此呈锯齿状；同时**不连接**相邻柱（各画各的竖条），避免变成曲线。 */
-const TOP_SPIKE = 0.16; // 顶端尖峰幅度（相对柱高的比例）
+const TOP_SPIKE = 0; // 顶端尖峰幅度（相对柱高的比例）；0 = 关闭（新算法自带高峰离散化，这层是重复造尖）
 const TOP_SPIKE_FREQ = 2.7; // 尖峰的空间频率（每根柱之间的相位步进，越大越密）
 
 /* ★ 顶端高频抖动（2026-10-03，用户："可以加入高频抖动"）：
@@ -814,10 +824,14 @@ export class Spectrum {
       const list = buckets[level];
       if (!list.length) continue;
       const v = level / (VIZ_LEVELS - 1);
-      const bh = Math.max(2, v * (h - 8));
       ctx.globalAlpha = 0.45 + 0.55 * v;
       for (let n = 0; n < list.length; n++) {
         const i = list[n];
+        /* ★ 柱高按**真实 display 值**画（不再用 14 级量化值）：量化只是"分桶省
+           alpha 切换"的手段（见上），拿它当高度会与顶端尖峰层（按未量化值定位）
+           脱开 —— 实测 42% 的柱断成两截（主体顶与尖峰底差最多 27px）。高度取真值后
+           两者自然对接，顶边也从"14 级台阶"回到算法算出来的连续形状。 */
+        const bh = Math.max(2, values[i] * (h - 8));
         const x = i * gap + (gap - bw) / 2;
         ctx.fillRect(x, h - bh, bw, bh);
       }
@@ -838,11 +852,14 @@ export class Spectrum {
         ctx.fillRect(x, h - bodyH - tip, bw, tip);
       }
     }
-    // 峰值线：一条 fillStyle 画完（都在同一高度带里，按行合并）
+    /* ★ 峰值标记：只在**明显脱离柱顶**时画（门槛见 PEAK_MARK_MIN 的说明）。
+       脱离幅度不够的直接跳过 —— 否则整排柱各顶一个小方块，远处的像浮空碎屑。 */
     ctx.globalAlpha = 0.85;
     for (let i = 0; i < BAR_N; i++) {
-      const ph = Math.max(2, this.peaks[i] * (h - 8));
-      ctx.fillRect(i * gap + (gap - bw) / 2, h - ph - 3, bw, 2);
+      const pk = this.peaks[i];
+      if (pk - values[i] < PEAK_MARK_MIN) continue;
+      const ph = Math.max(2, pk * (h - 8));
+      ctx.fillRect(i * gap + (gap - bw) / 2, h - ph - 1, bw, 2);
     }
     ctx.globalAlpha = 1;
   }
@@ -870,8 +887,11 @@ export class Spectrum {
         ctx.globalAlpha = 0.78;
         ctx.fillRect(x, h - bh - tip, bw, tip);
       }
-      ctx.globalAlpha = 0.85;
-      ctx.fillRect(x, h - Math.max(2, this.peaks[i] * (h - 8)) - 3, bw, 2);
+      // 峰值标记：与 drawBars 同一套门槛（见 PEAK_MARK_MIN 的说明）
+      if (this.peaks[i] - v >= PEAK_MARK_MIN) {
+        ctx.globalAlpha = 0.85;
+        ctx.fillRect(x, h - Math.max(2, this.peaks[i] * (h - 8)) - 1, bw, 2);
+      }
     }
     ctx.globalAlpha = 1;
   }
