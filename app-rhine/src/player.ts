@@ -2207,6 +2207,10 @@ let actx: AudioContext | null = null;
 let analyserNode: AnalyserNode | null = null;
 let freqData: Uint8Array<ArrayBuffer> | null = null;
 let timeData: Float32Array<ArrayBuffer> | null = null;
+/** ★ viztest 走 selfmusic 档时用的 4096 缓冲（两个分析档窗口不同：
+    真实播放时 analyser.fftSize 会按档设 4096/512，viztest 必须自己对齐，
+    否则 selfmusic 引擎拿到的只有 512 个有效样本 + 3584 个零 —— 读数全错）。 */
+let timeDataRef: Float32Array<ArrayBuffer> | null = null;
 let vizDenied = false;
 /* 为什么放弃接管音频（不再静默）。原来 vizDenied 一置位就永远不再尝试，
    而且界面上**毫无痕迹** —— 用户只看到频谱不动，完全不知道为什么。
@@ -2267,9 +2271,18 @@ function analysisTick() {
   }
   if (VIZ_TEST) {
     if (!spectrum) return;
-    if (!timeData) timeData = new Float32Array(SPECTRUM_WINDOW);
-    vizTestTimeData(timeData);
-    spectrum.update(timeData, actx?.sampleRate);
+    /* ★ viztest 必须跟随**默认算法档**：真实播放走 selfmusic（默认），而这里
+       曾固定走 legacy —— 于是截图看到的画面与听歌时看到的不是一条管线。
+       （2026-10-12 发现：`applyExternalBars` 调用数恒为 0。） */
+    if (vizAlgo === "selfmusic") {
+      if (!timeDataRef || timeDataRef.length !== SPECTRUM_WINDOW_REF) timeDataRef = new Float32Array(SPECTRUM_WINDOW_REF);
+      vizTestTimeData(timeDataRef);
+      refSpectrumTick(timeDataRef);
+    } else {
+      if (!timeData) timeData = new Float32Array(SPECTRUM_WINDOW);
+      vizTestTimeData(timeData);
+      spectrum.update(timeData, actx?.sampleRate);
+    }
   } else if (analyserNode && spectrum) {
     if (!timeData) timeData = new Float32Array(analyserNode.fftSize);
     analyserNode.getFloatTimeDomainData(timeData);

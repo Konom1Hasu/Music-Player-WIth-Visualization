@@ -205,6 +205,39 @@ const FALL_INTERP_SPAN = 0.6;
    置一个大于 1 的值即整条峰值线不画（备选档）。 */
 const PEAK_MARK_MIN = 0.12;
 
+/* ★ 铺散（2026-10-12，用户："高峰不要像树林一样，可以适当铺散开"）。
+   现象：SelfMusic 引擎的「高峰离散化」（细谱判峰掩模 + peakExpand）把扎堆的高条
+   拉成一根根离散尖塔 —— 在真实音乐上就是一片细高的"树林"。
+   做法：对引擎输出做 SPREAD_PASSES 遍 5 抽头空间平滑（核与引擎自带的输出平滑
+   同一支 {0.1,0.2,0.4,0.2,0.1}），尖塔的高处摊给相邻柱 → 圆丘相接。
+   **只在显示层做**：分析、包络、AGC、引擎输出一行不动；峰值线吃铺散后的值，
+   与柱体保持一致（不会出现"标记浮在柱顶上方"的脱节）。
+   定档依据：同一帧真实音乐（参考段 190.0s）五档渲染对比（dist\铺散对比.html），
+   用户选「中（×2）」——轻（×1）塔还是塔；重（×3）动态起伏会过软。
+   0 = 关闭（回退到直通）。 */
+const SPREAD_PASSES = 2;
+const SPREAD_TAPS = [0.1, 0.2, 0.4, 0.2, 0.1]; // 与引擎 DEFAULT_SMOOTH_TAPS 同支（和恰为 1）
+
+/** 铺散的一遍实现：`dst[i] = Σ taps[j]·src[clamp(i + j − 2)]`。
+    边界用**端点钳制**（不是引擎 smoothAcrossBands 的零填充）—— 与用户定档时看的
+    渲染脚本（scripts\探针\_帧渲染.cjs 的 smoothF）逐位同口径；零填充会让最左/最右
+    两根多掉约三成，而低频塔林恰在左端，等于偷改了用户选的档。
+    双缓冲写 dst，tick 里零分配。 */
+function spreadOnce(src: Float32Array, dst: Float32Array) {
+  const taps = SPREAD_TAPS;
+  const c = (taps.length - 1) >> 1;
+  for (let i = 0; i < BAR_N; i++) {
+    let s = 0;
+    for (let j = 0; j < taps.length; j++) {
+      let k = i + j - c;
+      if (k < 0) k = 0;
+      else if (k >= BAR_N) k = BAR_N - 1;
+      s += taps[j] * src[k];
+    }
+    dst[i] = s;
+  }
+}
+
 /* ==================== 节拍先验（离线预分析，详见 beatmap.ts） ====================
    在线的鼓点检测（上面的 KICK_*）是**因果的**：必须先听到、才可能亮。
    一个分析窗 512 点 ≈ 10.7ms（原 1024 点 ≈ 21ms），再乘上 worker 往返与绘制的节拍，
@@ -310,6 +343,9 @@ export class Spectrum {
      意义见 render()：分析 20ms 一 tick，而画布 60fps 重画，两者不做插值就会错拍发卡。 */
   private prevBars = new Float32Array(BAR_N);
   private display = new Float32Array(BAR_N);
+  /* ★ 铺散（SPREAD_PASSES 遍 5 抽头平滑）的双缓冲之一：bars 与它轮转，
+     避免每 tick 新建数组；SPREAD_PASSES 为偶数时末遍结果天然落回 bars。 */
+  private spreadBuf = new Float32Array(BAR_N);
   private lastAdvanceAt = 0;
   private advanceIntervalMs = 20;
   /* 按量化级分桶用的容器（每帧复用，避免每帧新建数组） */
@@ -997,9 +1033,22 @@ export class Spectrum {
   applyExternalBars(src: ArrayLike<number>) {
     const n = Math.min(BAR_N, src.length);
     this.prevBars.set(this.bars);
+    /* ① clamp 后写进 bars —— 它既是铺散的输入侧，也是"铺散关（SPREAD_PASSES = 0）"时的最终值 */
+    for (let i = 0; i < n; i++) this.bars[i] = Math.max(0, Math.min(1, src[i]));
+    /* ② 铺散：SPREAD_PASSES 遍 5 抽头空间平滑，双缓冲轮转（末遍结果一定回到 bars；
+       奇数遍则拷回来）。见文件头 SPREAD_PASSES 的说明：只在显示层做，引擎输出不动。 */
+    if (SPREAD_PASSES > 0) {
+      let cur: Float32Array = this.bars;
+      let alt: Float32Array = this.spreadBuf;
+      for (let p = 0; p < SPREAD_PASSES; p++) {
+        spreadOnce(cur, alt);
+        const t = cur; cur = alt; alt = t;
+      }
+      if (cur !== this.bars) this.bars.set(cur);
+    }
+    /* ③ 峰值线跟着铺散后的值走：标记与柱顶同步 → 不会脱节成"浮空碎屑" */
     for (let i = 0; i < n; i++) {
-      const v = Math.max(0, Math.min(1, src[i]));
-      this.bars[i] = v;
+      const v = this.bars[i];
       this.peaks[i] = Math.max(this.peaks[i] * PEAK_DECAY, v);
     }
     this.lastAdvanceAt = performance.now();
