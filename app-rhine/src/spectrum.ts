@@ -245,6 +245,31 @@ const MERGE_POST_PASSES = 2;
    注入点在补铺散之后、峰值线之前（仅在显示层；分析、包络、AGC、引擎输出一行不动）。 */
 const MERGE_KEEP: number = 1;
 
+/* ★ 减峰 + 右丰（2026-10-12 四轮，用户："减少峰的个数。保留左边最高的峰，让右边丰富一点"）。
+   现状（保峰·全）中段仍是一片各自独立的小丘、右区偏平。三件事各管一个区：
+     · 中段减峰：把闭运算的填充半径加深（MERGE_R 3 → REDUCE_R_MID/RIGHT）——
+       相邻的丘并成整丘（"减少了峰"）；左区（0~REDUCE_MID_FROM 柱，低频塔所在）
+       半径与门槛都保持原值 → 左塔与现状逐位相同（这就是"保留左边最高的峰"）。
+     · 分区保峰门槛（REDUCE_TH_*）：融合后 A ≥ θ 的柱位才还原成原（铺散）值 ——
+       矮丘被融合吞掉、高丘照还原；左区 θ=0 = 全还原，与 v2.7.3 的保峰·全相同。
+     · 右区补纹（RICH_TEX）：把铺散抹掉的细结构补回来，但先**高通**（去掉 15 柱尺度的
+       结构，只留细纹）再**圆化**（铺散一遍，细针 → 小圆丘），沿 RICH_TEX_FROM→TO
+       的斜坡进入 —— 右区更"丰富"，但不会回到密密麻麻的尖刺。
+   全部只在显示层（分析、包络、AGC、引擎输出一行不动）。
+   定档依据：同一段真实音乐（190.0s 起 8s，79 帧）六档渲染对比（dist\减峰对比.html），
+   用户选「减峰 + 右丰·中」——中段峰数 3.5→2.6、右区纹理 0.011→0.015、左塔/最高柱不变。
+   回退：REDUCE_R_* 设 3、REDUCE_TH_* 设 0、RICH_TEX 设 0 → 与 v2.7.3 逐位相同。 */
+const REDUCE_MID_FROM = 35; // 中区起点（0~35 柱 = 左区，不动）
+const REDUCE_RIGHT_FROM = 80; // 右区起点
+const REDUCE_RAMP = 8; // 区域之间的线性过渡宽度（柱）
+const REDUCE_R_MID = 4; // 中区闭运算半径（加深填充 → 并丘）
+const REDUCE_R_RIGHT = 4; // 右区闭运算半径
+const REDUCE_TH_MID = 0.45; // 中区保峰门槛（A ≥ θ 才把峰还回来）
+const REDUCE_TH_RIGHT = 0.38; // 右区保峰门槛（比中区低 → 右区保留更多结构）
+const RICH_TEX = 1.2; // 右区纹理强度（0 = 关闭）
+const RICH_TEX_FROM = 78; // 纹理斜坡起点（柱）
+const RICH_TEX_TO = 95; // 纹理全量点（柱）
+
 /** 铺散的一遍实现：`dst[i] = Σ taps[j]·src[clamp(i + j − 2)]`。
     边界用**端点钳制**（不是引擎 smoothAcrossBands 的零填充）—— 与用户定档时看的
     渲染脚本（scripts\探针\_帧渲染.cjs 的 smoothF）逐位同口径；零填充会让最左/最右
@@ -265,12 +290,12 @@ function spreadOnce(src: Float32Array, dst: Float32Array) {
   }
 }
 
-/** 顶端融合的核心：灰度闭运算（膨胀 → 腐蚀），半径 MERGE_R。
+/** 顶端融合的核心：灰度闭运算（膨胀 → 腐蚀），半径 R。
     只有"窄谷"会被填浅（两侧都有更高的邻域时，谷底被抬到邻域的高水位）；
-    宽隔断与孤立峰保持原形（闭运算的数学性质；与定档探针的 closeOp 逐位同口径）。
-    边界与铺散一致：端点钳制。双缓冲：膨胀结果进 tmp，腐蚀结果写回 src。 */
-function mergeClose(src: Float32Array, tmp: Float32Array) {
-  const R = MERGE_R;
+    宽隔断与孤立峰保持原形（闭运算的数学性质；与定档探针的 closeR 逐位同口径）。
+    边界与铺散一致：端点钳制。非原位：读 src，中间结果进 tmp，结果写 dst
+    （src 与 dst 可以是同一个数组 —— 膨胀先消费完 src，腐蚀才轮到写 dst）。 */
+function closeInto(src: Float32Array, dst: Float32Array, tmp: Float32Array, R: number) {
   for (let i = 0; i < BAR_N; i++) {
     let m = -1;
     for (let k = i - R; k <= i + R; k++) {
@@ -287,7 +312,61 @@ function mergeClose(src: Float32Array, tmp: Float32Array) {
       const v = tmp[j];
       if (v < m) m = v;
     }
-    src[i] = m;
+    dst[i] = m;
+  }
+}
+
+/** 三段区域剖面（与定档探针的 zoneProf 逐位同口径）：< bL−ramp/2 取 vL，
+    bL±ramp/2 之间线性过渡；到 bM±ramp/2 之间过渡到 vR，之后取 vR。
+    存 Float32Array（探针同为 f32 存储）—— 半径取整与门槛比较都按 f32 读回值算，
+    否则过渡区的边界柱可能翻转。 */
+function zoneProf3(vL: number, vM: number, vR: number): Float32Array {
+  const out = new Float32Array(BAR_N);
+  const bL = REDUCE_MID_FROM;
+  const bM = REDUCE_RIGHT_FROM;
+  const ramp = REDUCE_RAMP;
+  for (let i = 0; i < BAR_N; i++) {
+    let val: number;
+    if (i < bL - ramp / 2) val = vL;
+    else if (i < bL + ramp / 2) val = vL + (vM - vL) * ((i - (bL - ramp / 2)) / ramp);
+    else if (i < bM - ramp / 2) val = vM;
+    else if (i < bM + ramp / 2) val = vM + (vR - vM) * ((i - (bM - ramp / 2)) / ramp);
+    else val = vR;
+    out[i] = val;
+  }
+  return out;
+}
+
+/** 每柱的闭运算半径（取整后）—— MERGE_R = 基础半径（左区/回退），更大 = 该区加深填充。 */
+const REDUCE_DEEP_R = Math.max(MERGE_R, REDUCE_R_MID, REDUCE_R_RIGHT);
+const REDUCE_R_LUT: Uint8Array = (() => {
+  const prof = zoneProf3(MERGE_R, REDUCE_R_MID, REDUCE_R_RIGHT);
+  const lut = new Uint8Array(BAR_N);
+  for (let i = 0; i < BAR_N; i++) lut[i] = Math.max(0, Math.round(prof[i]));
+  return lut;
+})();
+/** 保峰门槛剖面：A ≥ 门槛才把峰还回来（左区 0 = 全还，与 v2.7.3 相同）。 */
+const REDUCE_TH_LUT: Float32Array = zoneProf3(0, REDUCE_TH_MID, REDUCE_TH_RIGHT);
+/** 右区纹理的进入斜坡（0 → 1）。 */
+const RICH_W_LUT: Float32Array = (() => {
+  const lut = new Float32Array(BAR_N);
+  for (let i = 0; i < BAR_N; i++) {
+    lut[i] = i <= RICH_TEX_FROM ? 0 : i >= RICH_TEX_TO ? 1 : (i - RICH_TEX_FROM) / (RICH_TEX_TO - RICH_TEX_FROM);
+  }
+  return lut;
+})();
+
+/** 15 点滑动平均（端点钳制）—— 右区纹理的高通用（去掉 15 柱尺度的结构）。 */
+function movingAvg15(src: Float32Array, dst: Float32Array) {
+  const half = 7;
+  for (let i = 0; i < BAR_N; i++) {
+    let s = 0;
+    for (let k = -half; k <= half; k++) {
+      const jj = i + k;
+      const j = jj < 0 ? 0 : jj >= BAR_N ? BAR_N - 1 : jj;
+      s += src[j];
+    }
+    dst[i] = s / 15;
   }
 }
 
@@ -402,6 +481,11 @@ export class Spectrum {
   /* ★ 保峰的"闭运算前快照"：存融合（闭运算 + 补铺散）之前的柱高（= 铺散输出），
      融合完成后把峰区还回来（见文件头 MERGE_KEEP 的说明）。 */
   private keepBuf = new Float32Array(BAR_N);
+  /* ★ 减峰/右丰的工作缓冲（见文件头 REDUCE_R_MID 的说明）：
+     rawBuf = 本 tick 的原始输入（clamp 后）—— 右区纹理要拿它和铺散版作差；
+     auxBuf = 基础半径的闭运算结果（区域混合用）。 */
+  private rawBuf = new Float32Array(BAR_N);
+  private auxBuf = new Float32Array(BAR_N);
   private lastAdvanceAt = 0;
   private advanceIntervalMs = 20;
   /* 按量化级分桶用的容器（每帧复用，避免每帧新建数组） */
@@ -1089,8 +1173,13 @@ export class Spectrum {
   applyExternalBars(src: ArrayLike<number>) {
     const n = Math.min(BAR_N, src.length);
     this.prevBars.set(this.bars);
-    /* ① clamp 后写进 bars —— 它既是铺散的输入侧，也是"铺散关（SPREAD_PASSES = 0）"时的最终值 */
-    for (let i = 0; i < n; i++) this.bars[i] = Math.max(0, Math.min(1, src[i]));
+    /* ① clamp 后写进 bars —— 它既是铺散的输入侧，也是"铺散关（SPREAD_PASSES = 0）"时的最终值；
+       rawBuf 同步存一份原始输入（右区补纹要拿它和铺散版作差，见 ②d） */
+    for (let i = 0; i < n; i++) {
+      const v = Math.max(0, Math.min(1, src[i]));
+      this.bars[i] = v;
+      this.rawBuf[i] = v;
+    }
     /* ② 铺散：SPREAD_PASSES 遍 5 抽头空间平滑，双缓冲轮转（末遍结果一定回到 bars；
        奇数遍则拷回来）。见文件头 SPREAD_PASSES 的说明：只在显示层做，引擎输出不动。 */
     if (SPREAD_PASSES > 0) {
@@ -1102,13 +1191,23 @@ export class Spectrum {
       }
       if (cur !== this.bars) this.bars.set(cur);
     }
-    /* ②b 顶端融合：闭运算填窄谷（几个峰并成缓丘，见文件头 MERGE_R 的说明）+ 补铺散圆化。
-       顺序 = spread×SPREAD_PASSES → close(R) → spread×MERGE_POST_PASSES ——
-       与用户定档看的探针变换逐位同口径。 */
+    /* ②b 顶端融合 + 减峰：见文件头 MERGE_R / REDUCE_R_MID 的说明。
+       顺序 = spread×SPREAD_PASSES → close(区域半径 LUT) → spread×MERGE_POST_PASSES
+       → 门槛保峰 → 右区补纹 —— 与用户定档看的探针变换逐位同口径。 */
     if (MERGE_R > 0) {
-      /* ★ 保峰快照 = 闭运算之前的柱高（铺散输出）—— 见文件头 MERGE_KEEP 的说明 */
-      if (MERGE_KEEP > 0) this.keepBuf.set(this.bars);
-      mergeClose(this.bars, this.spreadBuf);
+      /* ★ 保峰快照 = 闭运算之前的柱高（铺散输出）：门槛保峰与右区补纹都要用 */
+      if (MERGE_KEEP > 0 || RICH_TEX > 0) this.keepBuf.set(this.bars);
+      /* 区域闭运算：基础半径的结果进 auxBuf，加深半径的结果留在 bars，按 LUT 混合。
+         左区（以及回退档 REDUCE_DEEP_R === MERGE_R 时全域）只走基础半径 —— 与 v2.7.3 逐位相同。 */
+      closeInto(this.bars, this.auxBuf, this.spreadBuf, MERGE_R);
+      if (REDUCE_DEEP_R > MERGE_R) {
+        closeInto(this.bars, this.bars, this.spreadBuf, REDUCE_DEEP_R);
+        for (let i = 0; i < BAR_N; i++) {
+          if (REDUCE_R_LUT[i] <= MERGE_R) this.bars[i] = this.auxBuf[i];
+        }
+      } else {
+        this.bars.set(this.auxBuf);
+      }
       let cur: Float32Array = this.bars;
       let alt: Float32Array = this.spreadBuf;
       for (let p = 0; p < MERGE_POST_PASSES; p++) {
@@ -1116,19 +1215,35 @@ export class Spectrum {
         const t = cur; cur = alt; alt = t;
       }
       if (cur !== this.bars) this.bars.set(cur);
-      /* 保峰：把"原来更高的柱位"（峰区）还回来 —— 谷用融合的、峰用原版的。
-         K ≥ 1 时直接取快照值（与定档探针 Math.max 逐位同口径，不做额外算术）；
-         0<K<1 时按比例还。 */
+      /* 门槛保峰：把"原来更高的柱位"（峰区）还回来 —— 谷用融合的、峰用原版的。
+         A ≥ REDUCE_TH_LUT 才还（左区门槛 0 = 全还，即 v2.7.3 的保峰·全）。
+         K ≥ 1 时直接取快照值（与定档探针逐位同口径，不做额外算术）；0<K<1 按比例还。 */
       if (MERGE_KEEP >= 1) {
         for (let i = 0; i < BAR_N; i++) {
           const k = this.keepBuf[i];
-          if (k > this.bars[i]) this.bars[i] = k;
+          if (k > this.bars[i] && k >= REDUCE_TH_LUT[i]) this.bars[i] = k;
         }
       } else if (MERGE_KEEP > 0) {
         for (let i = 0; i < BAR_N; i++) {
           const k = this.keepBuf[i];
           const b = this.bars[i];
-          if (k > b) this.bars[i] = b + (k - b) * MERGE_KEEP;
+          if (k > b && k >= REDUCE_TH_LUT[i]) this.bars[i] = b + (k - b) * MERGE_KEEP;
+        }
+      }
+      /* ②d 右区补纹（见文件头 RICH_TEX 的说明）：细纹 = 高通(raw − 铺散版)，
+         再铺散一遍把"细针"圆化成"小圆丘"，沿 RICH_W_LUT 斜坡只补右区。 */
+      if (RICH_TEX > 0) {
+        const d = this.auxBuf; // 复用：它作为"区域闭运算混合"的使命已结束
+        for (let i = 0; i < BAR_N; i++) d[i] = this.rawBuf[i] - this.keepBuf[i];
+        movingAvg15(d, this.spreadBuf);
+        for (let i = 0; i < BAR_N; i++) d[i] = d[i] - this.spreadBuf[i];
+        spreadOnce(d, this.spreadBuf);
+        for (let i = 0; i < BAR_N; i++) {
+          const w = RICH_W_LUT[i];
+          if (w > 1e-6) {
+            let v = this.bars[i] + RICH_TEX * w * this.spreadBuf[i];
+            this.bars[i] = v < 0 ? 0 : v > 1 ? 1 : v;
+          }
         }
       }
     }
