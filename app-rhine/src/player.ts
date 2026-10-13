@@ -1,8 +1,14 @@
 // 音乐播放器：把本地音乐库映射成"档案"，驱动三维档案阵列，并提供传输控制。
 // 后端能力（NCM 解密 / B 站缓存 / 读封面 / 歌词 / 读音频）复用 Electron 的 window.desktop。
 import { setRecords, type ArchiveRecord } from "./data";
-/* ★ SelfMusic 参考算法：来源 D:\SelfMusic\web\spectrum.mjs（见该文件头注释） */
-import { SpectrumEngine as SelfSpectrumEngine } from "./selfmusic-spectrum";
+/* ★ SelfMusic 参考算法：来源 D:\SelfMusic\web\spectrum.mjs + musicapp/selfmusic.py（见该文件头注释） */
+import {
+  SelfSpectrumEngine,
+  SELFMUSIC_SLIDER_RANGES,
+  SELFMUSIC_SLIDER_DEFAULTS,
+  smSliderPatch,
+  type SmSliderKey,
+} from "./selfmusic-spectrum";
 import {
   Spectrum,
   analysisWindow,
@@ -2041,35 +2047,77 @@ let vizAlgo: "selfmusic" | "legacy" = (() => {
   }
 })();
 /** SelfMusic 引擎实例（懒建；算法档 = legacy 时永不创建） */
-let refEngine: { push(d: Float32Array): void; compute(): Float32Array; bands?: number } | null = null;
+let refEngine: SelfSpectrumEngine | null = null;
 let refBarsBuf: Float32Array | null = null;
+
+/* ---------- 可视化调节（十六滑块）：存储 + 应用 ----------
+   滑块键、范围、默认值与换算全部照 SelfMusic mainwindow 的「可视化调节」面板
+   （在 selfmusic-spectrum.ts 里与那边逐项对齐：SELFMUSIC_SLIDER_* 与 smSliderPatch）。
+   当前值存 localStorage；拖动时经 setSmDisplayValue → 引擎 setDisplayParams 实时生效。 */
+const LS_SM_DISPLAY = "rhine-sm-display";
+const SM_KEYS = Object.keys(SELFMUSIC_SLIDER_DEFAULTS) as SmSliderKey[];
+let smDisplayValues: Record<SmSliderKey, number> = { ...SELFMUSIC_SLIDER_DEFAULTS };
+
+/** 读存储（脏值逐键回落默认，并按滑块范围夹住） */
+export function readSmDisplayValues(): Record<SmSliderKey, number> {
+  let raw: Record<string, unknown> = {};
+  try { raw = JSON.parse(localStorage.getItem(LS_SM_DISPLAY) || "{}") || {}; } catch { raw = {}; }
+  const out = { ...SELFMUSIC_SLIDER_DEFAULTS };
+  for (const k of SM_KEYS) {
+    const v = Number(raw[k]);
+    if (isFinite(v)) {
+      const [lo, hi] = SELFMUSIC_SLIDER_RANGES[k];
+      out[k] = Math.max(lo, Math.min(hi, Math.round(v)));
+    }
+  }
+  return out;
+}
+/** 当前十六值（UI 回显用；以存储为准） */
+export function getSmDisplayValues(): Record<SmSliderKey, number> {
+  return readSmDisplayValues();
+}
+function applySmValues(v: Record<SmSliderKey, number>) {
+  smDisplayValues = { ...v };
+  if (refEngine) {
+    const patch: Record<string, number | boolean> = {};
+    for (const k of SM_KEYS) Object.assign(patch, smSliderPatch(k, v[k]));
+    refEngine.setDisplayParams(patch);
+  }
+}
+/** 从存储读十六滑块并应用到引擎（引擎创建后 / 启动时调；没存过则用出厂默认档） */
+export function applySmDisplayParams() {
+  applySmValues(readSmDisplayValues());
+}
+/** 滑块拖动：更新一个键 → 存 → 实时应用（引擎在跑就下一次分析 tick 立即生效） */
+export function setSmDisplayValue(key: SmSliderKey, value: number) {
+  const v = readSmDisplayValues();
+  const [lo, hi] = SELFMUSIC_SLIDER_RANGES[key];
+  v[key] = Math.max(lo, Math.min(hi, Math.round(value)));
+  try { localStorage.setItem(LS_SM_DISPLAY, JSON.stringify(v)); } catch { /* ignore */ }
+  applySmValues(v);
+}
+/** 一键重置：清掉存储、所有滑块回到出厂默认（= SelfMusic 面板默认档） */
+export function resetSmDisplayValues() {
+  try { localStorage.removeItem(LS_SM_DISPLAY); } catch { /* ignore */ }
+  applySmValues({ ...SELFMUSIC_SLIDER_DEFAULTS });
+}
 /** 把 SelfMusic 引擎的 96 段重采样到画布的 BAR_N 柱，再交给渲染层 */
 function refSpectrumTick(td: Float32Array) {
   if (!spectrum) return;
   const sr = actx?.sampleRate ?? 48000;
   if (!refEngine) {
-    /* ★ 用户："将频谱分布稍微铺散开一些"。
-       量化口径（`dist\_ref视频帧\_spread.mjs`：同一段参考原声、8 秒、20ms/tick，
-       指标是"高度 >0.25 的柱占比 / 右三分之一÷左三分之一 / 中÷左 / 离散度 / 顶满占比"）：
-
-         档位                                   亮点柱%  右/左   中/左   离散度  顶满%
-         引擎默认                                23.9   0.390  0.599  0.199  2.0
-         U 形权重加强 endsGain2.4/midCut.10       22.9   0.242  0.554  0.207  2.2   ← 反而更挤在左边
-         ★ 逐带 AGC 加强 rel1.5 / from0.30        26.8   0.443  0.711  0.197  2.0   ← 本档
-         组合（U 形 + AGC + 倾斜 0.15）            25.7   0.334  0.694  0.202  2.1
-         倾斜归零 + U 形 2.4                      23.5   0.330  0.615  0.200  2.0
-
-       ⇒ 只有"逐带慢包络 AGC"能真正把分布铺开：立起来的柱更多（+2.9 个点）、
-         能量往中/右铺（右/左 0.390→0.443、中/左 0.599→0.711），
-         而离散度不变（没摊平成墙）、顶满比例不变（没削顶）。
-         U 形权重（endsGain/midCut）是反效果 —— 它把能量又推回左端，故保持默认。 */
+    /* ★ v2.7.5（2026-10-13）：引擎对齐 SelfMusic **最新版**（web/spectrum.mjs 内核 +
+       musicapp/selfmusic.py 20:34 版的可调显示层；本仓 `scripts/探针/_selfmusic对拍.*`
+       每 1000 帧 × 96 条复核 max|Δ| ≤ 1e-6）。
+       用户："再次还原算法，并添加可视化参数的实时自定义调节滑块"。
+       默认档 = 那边 16 项面板的默认值（弹性 160 / 陡峭 160 / 软膝 78 / 细纹 50 / 左塔泵动 40…）；
+       十六滑块的持久化值在 applySmDisplayParams() 里应用（没存过就用默认档）。 */
     refEngine = new SelfSpectrumEngine({
       sampleRate: sr,
       bands: 96,
       fftSize: SPECTRUM_WINDOW_REF,
-      bandAgcRel: 1.5, // 逐带慢包络的抬升量（默认 1.15）
-      bandAgcFrom: 0.3, // 从这一归一化频率起生效（默认 0.55；下探到中频）
     });
+    applySmDisplayParams();
   }
   const eng = refEngine;
   if (!eng) return;

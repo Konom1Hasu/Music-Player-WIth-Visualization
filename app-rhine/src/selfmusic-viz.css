@@ -1,0 +1,39 @@
+/* 「可视化调节」十六滑块（SelfMusic 面板）——行样式复用 quality-settings 的
+   .quality-control / .quality-range，这里只补：块间距、RESET 按钮、滑块宽度与焦点样式。 */
+.sm-viz {
+  margin-top: 24px;
+  border-bottom: 1px solid #c1b8a7;
+}
+.sm-viz .quality-note {
+  margin: 12px 0 8px;
+}
+.sm-viz .quality-range input {
+  width: 300px;
+}
+.sm-viz .quality-range output {
+  min-width: 40px;
+}
+.sm-viz-reset {
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.8px;
+  padding: 8px 14px;
+  color: #393d32;
+  background: #e7e3d9;
+  border: 1px solid #bdb4a1;
+  border-radius: 0;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+.sm-viz-reset:hover {
+  background: #ded9cc;
+}
+.sm-viz-reset span {
+  margin-left: 8px;
+  font-size: 10px;
+  color: #807866;
+}
+.sm-viz :is(input, button):focus-visible {
+  outline: 2px solid #a67d48;
+  outline-offset: 4px;
+}

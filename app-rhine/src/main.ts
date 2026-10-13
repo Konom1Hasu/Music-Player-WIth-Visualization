@@ -58,6 +58,8 @@ import {
 } from "./player";
 import { TerminalAudio } from "./audio";
 import { audioSettingsMarkup } from "./audio-settings";
+import { selfmusicVizMarkup, handleSelfmusicVizInput, resetSelfmusicViz } from "./selfmusic-viz";
+import "./selfmusic-viz.css";
 
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) =>
   document.querySelector<T>(selector)!;
@@ -749,7 +751,7 @@ function updateQualitySummary() {
   summary.textContent = `实际渲染 ${canvas.width} × ${canvas.height} · ${prefs.rendering.antialias === "smaa" ? "SMAA" : "原始抗锯齿"} · 纹理 ${metrics.anisotropy ?? 1}×${metrics.limited ? " · 已达到缓冲上限" : ""}${fpsTxt}`;
 }
 function settingsMarkup() {
-  return `<h2>SYSTEM SETTINGS<small>终端偏好设置</small></h2><p class="settings-intro"><span class="operator-name">${getOperator()}</span> <span>·</span> SESSION AUTHORIZED</p><div class="settings-list"><label class="operator-field" for="operator-input"><div><strong>OPERATOR ID</strong><span>页脚显示的身份标识</span></div><input type="text" id="operator-input" maxlength="40" value="${escapeHtml(getOperator())}" autocomplete="off" spellcheck="false"/></label>${audioSettingsMarkup(prefs)}<label><div><strong>REDUCED MOTION</strong><span>减少镜头移动与过渡动效</span></div><input type="checkbox" data-pref="reduced" ${prefs.reduced ? "checked" : ""}/><i class="toggle"></i></label>${playbackSettingsMarkup()}${mediaKeyStatusMarkup()}${audioQualityMarkup()}${coverToolsMarkup()}${localAudioMarkup()}</div>${qualityMarkup(prefs.rendering)}<div class="settings-shortcuts"><span>KEYBOARD CONTROLS</span><p><kbd>←</kbd><kbd>→</kbd> 切列 <kbd>↑</kbd><kbd>↓</kbd> 选档 <kbd>ENTER</kbd> 读取 <kbd>/</kbd> 检索 <kbd>ESC</kbd> 返回</p></div><div class="settings-bottom"><button data-action="fullscreen">FULLSCREEN <span>↗</span></button><button data-action="restart">REINITIALIZE SYSTEM <span>↻</span></button></div><div class="modal-bottom"><span>ANALYSIS OS / 1.0 · 使用 MiSans 字体（小米） <a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">字体许可</a></span><span>POWERED BY RHINE LAB</span></div>`;
+  return `<h2>SYSTEM SETTINGS<small>终端偏好设置</small></h2><p class="settings-intro"><span class="operator-name">${getOperator()}</span> <span>·</span> SESSION AUTHORIZED</p><div class="settings-list"><label class="operator-field" for="operator-input"><div><strong>OPERATOR ID</strong><span>页脚显示的身份标识</span></div><input type="text" id="operator-input" maxlength="40" value="${escapeHtml(getOperator())}" autocomplete="off" spellcheck="false"/></label>${audioSettingsMarkup(prefs)}<label><div><strong>REDUCED MOTION</strong><span>减少镜头移动与过渡动效</span></div><input type="checkbox" data-pref="reduced" ${prefs.reduced ? "checked" : ""}/><i class="toggle"></i></label>${playbackSettingsMarkup()}${mediaKeyStatusMarkup()}${audioQualityMarkup()}${coverToolsMarkup()}${localAudioMarkup()}</div>${selfmusicVizMarkup()}${qualityMarkup(prefs.rendering)}<div class="settings-shortcuts"><span>KEYBOARD CONTROLS</span><p><kbd>←</kbd><kbd>→</kbd> 切列 <kbd>↑</kbd><kbd>↓</kbd> 选档 <kbd>ENTER</kbd> 读取 <kbd>/</kbd> 检索 <kbd>ESC</kbd> 返回</p></div><div class="settings-bottom"><button data-action="fullscreen">FULLSCREEN <span>↗</span></button><button data-action="restart">REINITIALIZE SYSTEM <span>↻</span></button></div><div class="modal-bottom"><span>ANALYSIS OS / 1.0 · 使用 MiSans 字体（小米） <a href="/fonts/MiSans-license.pdf" target="_blank" rel="noopener">字体许可</a></span><span>POWERED BY RHINE LAB</span></div>`;
 }
 
 document.addEventListener("input", (e) => {
@@ -758,6 +760,8 @@ document.addEventListener("input", (e) => {
     const output = document.querySelector<HTMLOutputElement>(`[data-quality-output="${slider.dataset.quality}"]`);
     if (output) output.value = `${slider.value}%`;
   }
+  /* 「可视化调节」十六滑块：拖动实时写 SelfMusic 引擎（下一次分析 tick 生效）+ 持久化 */
+  if (slider.dataset.smSlider) handleSelfmusicVizInput(slider);
   const volume = e.target as HTMLInputElement;
   if (volume.dataset.volume === "musicVolume" || volume.dataset.volume === "soundVolume") {
     prefs[volume.dataset.volume] = Number(volume.value) / 100;
@@ -889,6 +893,12 @@ document.addEventListener("click", (e) => {
   if (action === "play-now") togglePlay();
   /* 一键重读全部封面（系统设置里的按钮）：跑起来可能要几秒，别关弹窗，让 toast 报进度 */
   if (action === "reread-covers") void rereadAllCovers();
+  /* 可视化调节 RESET：清掉存储、十六滑块回出厂默认（引擎立即回默认档） */
+  if (action === "sm-viz-reset") {
+    resetSelfmusicViz();
+    notify("可视化调节已还原为默认档");
+    audio.play("confirm");
+  }
   /* 右侧显示在「可视化 / 歌词」之间切换 —— 只改状态与类名，不重绘详情区
      （重绘会重放解密动画、也会重建频谱实例）。 */
   if (action === "view-viz") setDetailView("viz");
