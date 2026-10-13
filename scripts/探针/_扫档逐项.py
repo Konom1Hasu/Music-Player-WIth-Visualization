@@ -12,6 +12,7 @@ import numpy as np
 ROOT = r"D:/harness work/音乐播放器"
 sys.path.insert(0, r"D:/SelfMusic")
 from musicapp.selfmusic import SpectrumAnalyzer  # noqa: E402
+from musicapp.analyzer import DEFAULT_PARAMS  # noqa: E402
 
 SR = 48000
 T0 = 190.0
@@ -26,17 +27,20 @@ SCAN = [
     ("smooth", 2), ("knee", 30), ("detail", 110), ("leftpump", 15), ("head", 220),
     ("right", 35), ("agc", 70), ("steepq", 240), ("tilt", 15), ("timbre", 80),
     ("tint", 20), ("expanda", 260), ("surge", 90), ("release", 60), ("valley", 60),
-    ("idle", 1),
+    ("idle", 0),   # 出厂档 idle=1（用户实测档），扫描取反
 ]
 
-# ⚠ 基线必须与 JS 侧一致：JS 的 new SelfSpectrumEngine({}) 默认 = 出厂（16 项面板默认）。
-#   故 Python 侧先 apply FACTORY 16 项默认，再叠加变化项。
+# ⚠ 基线必须与 JS 侧一致：JS 的 new SelfSpectrumEngine({}) 默认 = 出厂档
+#   （2026-10-13 起 = 用户 SelfMusic ui.json 的实测档）。故 Python 侧先 apply
+#   同一份 16 项，再叠加变化项；detail_hi/lo 也照 DEFAULT_PARAMS（滑块管不到它们）。
 FACTORY = [
-    ("smooth", 1), ("knee", 78), ("detail", 50), ("leftpump", 40), ("head", 160),
-    ("right", 100), ("agc", 0), ("steepq", 160), ("tilt", 45), ("timbre", 45),
-    ("tint", 45), ("expanda", 100), ("surge", 55), ("release", 82), ("valley", 100),
-    ("idle", 0),
+    ("smooth", 0), ("knee", 95), ("detail", 0), ("leftpump", 60), ("head", 300),
+    ("right", 80), ("agc", 100), ("steepq", 114), ("tilt", 39), ("timbre", 93),
+    ("tint", 16), ("expanda", 100), ("surge", 110), ("release", 95), ("valley", 100),
+    ("idle", 1),
 ]
+FACTORY_INTERNAL = [("detail_hi", float(DEFAULT_PARAMS["detail_hi"])),
+                    ("detail_lo", float(DEFAULT_PARAMS["detail_lo"]))]
 
 
 def apply_param(a, key, value):
@@ -89,8 +93,10 @@ def run(a):
 
 def make(items):
     a = SpectrumAnalyzer(sample_rate=SR, bars=BANDS, fft_size=WIN)
-    for k, v in FACTORY:          # ← 基线：出厂 16 项默认（对齐 JS 构造默认）
+    for k, v in FACTORY:          # ← 基线：出厂 16 项（对齐 JS 构造默认）
         apply_param(a, k, v)
+    for k, v in FACTORY_INTERNAL:
+        setattr(a, k, v)
     for k, v in items:            # ← 叠加变化项
         apply_param(a, k, v)
     a.rebuild_band_boost()

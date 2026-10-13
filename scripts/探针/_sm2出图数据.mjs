@@ -67,8 +67,8 @@ const p = (k, v) => smSliderPatch(k, v);
 
 const out = { rows: [] };
 out.rows.push({ name: "原版裸16项全关", frames: runChain(SELFMUSIC_NEUTRAL_DISPLAY) });
-out.rows.push({ name: "出厂默认16项面板默认", frames: runChain(undefined) });
-out.rows.push({ name: "滑块弹性300", frames: runChain(p("head", 300)) });
+out.rows.push({ name: "出厂默认用户实测档", frames: runChain(undefined) });
+out.rows.push({ name: "滑块弹性120", frames: runChain(p("head", 120)) });
 out.rows.push({ name: "滑块顺滑3", frames: runChain(p("smooth", 3)) });
 out.rows.push({ name: "滑块尖塔340谷深20", frames: runChain(Object.assign(p("expanda", 340), p("valley", 20))) });
 

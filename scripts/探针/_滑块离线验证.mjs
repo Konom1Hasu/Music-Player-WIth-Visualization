@@ -98,20 +98,20 @@ function cmp(label, expect, displayB) {
 console.log(`pcm ${data.length} 点 @ ${sr}Hz | ${FRAMES} 帧 × ${BANDS} 带（T0=${T0}s，步长 ${HOP}）\n`);
 
 const results = [];
-results.push(cmp("head 160→300（弹性：headroom 1.6→3.0，整体应被压低）", (A, B) => B.mean < A.mean * 0.9, { headroom: 3.0 }));
-results.push(cmp("smooth 1→3（顺滑：铺散 3 遍，邻柱差应明显变小）", (A, B) => B.neigh < A.neigh * 0.8, { spreadPasses: 3 }));
-results.push(cmp("detail 50→0（细纹关闭：邻柱差应变小）", (A, B) => B.neigh < A.neigh, { detail: 0.0 }));
-results.push(cmp("tint 45→0（毛刺关闭：邻柱差应变小）", (A, B) => B.neigh < A.neigh, { tintAmp: 0.0 }));
-results.push(cmp("expanda 100→340（尖塔：拆平台 → 邻柱差上升、顶满率下降）", (A, B) => B.neigh > A.neigh && B.topPct < A.topPct, { peakExpand: 3.4 }));
-results.push(cmp("release 82→50（回落：向目标靠拢比例，越小越平滑 → 动态应变小）", (A, B) => B.dyn < A.dyn, { release: 0.50 }));
-results.push(cmp("valley 100→20（谷深收窄：邻柱差应变小）", (A, B) => B.neigh < A.neigh, { valleyKeep: 0.20 }));
-results.push(cmp("right 100→0（右细节关闭）", (A, B) => B.mean < A.mean || B.dyn < A.dyn, { rightHf: 0.0 }));
-results.push(cmp("knee 78→0（软膝关闭：高段不再压缩，mean 应上升）", (A, B) => B.mean > A.mean, { knee: 0.0 }));
-results.push(cmp("surge 55→0（低频高耸关闭）", (A, B) => true, { surgeAmp: 0.0 }));
-results.push(cmp("timbre 45→0（音色活跃度关闭）", (A, B) => true, { timbre: 0.0 }));
-results.push(cmp("tilt 45→0（倾斜关闭）", (A, B) => true, { tilt: 0.0 }));
-results.push(cmp("leftpump 40→0（左塔泵动关闭）", (A, B) => true, { leftPump: 0.0 }));
-results.push(cmp("agc 0→100（右丰开启）", (A, B) => B.mean !== A.mean, { bandAgc: 1.0 }));
+results.push(cmp("head 300→120（弹性：headroom 3.0→1.2，整体应被抬高）", (A, B) => B.mean > A.mean * 1.05, { headroom: 1.2 }));
+results.push(cmp("smooth 0→3（顺滑：铺散 3 遍，邻柱差应明显变小）", (A, B) => B.neigh < A.neigh * 0.8, { spreadPasses: 3 }));
+results.push(cmp("detail 0→50（细纹开启：邻柱差应变大）", (A, B) => B.neigh > A.neigh, { detail: 0.5 }));
+results.push(cmp("tint 16→0（毛刺关闭：邻柱差应变小）", (A, B) => B.neigh < A.neigh, { tintAmp: 0.0 }));
+results.push(cmp("expanda 100→340（尖塔：拆平台 → 邻柱差应显著上升）", (A, B) => B.neigh > A.neigh * 1.2, { peakExpand: 3.4 }));
+results.push(cmp("release 95→50（回落：向目标靠拢比例，越小越平滑 → 动态应变小）", (A, B) => B.dyn < A.dyn, { release: 0.50 }));
+results.push(cmp("valley 100→20（谷深收窄：非峰按比例压低 → mean 应大幅下降）", (A, B) => B.mean < A.mean * 0.8, { valleyKeep: 0.20 }));
+results.push(cmp("right 80→0（右细节关闭）", (A, B) => B.mean < A.mean || B.dyn < A.dyn, { rightHf: 0.0 }));
+results.push(cmp("knee 95→0（软膝关闭：高段不再压缩，mean 应上升）", (A, B) => B.mean > A.mean, { knee: 0.0 }));
+results.push(cmp("surge 110→0（低频高耸关闭）", (A, B) => true, { surgeAmp: 0.0 }));
+results.push(cmp("timbre 93→0（音色活跃度关闭）", (A, B) => true, { timbre: 0.0 }));
+results.push(cmp("tilt 39→0（倾斜关闭）", (A, B) => true, { tilt: 0.0 }));
+results.push(cmp("leftpump 60→0（左塔泵动关闭）", (A, B) => true, { leftPump: 0.0 }));
+results.push(cmp("agc 100→0（右丰关闭）", (A, B) => B.mean !== A.mean, { bandAgc: 0.0 }));
 
 console.log(`\n结论：${results.filter(Boolean).length} / ${results.length} 档方向符合预期`);
 fs.unlinkSync(TMP);

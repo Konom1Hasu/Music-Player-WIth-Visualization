@@ -109,26 +109,26 @@ const SONG = { id: 'tl1', title: 'Viz Check', artist: 'Rhine Lab', album: 'Probe
   })()`);
   console.log('② 面板:', panel);
   const p = JSON.parse(panel);
-  const okDefaults = p.count === 16 && p.vals.head === 160 && p.vals.steepq === 160 && p.vals.smooth === 1 && p.vals.knee === 78;
-  console.log(`   16 滑块 + 默认值: ${okDefaults ? '✓' : '✗'}`);
+  const okDefaults = p.count === 16 && p.vals.head === 300 && p.vals.steepq === 114 && p.vals.smooth === 0 && p.vals.knee === 95 && p.vals.surge === 110 && p.vals.release === 95;
+  console.log(`   16 滑块 + 默认值(用户实测档): ${okDefaults ? '✓' : '✗'}`);
 
-  /* ③ 实时生效：head 160 → 300（整体压低）
+  /* ③ 实时生效：head 300 → 120（弹性放开，整体抬高）
      ⚠ 活体 bars 随时间变化，单次读数噪声可达 ±4% → 多采样取中位数。 */
   const meanBars = "(()=>{const sp=window.__spectrum; const b=Array.from(sp.bars); return +(b.reduce((a,x)=>a+x,0)/b.length).toFixed(5);})()";
   const sampleN = async (n = 12, gap = 120) => { const a = []; for (let i = 0; i < n; i++) { a.push(await ev(meanBars)); await wait(gap); } return a; };
   const med = (a) => { const s = [...a].filter((v) => typeof v === 'number').sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
   const b0 = await sampleN(); const m0 = med(b0);
-  await ev(`(()=>{const el=document.querySelector('[data-sm-slider="head"]'); el.value='300'; el.dispatchEvent(new Event('input',{bubbles:true})); return el.value;})()`);
+  await ev(`(()=>{const el=document.querySelector('[data-sm-slider="head"]'); el.value='120'; el.dispatchEvent(new Event('input',{bubbles:true})); return el.value;})()`);
   await wait(700);
   const b1 = await sampleN(); const m1 = med(b1);
   const delta1 = ((m1 - m0) / m0) * 100;
-  console.log(`③ head 160→300：bars 均值中位数 ${m0} → ${m1}（${delta1.toFixed(1)}%，应 ≤ -5%）${delta1 <= -5 ? ' ✓' : ' ✗'}`);
+  console.log(`③ head 300→120：bars 均值中位数 ${m0} → ${m1}（${delta1.toFixed(1)}%，应 ≥ +5%）${delta1 >= 5 ? ' ✓' : ' ✗'}`);
   console.log(`   before: ${b0.map((v) => (+v).toFixed(4)).join(' ')}`);
   console.log(`   after : ${b1.map((v) => (+v).toFixed(4)).join(' ')}`);
   const stored1 = await ev("localStorage.getItem('rhine-sm-display')");
   console.log(`   存储: ${stored1}`);
 
-  /* ③b smooth 1 → 3（相邻柱差变小 = 更平滑） */
+  /* ③b smooth 0 → 3（相邻柱差变小 = 更平滑） */
   const jag = "(()=>{const sp=window.__spectrum; const b=Array.from(sp.bars); let s=0,n=0; for(let i=1;i<b.length;i++){s+=Math.abs(b[i]-b[i-1]);n++;} return +(s/n).toFixed(5);})()";
   const sampleJag = async (n = 12, gap = 120) => { const a = []; for (let i = 0; i < n; i++) { a.push(await ev(jag)); await wait(gap); } return a; };
   const j0 = await sampleJag(); const jm0 = med(j0);
@@ -136,7 +136,7 @@ const SONG = { id: 'tl1', title: 'Viz Check', artist: 'Rhine Lab', album: 'Probe
   await wait(700);
   const j1 = await sampleJag(); const jm1 = med(j1);
   const delta2 = ((jm1 - jm0) / jm0) * 100;
-  console.log(`③b smooth 1→3：相邻柱差中位数 ${jm0} → ${jm1}（${delta2.toFixed(1)}%，应 ≤ -10%）${delta2 <= -10 ? ' ✓' : ' ✗'}`);
+  console.log(`③b smooth 0→3：相邻柱差中位数 ${jm0} → ${jm1}（${delta2.toFixed(1)}%，应 ≤ -10%）${delta2 <= -10 ? ' ✓' : ' ✗'}`);
 
   /* ④ 重置 */
   await ev("(()=>{document.querySelector('[data-action=\"sm-viz-reset\"]').click();return 'ok';})()");

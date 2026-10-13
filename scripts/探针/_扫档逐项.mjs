@@ -40,7 +40,7 @@ const SCAN = [
   ["smooth", 2], ["knee", 30], ["detail", 110], ["leftpump", 15], ["head", 220],
   ["right", 35], ["agc", 70], ["steepq", 240], ["tilt", 15], ["timbre", 80],
   ["tint", 20], ["expanda", 260], ["surge", 90], ["release", 60], ["valley", 60],
-  ["idle", 1],
+  ["idle", 0],   // 出厂档 idle=1（用户实测档），扫描取反
 ];
 
 function runChain(patch) {

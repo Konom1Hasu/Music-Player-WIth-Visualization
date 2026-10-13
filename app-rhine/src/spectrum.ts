@@ -1176,11 +1176,13 @@ export class Spectrum {
     this.advance();
   }
   /** ★ SelfMusic 参考算法的接入点（用户："可视化算法可以读取 D 盘的 SelfMusic 项目文件作为参考"）：
-      外部（`selfmusic-spectrum.ts` 的 `SpectrumEngine`）算好的柱高直接交给渲染层。
+      外部（`selfmusic-spectrum.ts` 的 `SelfSpectrumEngine`）算好的柱高直接交给渲染层；
+      `peaksSrc` 可选 —— 传了就作为峰值顶盖（活路径传引擎的 peaks 数组：与柱高同源、
+      同节拍、同衰减口径；不传则沿用"显示层 max-hold"的老口径）。
       走这条路时内部那条 1.3.0 流水线（analyze / advance / 各层增益）**不执行** ——
       画布、峰值线、五种样式、绘制插值全部照旧复用同一份 `bars`/`display`。
       调用方负责把引擎输出的频段数重采样到 BAR_N。 */
-  applyExternalBars(src: ArrayLike<number>) {
+  applyExternalBars(src: ArrayLike<number>, peaksSrc?: ArrayLike<number> | null) {
     const n = Math.min(BAR_N, src.length);
     this.prevBars.set(this.bars);
     /* ① clamp 后写进 bars —— 它既是铺散的输入侧，也是"铺散关（SPREAD_PASSES = 0）"时的最终值；
@@ -1257,10 +1259,19 @@ export class Spectrum {
         }
       }
     }
-    /* ③ 峰值线跟着（铺散+融合）后的值走：标记与柱顶同步 → 不会脱节成"浮空碎屑" */
-    for (let i = 0; i < n; i++) {
-      const v = this.bars[i];
-      this.peaks[i] = Math.max(this.peaks[i] * PEAK_DECAY, v);
+    /* ③ 峰值线：传了引擎 peaks 就用它（SelfMusic 活路径 —— 与柱高同帧、同衰减口径）；
+       否则沿用老口径：跟着（铺散+融合）后的柱高走，标记与柱顶同步、不脱节。 */
+    if (peaksSrc && peaksSrc.length) {
+      const pk = Math.min(BAR_N, peaksSrc.length);
+      for (let i = 0; i < pk; i++) {
+        const v = peaksSrc[i];
+        this.peaks[i] = v < 0 ? 0 : v > 1 ? 1 : v;
+      }
+    } else {
+      for (let i = 0; i < n; i++) {
+        const v = this.bars[i];
+        this.peaks[i] = Math.max(this.peaks[i] * PEAK_DECAY, v);
+      }
     }
     this.lastAdvanceAt = performance.now();
   }

@@ -111,54 +111,67 @@ export interface SelfMusicDisplayParams {
 }
 
 /**
- * 出厂默认 = SelfMusic 面板 16 项的默认值组合
- * （mainwindow rows：顺滑 1 / 软膝 78 / 细纹 50 / 左塔泵动 40 / 弹性 160 / 右细节 100 /
- *   右丰 0 / 陡峭 160 / 倾斜 45 / 音色 45 / 毛刺 45 / 尖塔 100 / 低频高耸 55 / 回落 82 /
- *   谷深 100 / 静音呼吸 0；其余内部项为 selfmusic.py 构造器默认）。
+ * ★ 出厂默认 = **用户 SelfMusic 里实际在跑的档**（2026-10-13 21:58 抄自
+ * `%LOCALAPPDATA%\MusicPlayerCache\ui.json` 的 16 个 `viz_*` 已调值）。
+ * SelfMusic 启动链路（mainwindow.__init__ + 面板构造）：
+ *   ① SpectrumAnalyzer(sample_rate=44100) 构造；
+ *   ② analyzer.DEFAULT_PARAMS 覆盖（含 detail_hi=1.12 / detail_lo=0.60 —— 注意
+ *      不是 selfmusic.py 类默认的 1.45/0.70，这是"类默认 ≠ 实际运行值"的一处）；
+ *   ③ 面板 16 枚滑块把"已存值或面板默认"逐项 apply 回分析器（persist=False）。
+ * 所以本档 = 该用户 ui.json 的实测档：
+ *   顺滑 0 / 软膝 95 / 细纹 0 / 左塔泵动 60 / 弹性 300 / 右细节 80 / 右丰 100 /
+ *   陡峭 114 / 倾斜 39 / 音色 93 / 毛刺 16 / 尖塔 100 / 低频高耸 110 / 回落 95 /
+ *   谷深 100 / 静音呼吸 1；detailLo/Hi 取 DEFAULT_PARAMS 实际值 0.60/1.12。
+ * 用户要求（2026-10-13）："我要参数，波形完全一致" —— 本档即"参数完全一致"的落点。
  */
 export const SELFMUSIC_DISPLAY_DEFAULTS: SelfMusicDisplayParams = {
-  headroom: 1.6,
-  tintAmp: 0.45,
-  surgeAmp: 0.55,
-  release: 0.82,
-  contrast: 1.6,
+  headroom: 3.0,
+  tintAmp: 0.16,
+  surgeAmp: 1.10,
+  release: 0.95,
+  contrast: 1.14,
   contrastFloor: 0.05,
-  steep: 0.6,
+  steep: 0.14,
   peakExpand: 1.0,
   valleyKeep: 1.0,
   expandRadius: 2,
-  tilt: 0.45,
-  spreadPasses: 1,
-  knee: 0.78,
+  tilt: 0.39,
+  spreadPasses: 0,
+  knee: 0.95,
   kneeWidth: 0.60,
   kneeMax: 2.0,
-  detail: 0.50,
+  detail: 0.0,
   detailSpan: 15,
-  detailLo: 0.70,
-  detailHi: 1.45,
-  leftPump: 0.40,
+  detailLo: 0.60,
+  detailHi: 1.12,
+  leftPump: 0.60,
   leftPumpDecay: 10.0,
-  bandAgc: 0.0,
+  bandAgc: 1.0,
   agcFrom: 0.55,
   agcSlow: 0.006,
   agcMax: 8.0,
-  rightHf: 1.00,
+  rightHf: 0.80,
   rightFrom: 0.68,
   rightRamp: 12.0,
   shortSize: 512,
-  timbre: 0.45,
+  timbre: 0.93,
   timbreFloor: 0.30,
   timbrePow: 1.5,
-  idleBreathe: false,
+  idleBreathe: true,
   onsetAmp: 0.6,
   crestAmp: 0.85,
 };
 
-/** 中性 = 与 web/spectrum.mjs 逐位一致的全关组合（对拍/回退用）。 */
+/** 中性 = 与 web/spectrum.mjs 逐位一致的全关组合（对拍/回退用）。
+    ⚠ 必须把"构造器默认 ≠ 中性"的每一项都显式写回：除激进度全关外，还包括
+    surgeAmp=0.55 / release=0.82（SURGE_AMP、release 类默认）与 detailLo/Hi=0.70/1.45
+    —— 出厂档改成了用户实测档之后，这四个值不能再从默认档继承。 */
 export const SELFMUSIC_NEUTRAL_DISPLAY: SelfMusicDisplayParams = {
   ...SELFMUSIC_DISPLAY_DEFAULTS,
   headroom: 1.0,
   tintAmp: 0.22,
+  surgeAmp: 0.55,
+  release: 0.82,
   contrast: 1.0,
   contrastFloor: 0.0,
   steep: 0.0,
@@ -168,6 +181,8 @@ export const SELFMUSIC_NEUTRAL_DISPLAY: SelfMusicDisplayParams = {
   spreadPasses: 0,
   knee: 0.0,
   detail: 0.0,
+  detailLo: 0.70,
+  detailHi: 1.45,
   leftPump: 0.0,
   bandAgc: 0.0,
   rightHf: 0.0,
@@ -200,24 +215,25 @@ export const SELFMUSIC_SLIDER_RANGES: Record<SmSliderKey, readonly [number, numb
   idle: [0, 1],
 };
 
-/** 滑块默认（= 出厂默认；照 mainwindow rows 的 dflt 列） */
+/** 滑块默认（= 出厂默认；2026-10-13 改为**用户 SelfMusic 实测档**，见上方
+    SELFMUSIC_DISPLAY_DEFAULTS 的说明。原面板出厂值：1/78/50/40/160/100/0/160/45/45/45/100/55/82/100/0） */
 export const SELFMUSIC_SLIDER_DEFAULTS: Record<SmSliderKey, number> = {
-  smooth: 1,
-  knee: 78,
-  detail: 50,
-  leftpump: 40,
-  head: 160,
-  right: 100,
-  agc: 0,
-  steepq: 160,
-  tilt: 45,
-  timbre: 45,
-  tint: 45,
+  smooth: 0,
+  knee: 95,
+  detail: 0,
+  leftpump: 60,
+  head: 300,
+  right: 80,
+  agc: 100,
+  steepq: 114,
+  tilt: 39,
+  timbre: 93,
+  tint: 16,
   expanda: 100,
-  surge: 55,
-  release: 82,
+  surge: 110,
+  release: 95,
   valley: 100,
-  idle: 0,
+  idle: 1,
 };
 
 /** 滑块键 → 引擎参数 patch（换算照 mainwindow._apply_viz_param，逐行一致）。 */
