@@ -58,7 +58,7 @@ import {
 } from "./player";
 import { TerminalAudio } from "./audio";
 import { audioSettingsMarkup } from "./audio-settings";
-import { selfmusicVizMarkup, handleSelfmusicVizInput, resetSelfmusicViz } from "./selfmusic-viz";
+import { selfmusicVizMarkup, handleSelfmusicVizInput, resetSelfmusicViz, installVizPreviewMode, disposeVizPreviewMode } from "./selfmusic-viz";
 import "./selfmusic-viz.css";
 
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) =>
@@ -676,6 +676,7 @@ function finishModalClose() {
   if (!modalClosing) return;
   modalClosing = false;
   modal = null;
+  disposeVizPreviewMode();   // 清掉「调参预览态」观察器（见 selfmusic-viz.ts）
   $("#modal-root").replaceChildren();
   modalTransition = undefined;
   modalSiblings.forEach(({ node, inert }) => (node.inert = inert));
@@ -696,7 +697,11 @@ function renderModal() {
   backdrop.hidden = true;
   modalTransition = new SurfaceTransition(backdrop, $(".terminal-modal"));
   modalTransition.show(prefs.reduced);
-  if (modal === "settings") updateQualitySummary();
+  if (modal === "settings") {
+    updateQualitySummary();
+    /* 「调参预览态」：滚到可视化调节区块时弹层为频谱让位（见 selfmusic-viz.ts） */
+    installVizPreviewMode($("#modal-root"));
+  }
   if (modal !== "settings") {
     renderResults();
     requestAnimationFrame(() => {

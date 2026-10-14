@@ -65,5 +65,38 @@ export function resetSelfmusicViz() {
   }
 }
 
+/* ---- 调参预览态（2026-10-14）：滚到本区块时，设置弹层自动为频谱让位 ----
+   用户反馈「调节参数时不好看到实际的效果，因为被设置窗口和背景模糊挡住」。
+   做法：IntersectionObserver 监听本区块与弹层可视区的交叉 —— 可见即给
+   `.modal-backdrop` 打上 data-viz-preview（遮罩去模糊 / 去底色，弹层向左
+   让位，样式见 style.css 同名段落），滚离即恢复。只在设置弹层里安装。 */
+let vizPreviewIO: IntersectionObserver | null = null;
+
+/** 设置弹层渲染后调用（main.ts renderModal）：安装「调参预览态」观察器 */
+export function installVizPreviewMode(root: ParentNode) {
+  disposeVizPreviewMode();
+  const modal = root.querySelector<HTMLElement>(".settings-modal");
+  const smViz = root.querySelector<HTMLElement>(".sm-viz");
+  const backdrop = root.querySelector<HTMLElement>(".modal-backdrop");
+  if (!modal || !smViz || !backdrop) return; // 非设置弹层（检索 / 收藏）不装
+  vizPreviewIO = new IntersectionObserver(
+    (entries) => {
+      const ratio = entries[entries.length - 1]?.intersectionRatio ?? 0;
+      /* 阈值 0.12：滑块区露头一点点还不打扰（用户可能只是在翻设置项），
+         露出约一行滑块的高度才让位；滚离同理回落 */
+      if (ratio > 0.12) backdrop.dataset.vizPreview = "1";
+      else delete backdrop.dataset.vizPreview;
+    },
+    { root: modal, threshold: [0, 0.12, 1] },
+  );
+  vizPreviewIO.observe(smViz);
+}
+
+/** 弹层关闭时调用（main.ts finishModalClose）：断开观察器 */
+export function disposeVizPreviewMode() {
+  vizPreviewIO?.disconnect();
+  vizPreviewIO = null;
+}
+
 /** 默认档参考值（供外部/测试取用） */
 export const SELFMUSIC_VIZ_DEFAULTS = SELFMUSIC_SLIDER_DEFAULTS;

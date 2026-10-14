@@ -3408,3 +3408,34 @@ body.rhine-night .modal-backdrop {
     background: rgba(30, 34, 28, 0.98);
   }
 }
+
+/* ============================================================
+   调参预览态（2026-10-14，用户："调节参数时不好看到实际的效果，
+   因为被设置窗口和背景模糊挡住"）
+   —— 设置面板滚到「SELF-MUSIC VISUALIZER」区块时（selfmusic-viz.ts 的
+   IntersectionObserver 切换 data-viz-preview）：
+     · 遮罩去掉模糊与底色 —— 背后的详情区频谱恢复清晰；
+     · 设置面板整体向左让位（左缘贴到画布左边），频谱 100% 露出。
+   滚离该区块、或关掉面板即恢复。
+   ★ 让位走独立属性 `translate`：弹层入场动画（SurfaceTransition，WAAPI）
+     占着 `transform` 通道 —— translate 与 transform 分开合成、互不干扰。
+   ★ 让位量 calc(50% - 960px)：弹层在 1920 宽的画布里居中（左边距 =
+     960 − 半宽），平移这么多正好让左缘贴 0；将来改宽度也不用动这里。
+   ============================================================ */
+.modal-backdrop {
+  /* 进入 / 退出预览态的平滑过渡（原样式没有 transition） */
+  transition: background-color 0.3s ease, backdrop-filter 0.3s ease;
+}
+.terminal-modal.settings-modal {
+  transition: translate 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.modal-backdrop[data-viz-preview],
+body.theme-dark .modal-backdrop[data-viz-preview],
+body.rhine-night .modal-backdrop[data-viz-preview] {
+  background: transparent;
+  backdrop-filter: blur(0px);
+  -webkit-backdrop-filter: blur(0px);
+}
+.modal-backdrop[data-viz-preview] .terminal-modal.settings-modal {
+  translate: calc(50% - 960px) 0;
+}
