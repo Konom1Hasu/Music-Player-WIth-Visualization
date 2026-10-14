@@ -1,11 +1,15 @@
 /*
  * 节拍预分析验证：不启动浏览器、不需要音频设备，直接跑 src/beatmap.ts 那条离线流水线。
  *
- * 为什么要这个脚本：预分析是"后台悄悄干的事"——算没算对、提前点亮有没有真的提前，
- * 界面上看不出来（画面一直在动）。所以这里把三段都搬进 Node：
+ * 为什么要这个脚本：预分析是"后台悄悄干的事"——算没算对，界面上只能看到一个 BPM 数字。
+ * 所以这里把三段都搬进 Node：
  *   ① 合成一段**已知节拍**的点击轨（120 BPM，鼓点在 t=0.25+k·0.5，20~32 秒是副歌）；
  *   ② 跑 analyzeMono，拿算出来的拍点跟真值比；
- *   ③ 再把它喂给 Spectrum，量"有乐谱 / 没乐谱"时柱高到底差多少。
+ *   ③ 校验取样接口（sampleBeatMap / preheatAt）的边界行为。
+ *
+ * ★ v2.7.7：频谱换成 SelfMusic 引擎后**不再消费节拍先验**，原来"第 7 段：装进 Spectrum
+ *   看柱高差"整段随旧算法一起删了（跑不动了，也不该再跑 —— 验证必须走用户真实在用的
+ *   那条管线）。本脚本现在只验证 beatmap 自己的算法与边界。
  *
  * 另有 W 组专门钉一条硬约束：analyzeMono 必须**自包含**（worker 是用
  * `analyzeMono.toString()` 拼出来的，一旦引用了模块作用域就是 ReferenceError）。
@@ -42,9 +46,7 @@ async function loadModule(file) {
 }
 
 const BM = await loadModule("beatmap.ts");
-const SP = await loadModule("spectrum.ts");
 const { analyzeMono, sampleBeatMap, preheatAt, BEAT_VERSION, PRE_SR, BEAT_PRE_ROLL } = BM;
-const { Spectrum } = SP;
 
 let pass = 0;
 let fail = 0;
@@ -66,18 +68,14 @@ const median = (arr) => {
 /* ---------- 0. 源码一致性自检 ---------- */
 console.log("=== 0. 源码常量自检（改了实现这里先红） ===");
 const bmSrc = fs.readFileSync(path.join(SRC, "beatmap.ts"), "utf8");
-const spSrc = fs.readFileSync(path.join(SRC, "spectrum.ts"), "utf8");
 const srcExpect = [
   ["beatmap.ts: PRE_SR = 8000", /export const PRE_SR = 8000;/],
   ["beatmap.ts: BEAT_VERSION = 1", /export const BEAT_VERSION = 1;/],
   ["beatmap.ts: BEAT_PRE_ROLL = 0.028", /export const BEAT_PRE_ROLL = 0\.028;/],
   ["beatmap.ts: 自包含约定写在文件头", /必须\*\*完全自包含\*\*/],
-  ["spectrum.ts: BEAT_PREHEAT_EXPAND", /const BEAT_PREHEAT_EXPAND = /],
-  ["spectrum.ts: BEAT_FORM_TIP（每小节换形态）", /const BEAT_FORM_TIP = \[/],
-  ["spectrum.ts: 先验只抬上限不替换（取 max）", /if \(this\.bkick > this\.kickEnergy\) this\.kickEnergy = this\.bkick;/],
-  ["spectrum.ts: 没有乐谱时先验全为 0", /if \(!this\.beat \|\| this\.playhead < 0\)/],
+  ["beatmap.ts: 已标注与频谱脱钩", /已与频谱脱钩/],
 ];
-for (const [name, re] of srcExpect) ok(re.test(bmSrc) || re.test(spSrc), name);
+for (const [name, re] of srcExpect) ok(re.test(bmSrc), name);
 
 /* ---------- 1. 合成一段"已知答案"的点击轨 ---------- */
 const SR = PRE_SR;
@@ -267,59 +265,15 @@ const zeroBeats = sampleBeatMap({ ...bm, beats: new Float32Array(0), amp: new Ui
 ok(zeroBeats.kick === 0 && zeroBeats.form === 0, "测不出 BPM 的歌：只有包络、不编排", "kick=" + zeroBeats.kick);
 ok(preheatAt({ ...bm, loud: new Uint8Array(0) }, 12) === 0, "没有响度包络时预热为 0");
 
-/* ---------- 7. 装进 Spectrum：观感到底变没变 ---------- */
-console.log("\n=== 7. 装进 Spectrum（同一段信号，有/无乐谱逐位对比） ===");
-const ctxStub = {
-  clearRect() {}, fillRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, arc() {}, stroke() {},
-  createLinearGradient: () => ({ addColorStop() {} }),
-  fillStyle: "", strokeStyle: "", globalAlpha: 1, lineWidth: 1,
-};
-const canvasStub = { width: 954, height: 716, getContext: () => ctxStub };
-/* 用一段**没有鼓点**的稳态信号：这样柱高的差异只能来自先验，不会来自信号本身 */
-const quiet = new Float32Array(1024);
-for (let i = 0; i < quiet.length; i++) quiet[i] = 0.12 * Math.sin((2 * Math.PI * 220 * i) / SR);
-function runOnce(withMap, playhead) {
-  const sp = new Spectrum(canvasStub, SR);
-  sp.setMode("mix");
-  sp.applyParams();
-  sp.setAdvanceInterval(20);
-  sp.setPlayhead(playhead);
-  if (withMap) sp.setBeatmap(bm);
-  for (let n = 0; n < 6; n++) sp.update(quiet, SR);
-  return Array.from(sp.levels);
-}
-const noMap = runOnce(false, 0);
-const mapOff = runOnce(true, -1); // 装了乐谱但播放头未知（没播）
-const mapOn = runOnce(true, bm.beats[k] - 0.002); // 正好在拍点前 2ms
-let sameCount = 0;
-for (let i = 0; i < noMap.length; i++) if (noMap[i] === mapOff[i]) sameCount++;
-ok(sameCount === noMap.length, "播放头未知时与" + "「从没装过乐谱」逐位相同（无副作用）",
-  sameCount + "/" + noMap.length);
-const lowMean = (a) => {
-  let s = 0;
-  for (let i = 0; i < 22; i++) s += a[i];
-  return s / 22;
-};
-console.log("  低频 22 根柱的均值：无乐谱 " + lowMean(noMap).toFixed(4) + "　拍点前 2ms " + lowMean(mapOn).toFixed(4));
-ok(lowMean(mapOn) > lowMean(noMap) + 0.02, "拍点前低频柱确实被抬起来了（提前点亮可见）",
-  "+" + (lowMean(mapOn) - lowMean(noMap)).toFixed(4));
-const spDiag = (() => {
-  const sp = new Spectrum(canvasStub, SR);
-  sp.applyParams();
-  sp.setBeatmap(bm);
-  sp.setPlayhead(bm.beats[k] - 0.002);
-  sp.update(quiet, SR);
-  return sp.beatInfo();
-})();
-console.log("  诊断摘要：" + JSON.stringify(spDiag));
-ok(spDiag.live === 1 && spDiag.bpm > 0 && spDiag.kick > 0.7, "beatInfo 报告了正在生效的先验", JSON.stringify(spDiag));
-const spOff = (() => {
-  const sp = new Spectrum(canvasStub, SR);
-  sp.applyParams();
-  sp.update(quiet, SR);
-  return sp.beatInfo();
-})();
-ok(spOff.live === 0 && spOff.kick === 0 && spOff.preheat === 0, "没乐谱时 beatInfo 全为 0", JSON.stringify(spOff));
+/* ---------- 7. 与频谱的脱钩（v2.7.7）：写死在源码里，防止有人"顺手接回去" ---------- */
+console.log("\n=== 7. 频谱已换 SelfMusic 引擎：beatmap 与它脱钩 ===");
+const spSrc = fs.readFileSync(path.join(SRC, "spectrum.ts"), "utf8");
+ok(/SelfMusic 桌面端 visualizer 的 Canvas 直译/.test(spSrc), "spectrum.ts = SelfMusic 绘制直译");
+ok(!/setBeatmap|BEAT_PREHEAT|BEAT_FORM_TIP|beatInfo\(/.test(spSrc),
+  "spectrum.ts 里再没有节拍先验入口（不会被悄悄接回去）");
+const plSrc = fs.readFileSync(path.join(SRC, "player.ts"), "utf8");
+ok(!/spectrum\?\.setBeatmap|spectrum\.setBeatmap/.test(plSrc), "player.ts 不再往频谱里装乐谱");
+ok(/let beatEnabledPref = false;/.test(plSrc), "预分析默认关闭（没有消费方，不白烧 CPU）");
 
 /* ---------- 8. W 组：worker 注入的等价性（文件头约束 ①） ---------- */
 console.log("\n=== 8. W 组：analyzeMono 必须自包含（worker 靠 toString 注入） ===");

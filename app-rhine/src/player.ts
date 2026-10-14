@@ -13,35 +13,7 @@ import {
    驱动逻辑与 mainwindow._refresh_viz 逐行对齐，见 selfmusic-live.ts 文件头。 */
 import { SelfMusicLiveDriver } from "./selfmusic-live";
 import { decodeMonoPcm } from "./selfmusic-pcm";
-import {
-  Spectrum,
-  analysisWindow,
-  SPECTRUM_WINDOW,
-  SPECTRUM_BANDS,
-  SPECTRUM_F_MIN,
-  SPECTRUM_F_MAX_RATIO,
-  SPECTRUM_KICK_FROM,
-  SPECTRUM_KICK_TO,
-  SPECTRUM_KICK_REF_ATTACK,
-  SPECTRUM_KICK_REF_RELEASE,
-  SPECTRUM_KICK_FLOOR,
-  SPECTRUM_KICK_GAIN,
-  SPECTRUM_TR_REF_ATTACK,
-  SPECTRUM_TR_REF_RELEASE,
-  SPECTRUM_TR_FLOOR,
-  SPECTRUM_TR_GAIN,
-  SPECTRUM_TR_BOOST,
-  SPECTRUM_TR_BANDS_REF,
-  SPECTRUM_TR_FROM,
-  vizParams,
-  setVizParams,
-  clampVizParams,
-  clampHeadroom,
-  KICK_PUMP_MIN,
-  type VizParams,
-  type SpectrumPalette,
-  type SpectrumMode,
-} from "./spectrum";
+import { Spectrum, type SpectrumPalette } from "./spectrum";
 import {
   beatmapOf,
   hasBeatmap,
@@ -54,97 +26,10 @@ import {
   type BeatMap,
 } from "./beatmap";
 
-/* ---------- 可视化参数：默认 1.3.0 原值，启动时可从旧版导入一次 ----------
-   旧版播放器的调音面板把 平衡/峰宽/抖动/鼓点/峰高 存在 localStorage 的 mp_* 里，
-   但那份存储属于 **file:// 域**，新版是 http://127.0.0.1:41739 域 —— 同源策略下读不到，
-   所以走主进程开隐藏页去读（app/main.js 的 import-legacy-settings）。
-   用户调过的值（例如 平衡 63、峰高 1.45）就是他习惯的观感，比"原版默认值"更该用。 */
-const LS_VIZ = "rhine-viz-params";
-const LS_VIZ_IMPORTED = "rhine-viz-imported";
-let vizModePref = "mix";
-function loadVizParams() {
-  try {
-    const raw = localStorage.getItem(LS_VIZ);
-    if (!raw) return;
-    const stored = clampVizParams(JSON.parse(raw) as Partial<VizParams>);
-    const head = clampHeadroom(stored);
-    setVizParams(head);
-    /* 已经导入过旧设置的机器（存储里是 鼓点 0）会一直"左峰顶满"，
-       这里夹回 KICK_PUMP_MIN 并把结果写回存储，免得每次启动都要再夹一遍。
-       ★ 只写一次就收敛：head 与 stored 一致时不再写。 */
-    if (head.kickPump !== stored.kickPump) saveVizParams();
-  } catch {
-    /* ignore */
-  }
-}
-function saveVizParams() {
-  try {
-    localStorage.setItem(LS_VIZ, JSON.stringify({ ...vizParams }));
-  } catch {
-    /* ignore */
-  }
-}
-loadVizParams();
-/** 一次性把旧版调音参数导进来（导入成功后写进 rhine-viz-params，不再重复导入）。 */
-export async function importLegacyVizSettings(): Promise<boolean> {
-  let already = false;
-  try {
-    already = localStorage.getItem(LS_VIZ_IMPORTED) === "1";
-  } catch {
-    /* ignore */
-  }
-  if (already || !desktop?.importLegacySettings) return false;
-  let res: any = null;
-  try {
-    res = await desktop.importLegacySettings();
-  } catch {
-    return false;
-  }
-  if (!res || res.error || !res.values) return false;
-  const v = res.values as Record<string, string>;
-  const int = (k: string, lo: number, hi: number) => {
-    const n = parseInt(String(v[k] ?? ""), 10);
-    return isFinite(n) && n >= lo && n <= hi ? n : null;
-  };
-  const next: Partial<VizParams> = {};
-  const tilt = int("mp_tilt", 0, 100);
-  if (tilt !== null) next.tilt = tilt; // 频谱平衡（越大左侧整体越高）
-  const bw = int("mp_bassw2", 20, 80);
-  if (bw !== null) next.bassSigma = bw / 1000; // 峰宽（σ = 值/1000）
-  const jit = int("mp_jit2", 40, 200);
-  if (jit !== null) next.jitterK = jit / 100; // 抖动倍率
-  const kick = int("mp_kick", 0, 60);
-  if (kick !== null) next.kickPump = kick / 100; // 鼓点泵动（0 = 左峰一直顶满，下面会被闸门夹到 KICK_PUMP_MIN）
-  const peak = int("mp_peakh", 55, 145);
-  if (peak !== null) next.peakTarget = peak / 100; // 峰高（左峰静态高度目标）
-  /* 夹一道"留余量"闸门：旧版的 鼓点 0 / 峰高 ≥1.25 都会让左峰一直顶满（原版面板自己也这么标注），
-     用户明确要求"可视化左侧不要一直顶满"，所以这两项不再照搬旧值。 */
-  const applied = clampVizParams(clampHeadroom(next));
-  if (!Object.keys(applied).length) return false;
-  setVizParams(applied);
-  saveVizParams();
-  if (typeof v.mp_viz === "string" && /^(mix|timbre|bars|ring|wave)$/.test(v.mp_viz)) vizModePref = v.mp_viz;
-  try {
-    localStorage.setItem(LS_VIZ_IMPORTED, "1");
-  } catch {
-    /* ignore */
-  }
-  if (spectrum) spectrum.applyParams();
-  const brief = [
-    `平衡 ${Math.round(vizParams.tilt)}`,
-    `峰宽 ${(vizParams.bassSigma * 1000).toFixed(0)}`,
-    `抖动 ${(vizParams.jitterK * 100).toFixed(0)}`,
-    `鼓点 ${(vizParams.kickPump * 100).toFixed(0)}`,
-    `峰高 ${vizParams.peakTarget.toFixed(2)}`,
-  ].join(" / ");
-  /* 夹过闸门要说一句：用户看到"鼓点 40"而不是旧版的 0，得知道为什么 */
-  const kickRaw = next.kickPump;
-  const note = typeof kickRaw === "number" && kickRaw < KICK_PUMP_MIN
-    ? `（旧版 鼓点 ${(kickRaw * 100).toFixed(0)} 会让左峰一直顶满，已按原版留余量的 ${(KICK_PUMP_MIN * 100).toFixed(0)} 收住）`
-    : "";
-  toast(`已导入旧版调音设置：${brief}${note}`);
-  return true;
-}
+/* ★ v2.7.7（用户："将频谱，算法全部换为 SelfMusic 的"）：旧版调音参数体系
+   （rhine-viz-params / rhine-viz-imported / mp_* 一次性导入 / 模式偏好 mp_viz）
+   随 1.3.0 流水线一起删除 —— 频谱不再有任何"本项目的参数"，只剩 SelfMusic 的
+   16 滑块（见 selfmusic-spectrum.ts / selfmusic-viz.ts）。 */
 
 export interface Song {
   id: string;
@@ -1007,7 +892,7 @@ export function audioQualityMarkup(): string {
     `</span></div>` +
     `<input type="checkbox" id="aq-cover-accent" ${coverAccentOn ? "checked" : ""}/><i class="toggle"></i></label>` +
       `<label><div><strong>BEAT PRE-ANALYSIS</strong><span>` +
-      `播放前离线分析整首（后台跑，不影响播放）：鼓点提前点亮、每 4 拍换形态、副歌预热` +
+      `播放前离线分析整首（后台跑，不影响播放）：产出节拍网格与响度包络并缓存` +
       `</span></div>` +
     `<span id="aq-beatmap" class="settings-value">读取中…</span>` +
     `<input type="checkbox" id="aq-beatmap-toggle" ${beatEnabledPref ? "checked" : ""}/><i class="toggle"></i></label>`
@@ -1044,14 +929,15 @@ export function fillAudioQualityInfo() {
   fillBeatmapInfo();
 }
 /** 预分析这一行的状态：有没有乐谱、这首的 BPM、队列里还剩几首。
-    ★ 为什么要显示：这个功能"看不见"——算没算出来、算得对不对，用户无从判断。
-      把 BPM 写出来，用户一眼就能核（听感对不上就是算错了，而不是"软件玄学"）。 */
+    ★ v2.7.7：频谱换成 SelfMusic 引擎后**不再消费节拍先验** —— 这条预分析现在
+      只负责"把结果算出来存下"（默认关闭，打开了也不算白算：产物有缓存，后续要用直接取）。
+      状态显示保留，用户能一眼核对算法对不对（BPM 与听感对不上 = 算错了）。 */
 function fillBeatmapInfo() {
   const el = document.querySelector<HTMLElement>("#aq-beatmap");
   if (!el) return;
   if (!beatEnabledPref) {
-    el.textContent = "已关闭";
-    el.title = "关掉后可视化退回纯在线模式（鼓点只能被动响应，会有约 30ms 的感知延迟）";
+    el.textContent = "已关闭（默认）";
+    el.title = "新版频谱（SelfMusic 引擎）不使用节拍先验，所以这项默认关闭：打开只会在后台把每首歌分析一遍并缓存结果，当前不影响画面。";
     return;
   }
   const s = currentSong();
@@ -1062,11 +948,11 @@ function fillBeatmapInfo() {
     el.textContent = bm.bpm > 0 ? `✓ ${bm.bpm.toFixed(1)} BPM · ${n} 拍` : `✓ 包络已就绪（无稳定节拍）`;
     el.title =
       `《${s?.title || ""}》已分析：${bm.dur.toFixed(1)} 秒、` +
-      (bm.bpm > 0 ? `${bm.bpm.toFixed(1)} BPM（拍长 ${bm.period.toFixed(3)} 秒）、${n} 个拍点。` : "这首歌没有稳定的节拍网格，只用了响度包络做副歌预热。") +
+      (bm.bpm > 0 ? `${bm.bpm.toFixed(1)} BPM（拍长 ${bm.period.toFixed(3)} 秒）、${n} 个拍点。` : "这首歌没有稳定的节拍网格，只算出响度包络。") +
       ` 后台队列还有 ${st.queued} 首待分析。`;
   } else if (st.busy) {
     el.textContent = "分析中…";
-    el.title = "这首歌正在后台分析（不占用播放，算完自动生效）";
+    el.title = "这首歌正在后台分析（不占用播放）";
   } else {
     el.textContent = "尚未分析";
     el.title = hasBeatmap(s) ? "" : "开始播放后会在后台分析当前与后面两首";
@@ -1221,9 +1107,7 @@ function selectSong(id: string, autoplay = false) {
   invalidatePrefetch();   // 换了歌，上一轮的预取结论作废
   loadSongAudio(s, autoplay);
   spectrum?.resetPeaks();
-  /* 换曲 → 换乐谱：库里已经算好的那份立刻装上，没算过的排进后台队列。
-     ★ 顺序有讲究：resetPeaks 之后才 setBeatmap，否则"上一首的拍点"
-       会推着这一首刚清空的低频走。 */
+  /* 换曲：清干净画面，再把"当前 + 后面两首"排进后台预分析队列（默认关，见 refreshBeatmap） */
   refreshBeatmap();
   renderNow();
   // 让三维档案阵列与详情区跟上正在播放的这一首（播放列表与档案阵列是同一份数据）
@@ -2010,57 +1894,19 @@ function renderNow() {
   renderList();
 }
 
-/* 频谱计算搬到 Web Worker：120 段 × 窗长的 Goertzel 每次约十万次乘加，
-   放主线程会跟三维场景抢帧。worker 失败就退回同步计算（见 analysisTick）。
-   ★ 分析节拍 = **1.3.0 的 50Hz**（见下面 VIZ_ANALYSIS_MS 的注释）：
-     原来 `ts - workerSentAt >= 33` 让屏幕上的柱高最多滞后一帧半 + worker 往返，
-     用户反馈"频谱和音频存在延迟"。现在分析与重画分开：分析 20ms 一 tick、rAF 只重画。
-   缓冲在两侧轮流用、靠 transfer 归还，避免每帧 new 出垃圾。 */
-let spectrumWorker: Worker | null = null;
-let workerEver = false;
-let workerFrames = 0;
-let pendingFreq: Float32Array | null = null;
-let pendingSentAt = 0;
-let workerMsAvg = 0; // worker 单次分析耗时（诊断用）
-let workerSentAt = 0;
-let workerRttAvg = 0;
-let dataAgeMs = 0; // 诊断：屏幕上这份频谱数据是多久之前喂进去的
-/* 分析节拍：**1.3.0 的是 50Hz（每 20ms 一 tick）**，不是 30Hz。
-   依据在原版代码里：`vizInterval()` 在播放中 `return 20`，而 `drawViz()` 每个 tick 都做两件事 ——
-   `requestSpectrum()`（把时域数据喂给 worker，**没有任何节流**）与 `computeBars()`
-   （跑一阶跟随 + 正弦抖动 + 14 级量化）。所以"流水线节拍 = 50Hz"本身就是 1.3.0 的参数：
-   抖动相位每 tick +0.03、一阶跟随 0.70−0.20·i/n、鼓点参考电平每 tick ×0.05 全按这个节拍给。
-   ★ 曾经把这里误记成 30Hz 并节流到 33ms —— 结果是柱高最多滞后一帧半、数据平均 16.7ms 才更新，
-   用户两次反馈"延迟感严重""没能好好反映高能量音色"就是它，这次按原版改回 20ms。
-   节拍由**自己这条定时器**驱动，不挂在 rAF 上：rAF 的 16.7ms 步长会把 20ms 的门变成 33ms。
-   rAF 那条循环只负责重画。 */
-const VIZ_ANALYSIS_MS = 20;
-/* ★ selfmusic 档的分析节拍 = 16ms（SelfMusic 主循环是 QTimer 16ms）。
+/* ---------- 分析节拍与引擎常量（v2.7.7：算法只剩 SelfMusic 一条） ----------
+   ★ v2.7.7（用户："将频谱，算法全部换为 SelfMusic 的"）：旧 1.3.0 流水线
+   （50Hz / 20ms 节拍、120 段 Goertzel worker、算法档开关 rhine-viz-algo、
+   同步回退路径）整体删除 —— 频谱永远走 SelfMusic 引擎这一条路，
+   数据只来自 selfmusic-live 的逐帧直供（柱数 = 引擎频段数 96，不再重采样）。 */
+/* ★ 分析节拍 = 16ms（SelfMusic 主循环是 QTimer 16ms）。
    每帧仍把**真实**间隔喂 setTickMs（8~60ms 钳制）折算衰减系数，
    所以定时器抖动不会改变观感——这是 set_tick_ms 存在的意义。 */
 const SM_ANALYSIS_MS = 16;
-/* ★★ 频谱算法档位（2026-10-11）：用户："可视化算法可以读取 D 盘的 SelfMusic 项目文件作为参考"。
-   `selfmusic` = D:\SelfMusic\web\spectrum.mjs 那套（Hann 4096 · 96 对数频段 · 分层窗长 ·
-   倾斜/U 形权重/逐带 AGC/细节形变/顶端软膝/融合音色强调，共 97 项自测）；
-   `legacy` = 本项目原来那条 1.3.0 流水线（v2.7.0 观感）。
-   切换方式：localStorage `rhine-viz-algo` = 'legacy' 回退；默认 selfmusic。
-   ⚠ 走 selfmusic 时分析窗要 4096 点（见 ensureAnalyser 的 fftSize），且不再用那个 120 段 worker。 */
-const LS_VIZ_ALGO = "rhine-viz-algo";
-/** 画布柱数：与 spectrum.ts 的 BAR_N 一致（重采样目标） */
-const BAR_N_REF = 150;
 /** SelfMusic 引擎的分析窗长（它要求 4096 点；分层窗 1024/2048/4096 在引擎内部） */
 const SPECTRUM_WINDOW_REF = 4096;
-let vizAlgo: "selfmusic" | "legacy" = (() => {
-  try {
-    return localStorage.getItem(LS_VIZ_ALGO) === "legacy" ? "legacy" : "selfmusic";
-  } catch {
-    return "selfmusic";
-  }
-})();
-/** SelfMusic 引擎实例（懒建；算法档 = legacy 时永不创建） */
+/** SelfMusic 引擎实例（懒建） */
 let refEngine: SelfSpectrumEngine | null = null;
-let refBarsBuf: Float32Array | null = null;
-let refPeaksBuf: Float32Array | null = null;
 
 /* ---------- SelfMusic 活路径（2026-10-13"参数、波形完全一致"） ----------
    与 v2.7.5 的区别：不再拿 AnalyserNode 的"最近一窗"直接喂引擎，而是照 SelfMusic
@@ -2096,30 +1942,15 @@ function ensureRefEngine(sr: number): SelfSpectrumEngine {
   return refEngine;
 }
 
-/** 96 段 → 画布 BAR_N 柱（线性重采样；柱数不变，波形轮廓一致） */
-function resampleRefBars(src: Float32Array, out: Float32Array) {
-  const B = src.length;
-  for (let i = 0; i < out.length; i++) {
-    const x = (i / (out.length - 1)) * (B - 1);
-    const i0 = Math.floor(x);
-    const i1 = Math.min(B - 1, i0 + 1);
-    const f = x - i0;
-    out[i] = src[i0] * (1 - f) + src[i1] * f;
-  }
-}
-/** 发布一帧：柱高 + 峰值顶盖（都走引擎输出；顶盖照 SelfMusic 的 peaks 数组） */
-function publishRefFrame(h: Float32Array, pk: Float32Array | null) {
+/** 发布一帧：柱高 + 峰值顶盖 + 四路音色（全部直通引擎输出；柱数 = 引擎频段数 96）。
+    ★ v2.7.7：96→150 的线性重采样已删除 —— 画的就是引擎每一条频段。 */
+function publishRefFrame(
+  h: Float32Array,
+  pk: Float32Array | null,
+  gauges?: { kick: number; bass: number; vocal: number; cymbal: number } | null,
+) {
   if (!spectrum) return;
-  if (!refBarsBuf || refBarsBuf.length !== BAR_N_REF) refBarsBuf = new Float32Array(BAR_N_REF);
-  const out = refBarsBuf;
-  resampleRefBars(h, out);
-  if (pk && pk.length) {
-    if (!refPeaksBuf || refPeaksBuf.length !== BAR_N_REF) refPeaksBuf = new Float32Array(BAR_N_REF);
-    resampleRefBars(pk, refPeaksBuf);
-    spectrum.applyExternalBars(out, refPeaksBuf);
-  } else {
-    spectrum.applyExternalBars(out);
-  }
+  spectrum.applyExternalBars(h, pk && pk.length ? pk : null, gauges || null);
 }
 /** 本分析帧的真实间隔（ms）——喂给引擎折算衰减系数（照 set_tick_ms 的用法） */
 function smTickDt(): number {
@@ -2135,38 +1966,32 @@ function smPublishWindow(win: Float32Array) {
   const dt = smTickDt();
   eng.setTickMs(dt > 0 ? Math.max(8, Math.min(60, dt)) : 16.7);
   eng.push(win);
-  publishRefFrame(eng.compute(), eng.lastPeaks);
+  publishRefFrame(eng.compute(), eng.lastPeaks, eng.lastTimbre);
 }
 /** 真实播放的分析帧：PCM 活路径 / 流式回退 / 等解码 */
 function smTickFrame() {
-  if (vizAlgo !== "selfmusic") return;
   if (smPcmState === "pcm" && smDriver) {
     const dt = smTickDt();
     smDriver.frame((audio.currentTime || 0) * 1000, dt);
     const h = smDriver.lastHeights;
-    if (h) publishRefFrame(h, smDriver.lastPeaks);
+    if (h) publishRefFrame(h, smDriver.lastPeaks, smDriver.lastGauges);
   } else if (smPcmState === "stream") {
     if (!analyserNode) return;
     if (!timeData || timeData.length !== analyserNode.fftSize) timeData = new Float32Array(analyserNode.fftSize);
     analyserNode.getFloatTimeDomainData(timeData);
-    /* 老行为：最近一窗（语义与 SelfMusic 的"位置窗"不同，仅作回退） */
+    /* 回退语义：最近一窗（与 SelfMusic 的"位置窗"不同，仅作解码失败时的兜底） */
     const eng = ensureRefEngine(actx?.sampleRate || 48000);
     const dt = smTickDt();
     eng.setTickMs(dt > 0 ? Math.max(8, Math.min(60, dt)) : 16.7);
     const w = timeData.length >= SPECTRUM_WINDOW_REF ? timeData.subarray(timeData.length - SPECTRUM_WINDOW_REF) : timeData;
     eng.push(w);
-    publishRefFrame(eng.compute(), eng.lastPeaks);
+    publishRefFrame(eng.compute(), eng.lastPeaks, eng.lastTimbre);
   }
   /* "wait"：正在解码 —— 画面已清零，什么都不做（照 SelfMusic 的"正在解码"态） */
 }
 /** 切歌时把画面清零（等解码完成，避免上一首的波形滞留在屏幕上） */
 function zeroRefBars() {
-  if (!spectrum) return;
-  if (!refBarsBuf || refBarsBuf.length !== BAR_N_REF) refBarsBuf = new Float32Array(BAR_N_REF);
-  refBarsBuf.fill(0);
-  if (!refPeaksBuf || refPeaksBuf.length !== BAR_N_REF) refPeaksBuf = new Float32Array(BAR_N_REF);
-  refPeaksBuf.fill(0);
-  spectrum.applyExternalBars(refBarsBuf, refPeaksBuf);
+  spectrum?.resetPeaks();
 }
 /** 取一首歌的音频字节（解码用）。与 blobUrlOf 同一套路径解析，但不做任何"转换/自愈" */
 async function audioBytesOf(s: Song): Promise<ArrayBuffer | null> {
@@ -2206,7 +2031,6 @@ async function audioBytesOf(s: Song): Promise<ArrayBuffer | null> {
 }
 /** 切歌入口：启动整曲 PCM 解码（异步；token 防串台）。失败即回退流式模式 */
 function startSelfmusicPcm(s: Song) {
-  if (vizAlgo !== "selfmusic") return;
   const token = ++smDecodeToken;
   smPcmState = "wait";
   smPcmRate = 0;
@@ -2298,129 +2122,12 @@ export function resetSmDisplayValues() {
   try { localStorage.removeItem(LS_SM_DISPLAY); } catch { /* ignore */ }
   applySmValues({ ...SELFMUSIC_SLIDER_DEFAULTS });
 }
-function initSpectrumWorker() {
-  try {
-    const src = `
-      const N = ${SPECTRUM_WINDOW}, B = ${SPECTRUM_BANDS}, LOG101 = Math.log10(101);
-      /* 频段映射照 1.3.0：fMin = 20Hz、fMax = 0.45 × Nyquist（随采样率变）。
-         鼓点段位、瞬态参数全部从 spectrum.ts 插值进来 —— 两条分析路径必须同参数，
-         否则 worker 生效时观感会和同步路径不一致。 */
-      const F_MIN = ${SPECTRUM_F_MIN}, F_MAX_RATIO = ${SPECTRUM_F_MAX_RATIO};
-      const K_FROM = ${SPECTRUM_KICK_FROM}, K_TO = ${SPECTRUM_KICK_TO}, K_N = K_TO - K_FROM + 1;
-      const K_ATK = ${SPECTRUM_KICK_REF_ATTACK}, K_REL = ${SPECTRUM_KICK_REF_RELEASE};
-      const K_FLOOR = ${SPECTRUM_KICK_FLOOR}, K_GAIN = ${SPECTRUM_KICK_GAIN};
-      const T_ATK = ${SPECTRUM_TR_REF_ATTACK}, T_REL = ${SPECTRUM_TR_REF_RELEASE};
-      const T_FLOOR = ${SPECTRUM_TR_FLOOR}, T_GAIN = ${SPECTRUM_TR_GAIN};
-      const T_BOOST = ${SPECTRUM_TR_BOOST}, T_REF = ${SPECTRUM_TR_BANDS_REF}, T_FROM = ${SPECTRUM_TR_FROM};
-      const hann = new Float32Array(N);
-      for (let i = 0; i < N; i++) hann[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (N - 1)));
-      let bandK = null, sr = 0, kickRef = 0, transRef = 0, prevMx = 0;
-      const prevMags = new Float32Array(B);
-      const fluxPos = new Float32Array(B);
-      /* 加窗后的缓冲：每 tick 只乘一遍（复用同一块，不产生垃圾）。 */
-      const tw = new Float32Array(N);
-      onmessage = (e) => {
-        const t0 = performance.now();
-        const td = e.data.td;
-        const rate = e.data.sr || 48000;
-        if (!bandK || rate !== sr) {
-          sr = rate;
-          bandK = new Float32Array(B);
-          const fMax = F_MAX_RATIO * (sr / 2);
-          for (let b = 0; b < B; b++) bandK[b] = (F_MIN * Math.pow(fMax / F_MIN, b / (B - 1)) / sr) * N;
-        }
-        for (let i = 0; i < N; i++) tw[i] = td[i] * hann[i];
-        const mags = new Float32Array(B);
-        let mx = 1e-9;
-        for (let b = 0; b < B; b++) {
-          const k = bandK[b], co = 2 * Math.cos(2 * Math.PI * k / N);
-          let s1 = 0, s2 = 0;
-          for (let i = 0; i < N; i++) { const s0 = tw[i] + co * s1 - s2; s2 = s1; s1 = s0; }
-          const m = Math.sqrt(Math.max(0, s1 * s1 + s2 * s2 - co * s1 * s2)) / (N / 4);
-          mags[b] = m;
-          if (m > mx) mx = m;
-        }
-        const out = new Float32Array(B + 1);
-        for (let b = 0; b < B; b++) out[b] = Math.log10(1 + 100 * Math.min(1, mags[b] / mx)) / LOG101;
-        /* 瞬态强调：谱通量按频段份额加回柱高（与 Spectrum.analyze 同一算法）。 */
-        let fluxSum = 0;
-        for (let b = T_FROM; b < B; b++) {
-          const d = mags[b] - prevMags[b];
-          const pos = d > 0 ? d : 0;
-          fluxPos[b] = pos;
-          prevMags[b] = mags[b];
-          fluxSum += pos;
-        }
-        /* 归一化用**上一帧**峰值（首帧退回本帧）：与 Spectrum.analyze 同一算法，
-           否则 worker 生效时观感会和同步路径不一致（见 spectrum.ts 的 prevMx 说明）。 */
-        const refMx = prevMx > 0 ? prevMx : mx;
-        const flux = fluxSum / Math.max(refMx, 1e-9);
-        prevMx = mx;
-        if (transRef <= 0) transRef = flux;
-        const trise = (flux - transRef) / Math.max(transRef, 1e-6);
-        const onset = Math.max(0, Math.min(1, (trise - T_FLOOR) * T_GAIN));
-        transRef += (flux - transRef) * (flux > transRef ? T_ATK : T_REL);
-        if (onset > 0 && fluxSum > 0) {
-          const kk = (T_BOOST * onset * T_REF) / fluxSum;
-          for (let b = T_FROM; b < B; b++) {
-            if (fluxPos[b] > 0) out[b] = Math.min(1, out[b] + fluxPos[b] * kk);
-          }
-        }
-        /* 鼓点：低频段 onset（与 Spectrum.analyze 同一公式）。 */
-        let low = 0;
-        for (let b = K_FROM; b <= K_TO; b++) low += mags[b];
-        low /= K_N;
-        if (kickRef <= 0) kickRef = low;
-        const rise = (low - kickRef) / Math.max(kickRef, 1e-6);
-        out[B] = Math.max(0, Math.min(1, (rise - K_FLOOR) * K_GAIN));
-        kickRef += (low - kickRef) * (low > kickRef ? K_ATK : K_REL);
-        postMessage(out, [out.buffer]);
-        // 时域缓冲还回去，下一帧继续用同一块内存（不产生垃圾）
-        postMessage({ __td: td, ms: performance.now() - t0 }, [td.buffer]);
-      };`;
-    spectrumWorker = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
-    spectrumWorker.onmessage = (e) => {
-      const d = e.data;
-      if (d && d.__td) {
-        workerRttAvg += (performance.now() - workerSentAt - workerRttAvg) * 0.1;
-        workerMsAvg += (d.ms - workerMsAvg) * 0.1;
-        if (tdBufs.length < 2) tdBufs.push(new Float32Array(d.__td));
-        return;
-      }
-      pendingFreq = new Float32Array(d);
-      pendingSentAt = workerSentAt;
-      workerEver = true;
-      /* ★ 回包**立刻**出图，不等下一帧 rAF：原来在渲染循环里消费 pendingFreq，
-         平均要多等半帧（≈8ms）、最坏一帧（16.7ms）。50Hz 的节拍下这一等就是可见的滞后。 */
-      if (spectrum && pendingFreq) {
-        /* 与 analysisTick 里同一条：先验按**当前**播放头取样，回包立刻出图也不能漏 */
-        spectrum.setPlayhead(audio.currentTime || 0);
-        spectrum.applyBands(pendingFreq);
-        dataAgeMs = Math.max(0, performance.now() - pendingSentAt);
-        pendingFreq = null;
-      }
-      if (VIZ_TEST) (window as any).__workerHits = ((window as any).__workerHits || 0) + 1;
-    };
-    spectrumWorker.onerror = () => {
-      spectrumWorker = null;
-      workerEver = false;
-    };
-  } catch (e) {
-    spectrumWorker = null;
-  }
-}
-const tdBufs: Float32Array[] = [];
-let tdRotate = 0;
-
-
-/* ---------- 频谱：1.3.0 版独立播放器的自研频谱（见 spectrum.ts） ---------- */
+/* ---------- 频谱：SelfMusic 桌面端引擎 + 绘制直译（见 selfmusic-spectrum.ts / spectrum.ts） ---------- */
 let actx: AudioContext | null = null;
 let analyserNode: AnalyserNode | null = null;
-let freqData: Uint8Array<ArrayBuffer> | null = null;
 let timeData: Float32Array<ArrayBuffer> | null = null;
-/** ★ viztest 走 selfmusic 档时用的 4096 缓冲（两个分析档窗口不同：
-    真实播放时 analyser.fftSize 会按档设 4096/512，viztest 必须自己对齐，
-    否则 selfmusic 引擎拿到的只有 512 个有效样本 + 3584 个零 —— 读数全错）。 */
+/** viztest 的合成信号缓冲（固定 4096 点，与 SelfMusic 的分析窗一致 —— 
+    引擎必须拿到整整一窗，否则尾部补零、读数全错）。 */
 let timeDataRef: Float32Array<ArrayBuffer> | null = null;
 let vizDenied = false;
 /* 为什么放弃接管音频（不再静默）。原来 vizDenied 一置位就永远不再尝试，
@@ -2442,8 +2149,8 @@ function announceVizDenied() {
 }
 let vizRaf = 0;
 let vizLast = 0;
-/* 分析节拍（20ms，1.3.0 的 50Hz）的定时器句柄。rAF 只管重画，分析由它驱动 ——
-   见 VIZ_ANALYSIS_MS 的注释：挂在 rAF 上会被 16.7ms 的步长量化成 33ms。 */
+/* 分析节拍（固定 16ms = SelfMusic 的 QTimer）的定时器句柄。rAF 只管重画，分析由它驱动 ——
+   挂在 rAF 上会被 16.7ms 的步长量化成 33ms，节拍就不对了。 */
 let vizTimer: ReturnType<typeof setTimeout> | null = null;
 let vizTickCount = 0; // 诊断：一秒内的分析 tick 数 → vizTickFps
 let vizTickT0 = 0;
@@ -2455,25 +2162,22 @@ function vizAnalysing() {
   return VIZ_TEST || (Boolean(analyserNode) && !audio.paused);
 }
 /** 起分析定时器（幂等：已经在跑就不重复起）。
-    节拍：legacy = 20ms（1.3.0 的 50Hz）；selfmusic = 16ms（SelfMusic 的 QTimer 节奏）。 */
+    节拍固定 16ms —— 与 SelfMusic mainwindow 的 QTimer（v2.7.6 起唯一档）一致。 */
 function armVizAnalysis() {
   if (vizTimer !== null || !vizAnalysing()) return;
-  vizTimer = setTimeout(analysisTick, vizAlgo === "selfmusic" ? SM_ANALYSIS_MS : VIZ_ANALYSIS_MS);
+  vizTimer = setTimeout(analysisTick, SM_ANALYSIS_MS);
 }
 function stopVizAnalysis() {
   if (vizTimer !== null) clearTimeout(vizTimer);
   vizTimer = null;
 }
-/* 一个分析 tick：取时域 → 喂 worker（或同步算）→ 出图。
-   ★ 原版 drawViz() 就是每 20ms 做这一件事（requestSpectrum + computeBars）；
-     selfmusic 档（默认）走 16ms + 整曲 PCM 的"位置窗"活路径（见 smTickFrame）。 */
+/* 一个分析 tick：取时域 → 喂 SelfMusic 活路径 → 出图。
+   ★ 只有一条管线（v2.7.7 起）：viztest 用合成信号、真实播放用 analyser 时域，
+     两者都进 smPublishWindow/smTickFrame（位置窗 + 平滑时钟 + 16ms 折算）。 */
 function analysisTick() {
   vizTimer = null;
-  /* ★ 播放头 = 先验的取样基准，每个 tick 喂一次。
-     worker 回包那条路（onmessage 里立刻出图）也要喂 —— 它不走这个 tick。 */
-  if (spectrum) spectrum.setPlayhead(audio.currentTime || 0);
   if (!vizAnalysing()) return;
-  /* 诊断：分析 tick 的实测频率（legacy 应 ≈50Hz；selfmusic 应 ≈62Hz） */
+  /* 诊断：分析 tick 的实测频率（应 ≈62Hz） */
   vizTickCount++;
   const nowMs = performance.now();
   if (!vizTickT0) vizTickT0 = nowMs;
@@ -2484,55 +2188,15 @@ function analysisTick() {
   }
   if (VIZ_TEST) {
     if (!spectrum) return;
-    /* ★ viztest 必须跟随**默认算法档**：真实播放走 selfmusic（默认），而这里
-       曾固定走 legacy —— 于是截图看到的画面与听歌时看到的不是一条管线。
-       （2026-10-12 发现：`applyExternalBars` 调用数恒为 0。） */
-    if (vizAlgo === "selfmusic") {
-      if (!timeDataRef || timeDataRef.length !== SPECTRUM_WINDOW_REF) timeDataRef = new Float32Array(SPECTRUM_WINDOW_REF);
-      vizTestTimeData(timeDataRef);
-      smPublishWindow(timeDataRef);
-    } else {
-      if (!timeData) timeData = new Float32Array(SPECTRUM_WINDOW);
-      vizTestTimeData(timeData);
-      spectrum.update(timeData, actx?.sampleRate);
-    }
+    if (!timeDataRef || timeDataRef.length !== SPECTRUM_WINDOW_REF) timeDataRef = new Float32Array(SPECTRUM_WINDOW_REF);
+    vizTestTimeData(timeDataRef);
+    smPublishWindow(timeDataRef);
   } else if (analyserNode && spectrum) {
-    /* ★ SelfMusic 参考算法（见 selfmusic-spectrum.ts 的文件头）：与内部流水线互换，
-       由 `rhine-viz-algo` 决定走哪条；默认 selfmusic，写 'legacy' 即回退旧观感。
-       selfmusic = 整曲 PCM → 平滑时钟取窗 → 真实间隔折算（2026-10-13 起）。 */
-    if (vizAlgo === "selfmusic") {
-      smTickFrame();
-    } else {
-      if (!timeData) timeData = new Float32Array(analyserNode.fftSize);
-      analyserNode.getFloatTimeDomainData(timeData);
-      if (spectrumWorker && workerEver) {
-        const n = analysisWindow(timeData);
-        let buf = tdBufs.length ? (tdBufs[tdRotate++ % tdBufs.length] as Float32Array) : null;
-        if (!buf || buf.length !== n) buf = new Float32Array(n);
-        buf.set(timeData.subarray(timeData.length - n));
-        workerSentAt = performance.now();
-        spectrumWorker.postMessage({ td: buf, sr: actx?.sampleRate ?? 48000 }, [buf.buffer]);
-        /* 回包在 worker 的 onmessage 里立刻出图（不再等 rAF） */
-      } else {
-        /* worker 不可用（或还没热起来）：主线程同步算 —— 原版没有 worker 时也是这样 */
-        spectrum.update(timeData, actx?.sampleRate);
-      }
-    }
+    smTickFrame();
   } else if (spectrum) {
     spectrum.decay();
   }
-  if (spectrumWorker) armSpectrumWatchdog();
   armVizAnalysis();
-}
-/* 首帧同步兜底 + 看门狗：worker 起不来（策略拦截等）就退回主线程同步算。
-   原版是 800ms 内没回包就 terminate；这里按 tick 数算（20ms × 40 ≈ 800ms）。 */
-function armSpectrumWatchdog() {
-  if (!spectrumWorker) return;
-  if (workerEver) return;
-  if (++workerFrames > 40) {
-    try { spectrumWorker.terminate(); } catch (e) { /* ignore */ }
-    spectrumWorker = null;
-  }
 }
 /* ?viztest=1：不播音乐，用合成信号跑频谱 —— 用来在无音频的环境里核对频谱观感。
    信号要有**真实音乐的频谱形状**：粉噪打底（每倍频程 −3dB，高频自然衰减）＋ 一条低频
@@ -2571,26 +2235,29 @@ function vizTestTimeData(out: Float32Array) {
   return beat;
 }
 
+/** 频谱调色板：颜色取本机主题（style.css 的权威配色），**规则**照 SelfMusic：
+    渐变三段（顶端亮 → 0.45 主色 → 底端暗）+ 顶盖/指示条用"对比色"——
+    原版是暗底白线；本仓深色主题（rhine-night）用白、浅色主题用墨色。 */
 function spectrumPalette(): Partial<SpectrumPalette> {
   return document.body.classList.contains("rhine-night")
-    ? { light: "#dcbb8c", strong: "#c08b52", base: "#4b4a3b", ring: "#c08b52" }
-    : { light: "#c9a878", strong: "#9b7247", base: "#252820", ring: "#9b7247" };
+    ? { light: "#dcbb8c", strong: "#c08b52", base: "#4b4a3b", cap: "#ffffff" }
+    : { light: "#c9a878", strong: "#9b7247", base: "#252820", cap: "#252820" };
 }
 
 /* ================= 队列级频谱预分析（"乐谱先验"） =================
-   在线的鼓点检测是**因果的**：先听到、才可能亮。一个分析窗 512 点 ≈ 10.7ms，
-   加上 worker 往返与 60fps 的绘制节拍，屏幕比耳朵晚 30~50ms —— 这个延迟
-   **调参救不了**（参数只改灵敏度，改不了因果性），只能靠"提前知道"。
-   所以：播放前把整首歌离线过一遍（8kHz 单声道 + 16 段 Goertzel，见 beatmap.ts），
-   得到节拍网格与能量包络，播放时按播放头查表。三件可见的收益：
-     · 鼓点在拍点**之前** 28ms 就开始升（BEAT_PRE_ROLL）—— 视觉与听觉重新对齐；
-     · 每 4 拍换一次柱体形态 —— 可视化跟着小节走，而不是跟着噪声走；
-     · 副歌到来前 2.5 秒提前扩动态范围 —— 高潮进来时不显得突然。
-   ★ 三条铁律：
+   ★★ v2.7.7 状态：**已与频谱脱钩** ★★
+   这条流水线（8kHz 单声道 + 16 段 Goertzel → 节拍网格 / 能量包络，见 beatmap.ts）
+   当年是为了治"旧算法因果检测的 30~50ms 延迟"而建的（鼓点提前 28ms 点亮、
+   每 4 拍换形态、副歌预热）。频谱整体换成 SelfMusic 引擎后，**这三件事一条都不存在了**
+   —— SelfMusic 的波形是逐位复刻，不接受任何先验改写。所以：
+     · 默认**关闭**（不跑 = 不白烧 CPU；以前开着是因为画面真的在用）；
+     · 开关与状态显示保留（打开会在后台把整首分析一遍并**缓存**，供以后要用时直接取）；
+     · `refreshBeatmap()` 只负责排队，不再往频谱里装任何东西。
+   ★ 仍有效的三条铁律（改这段代码时别破）：
      1. 预分析**不许碰音源**（用的是"本来就能读到的副本/源路径"，不生成任何临时文件）；
-     2. 算不出来就当没有 —— 可视化退回在线模式，**绝不影响播放**；
+     2. 算不出来就当没有 —— **绝不影响播放**；
      3. 只在后台跑（worker），一次一首，且队列不超过 3 首。 */
-let beatEnabledPref = true;
+let beatEnabledPref = false;
 export function beatmapPref(): boolean {
   return beatEnabledPref;
 }
@@ -2602,14 +2269,12 @@ export function setBeatmapPref(on: boolean) {
     /* ignore */
   }
   setBeatmapEnabled(on);
-  if (!on) spectrum?.setBeatmap(null); // 关掉就立刻回到纯在线观感
-  else refreshBeatmap();
+  if (on) refreshBeatmap();
 }
-/** 把当前曲目的乐谱装进频谱，并把"当前 + 后面两首"排进预分析队列。
-    换曲、开关切换、算完一首之后都走这里。 */
+/** 把"当前 + 后面两首"排进预分析队列（换曲、开关切换、算完一首之后都走这里）。
+    ★ v2.7.7：频谱已全量换 SelfMusic 引擎（无节拍先验入口），这里只剩排队这一半能力。 */
 function refreshBeatmap() {
   const s = currentSong();
-  spectrum?.setBeatmap(beatmapOf(s));
   if (!beatEnabledPref) return;
   if (s) requestBeatmapNow(s);
   const i = currentIndex();
@@ -2642,10 +2307,9 @@ function installBeatmapHooks() {
     readAudio: async (p) => (desktop?.readAudio ? await desktop.readAudio(p) : null),
     saved: (s) => {
       persist(s as Song);
-      /* 正在播的这首刚算完 → 立刻装上，不必等下一次换曲。
-         先验只影响观感，所以这里直接换是安全的（不会打断音频）。 */
+      /* 正在播的这首刚算完 → 记一笔（v2.7.7 起频谱无先验入口，仅保留预分析产物） */
       const cur = currentSong();
-      if (cur && cur.id === s.id) spectrum?.setBeatmap(beatmapOf(cur));
+      if (cur && cur.id === s.id) void beatmapOf(cur);
     },
   });
 }
@@ -2714,18 +2378,15 @@ async function ensureAnalyser(): Promise<AnalyserNode | null> {
          `sampleRate: 0`（非法值、直接抛错），见上面那段；不要重蹈。 */
     const source = ctx.createMediaElementSource(audio);
     const node = ctx.createAnalyser();
-    /* 分析窗长：SelfMusic 那套要 4096 点（低频分辨率更好、快鼓点分得开）；
-       原来的内部流水线仍是 1024。AnalyserNode 要求 2 的幂。 */
-    node.fftSize = vizAlgo === "selfmusic" ? SPECTRUM_WINDOW_REF : SPECTRUM_WINDOW;
+    /* 分析窗长固定 4096 点 —— 与 SelfMusic 的 SpectrumAnalyzer(fft_size=4096) 一致
+       （低频分辨率更好、快鼓点分得开）。AnalyserNode 要求 2 的幂。 */
+    node.fftSize = SPECTRUM_WINDOW_REF;
     node.smoothingTimeConstant = 0.6;
     source.connect(node);
     node.connect(ctx.destination);   // ← 这一句必须有，否则整条链路悬空、无声且无频谱
     actx = ctx;
     analyserNode = node;
-    freqData = new Uint8Array(node.frequencyBinCount);
-    timeData = new Float32Array(node.fftSize);
-    initSpectrumWorker();
-    vizAttempts = 0;        // 成功：重试计数归零
+    timeData = new Float32Array(node.fftSize);    vizAttempts = 0;        // 成功：重试计数归零
     vizDenied = false;
     vizDenyReason = "";
   } catch (e) {
@@ -2766,15 +2427,15 @@ function paintTicks(now = 0) {
   }
 }
 /* 诊断对象：?viztest=1 时暴露到 window.__rhineViz，用于自动化核对帧率与观感指标 */
-const vizDiag: Record<string, unknown> = { frames: 0, fps: 0, worker: false, workerMs: 0, rttMs: 0 };
+const vizDiag: Record<string, unknown> = { frames: 0, fps: 0 };
 function vizFrame(ts: number) {
   vizRaf = 0;
   /* 渲染节拍：播放中 60fps（16ms 预算），暂停后 15fps（只画收起动画）。
-     分析节拍另算 —— worker 每 33ms 才喂一次数据，中间这些帧靠 Spectrum.render()
-     把显示值朝目标值插值，所以柱高是连续滑动的。
+     分析节拍另算 —— 每 16ms 喂一次数据（SelfMusic 的 QTimer 节奏），中间这些帧
+     只重画当前柱高（v2.7.7 起绘制层不再插值：柱高就是引擎每帧的输出）。
      1.4.7 之前这里是 33ms 的整帧预算，等于把渲染也锁在 30fps，那才是"帧率不够"。
-     ★ 分析（Goertzel + 一阶跟随 + 抖动）**不在这一条循环里**：由 analysisTick() 每 20ms 驱动
-     （1.3.0 的 50Hz，见 VIZ_ANALYSIS_MS 的注释）；rAF 只负责重画与回落。 */
+     ★ 分析（SelfMusic 引擎）**不在这一条循环里**：由 analysisTick() 每 16ms 驱动；
+     rAF 只负责重画与回落。 */
   const dt = vizLast ? Math.min(0.1, (ts - vizLast) / 1000) : 0.033;
   /* ★ 帧率解锁（2026-10-08 用户："帧率要高"）：播放中**不再手动节流**。
      原来播放中也卡 15ms 的门 —— 60Hz 屏上 rAF 步长 16.7ms 恰好放行，看不出问题；
@@ -2805,27 +2466,14 @@ function vizFrame(ts: number) {
     (d.intervals || (d.intervals = [])).push(Math.round(dt * 1000));
     if (d.intervals.length > 240) d.intervals.shift();
   }
-  d.worker = Boolean(spectrumWorker);
-  d.cadenceMs = vizAlgo === "selfmusic" ? SM_ANALYSIS_MS : VIZ_ANALYSIS_MS; // 分析节拍（legacy 20ms / selfmusic 16ms）
-  d.tickFps = vizTickFps; // 实测的分析 tick 频率（应 ≈50）
-  d.workerMs = Math.round(workerMsAvg * 100) / 100;
-  d.rttMs = Math.round(workerRttAvg * 100) / 100;
-  d.workerOn = Boolean(spectrumWorker && workerEver);
-  d.dataAgeMs = Math.round(dataAgeMs * 100) / 100;
-  /* 频段映射摘要：核对"是不是 20Hz ~ 0.45×Nyquist、低频峰 ≈42Hz、鼓点取 2–16 带" */
-  if (spectrum) {
-    const bi = spectrum.bandInfo();
-    d.bandHzFirst = bi.firstHz;
-    d.bandHzLast = bi.lastHz;
-    d.bassPeakHz = bi.bassPeakHz;
-    d.kickBands = bi.kickBands;
-    d.sampleRate = bi.sampleRate;
-    /* 节拍先验（探针核对用）：live=0 表示这一帧没有乐谱，下面几个必须全为 0。
-       用 beatInfo() 而不是 snapshot() —— snapshot 会复制四个数组，每帧跑太重。 */
-    const b = spectrum.beatInfo();
-    d.beat = b;
-    d.bpm = b.bpm;
-  }
+  d.cadenceMs = SM_ANALYSIS_MS; // 分析节拍固定 16ms（SelfMusic QTimer）
+  d.tickFps = vizTickFps;       // 实测的分析 tick 频率（应 ≈62）
+  /* 活路径状态（v2.7.7）：mode=pcm 为正常，stream 为解码失败回退，wait 为解码中 */
+  d.mode = smPcmState;
+  d.rate = smPcmRate;
+  d.posMs = smDriver ? Math.round(smDriver.positionMs) : 0;
+  d.bars = spectrum ? spectrum.levels.length : 0;
+  if (spectrum) d.gauges = { ...spectrum.gauges };
   vizRaf = requestAnimationFrame(vizFrame);
 }
 function vizStop() {
@@ -3598,10 +3246,8 @@ export function mountSongEdit(root: ParentNode) {
   // 频谱照常：编辑时音乐还在放，画布不能黑着
   const cv = host.querySelector("#p-detail-spectrum") as HTMLCanvasElement | null;
   if (cv) {
-    spectrum = new Spectrum(cv, actx?.sampleRate ?? 48000);
+    spectrum = new Spectrum(cv);
     spectrum.setPalette(spectrumPalette());
-    spectrum.setMode(vizModePref as SpectrumMode);
-    spectrum.setAdvanceInterval(vizAlgo === "selfmusic" ? SM_ANALYSIS_MS : VIZ_ANALYSIS_MS); // 绘制侧的插值跨度 = 分析节拍
     if (VIZ_TEST || DIAG) (window as any).__rhineViz = vizDiag;
   }
   if (!vizRaf) {
@@ -3796,10 +3442,8 @@ export function mountSongDetail(root: ParentNode) {
   const cv = (root as HTMLElement).querySelector?.("#p-detail-spectrum") as HTMLCanvasElement | null;
   if (cv) {
     // 面板每次重绘都是新画布，因此频谱实例跟着重建（画布尺寸决定柱宽与渐变）
-    spectrum = new Spectrum(cv, actx?.sampleRate ?? 48000);
+    spectrum = new Spectrum(cv);
     spectrum.setPalette(spectrumPalette());
-    spectrum.setMode(vizModePref as SpectrumMode);
-    spectrum.setAdvanceInterval(vizAlgo === "selfmusic" ? SM_ANALYSIS_MS : VIZ_ANALYSIS_MS); // 绘制侧的插值跨度 = 分析节拍
     // 诊断开关：?viztest=1 时把实例与帧率对象挂到 window 上，便于自动化核对（见功能说明）
     if (VIZ_TEST || DIAG) {
       (window as any).__audioEl = audio;
@@ -3825,7 +3469,7 @@ export function mountSongDetail(root: ParentNode) {
         (window as any).__spectrum = spectrum;
         // 合成信号的峰值：用来核对 ?viztest=1 的时域数据到底有没有在跑
         (window as any).__vizTestProbe = () => {
-          const out = new Float32Array(SPECTRUM_WINDOW);
+          const out = new Float32Array(SPECTRUM_WINDOW_REF);
           const beat = vizTestTimeData(out);
           let peak = 0;
           for (let i = 0; i < out.length; i++) peak = Math.max(peak, Math.abs(out[i]));
@@ -4274,9 +3918,10 @@ export async function initPlayer() {
   } catch {
     /* ignore */
   }
-  /* 节拍预分析偏好：默认开（"提前点亮"是这次的主要收益），关一次就记住。 */
+  /* 节拍预分析偏好：v2.7.7 起**默认关**（频谱换成 SelfMusic 引擎，不再消费先验；
+     打开会把每首歌后台分析一遍并缓存）。用户显式设过 "1" 才打开。 */
   try {
-    if (localStorage.getItem("rhine-beatmap") === "0") beatEnabledPref = false;
+    if (localStorage.getItem("rhine-beatmap") === "1") beatEnabledPref = true;
   } catch {
     /* ignore */
   }
@@ -4292,9 +3937,6 @@ export async function initPlayer() {
      读得慢就整轮当空库，那一轮所有曲目都进不来。 */
   void loadLibraryWithRetry();
   void repairTags();
-  /* 旧版的调音参数（平衡/峰宽/抖动/鼓点/峰高）导一次：新版读不到 file:// 域那份存储，
-     交给主进程开隐藏页去读（见 app/main.js 的 import-legacy-settings）。 */
-  void importLegacyVizSettings();
 }
 
 /** 读库兜底：库打开 / 读数据都不返回时按空库继续，开屏不会被卡住。

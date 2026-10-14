@@ -23,6 +23,10 @@ export class SelfMusicLiveDriver {
   /** 最近一帧的引擎输出（引用；下一次 frame() 前有效）。96 段，0..1。 */
   lastHeights: Float32Array | null = null;
   lastPeaks: Float32Array | null = null;
+  /** 四路音色活跃度（鼓 / 低音 / 人声 / 镲，照 selfmusic.py 的 last_timbre）；无帧时全 0 */
+  lastGauges: { kick: number; bass: number; vocal: number; cymbal: number } = {
+    kick: 0, bass: 0, vocal: 0, cymbal: 0,
+  };
 
   private pcm: Float32Array = new Float32Array(0);
   private rate = 48000;
@@ -45,6 +49,10 @@ export class SelfMusicLiveDriver {
     this.synced = false;
     this.lastHeights = null;
     this.lastPeaks = null;
+    this.lastGauges.kick = 0;
+    this.lastGauges.bass = 0;
+    this.lastGauges.vocal = 0;
+    this.lastGauges.cymbal = 0;
   }
 
   /** 当前平滑时钟位置（ms）——诊断/探针用 */
@@ -86,5 +94,12 @@ export class SelfMusicLiveDriver {
     eng.push(win);
     this.lastHeights = eng.compute();
     this.lastPeaks = eng.lastPeaks;
+    /* ⑤ 四路音色活跃度快照（照 mainwindow 把 last_timbre 交给 set_levels） */
+    const lt = eng.lastTimbre;
+    const g = this.lastGauges;
+    g.kick = lt.kick;
+    g.bass = lt.bass;
+    g.vocal = lt.vocal;
+    g.cymbal = lt.cymbal;
   }
 }

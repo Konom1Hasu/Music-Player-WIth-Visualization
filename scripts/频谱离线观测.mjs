@@ -1,14 +1,28 @@
 /*
- * 频谱离线观测：不启动浏览器、不需要音频设备，直接跑 src/spectrum.ts 里那条流水线，
- * 量出柱高到底长什么样（是否有起伏、有没有顶满、相邻柱高差多大）。
+ * 频谱离线观测（v2.7.7 重写）：不启动浏览器、不需要音频设备，直接跑 src/spectrum.ts，
+ * 把"画了什么"逐条落成数字，再跟 SelfMusic 原版 visualizer.py **源码里抽出来的公式**对。
  *
- * 为什么要这个脚本：无头浏览器在虚拟时间下 requestAnimationFrame 会停摆、媒体也解不出码，
- * 页内探针测不到"柱高"。这里把"合成信号 → Spectrum"两段都搬进 Node：
- *   - Spectrum 直接 import 源码（Node 24 能直接跑 .ts，构建产物里的算法与之同源）；
- *   - 合成信号（player.ts 里的 vizTestTimeData）在这里逐行复刻一份，避免为了测试去改产品代码。
- * 两者任一改了都要同步核一遍：脚本开头会读源码里的关键常量，对不上直接报错退出。
+ * 为什么要这个脚本：spectrum.ts 现在是 `D:\SelfMusic\musicapp\widgets\visualizer.py`
+ * 的 Canvas 直译。直译型代码最大的风险是"看着像、其实差一点"（槽位百分比、留白、
+ * 顶盖悬空几像素、透明度公式……），肉眼比对截图根本发现不了 0.5px 的偏移。
+ * 所以这里做三件事：
+ *   ① 从 visualizer.py **源码**正则抽常量与公式（pad_x / usable / 0.70 / cap>0.004 /
+ *      α=0.45+0.55v / 顶盖 2px 悬 3px / 渐变 0.0·0.45·1.0 / 指示条坐标）——
+ *      抽不到就是"对拍对象变了"，直接失败（而不是悄悄跳过）；
+ *   ② 用这些数字在 Node 侧**独立算一遍**期望几何，和 spectrum.ts 实际发出的
+ *      绘制指令（伪 canvas 记录 fillRect / 渐变 / 圆角矩形 / 文字）逐条比；
+ *   ③ 顺带量回落与清零（decay / resetPeaks）—— 原 频谱回落观测.mjs 的职责并入这里。
  *
- * 用法：node scripts\频谱离线观测.mjs [秒数]
+ * 约定：原版的绝对尺寸都是 Qt 的 CSS px，画布像素 = CSS px × 画布比例（本仓 954/636 = 1.5）。
+ * 脚本用 s=1.5 的画布桩验真实比例，再用 s=1 复核一遍（缩放必须是乘出来的，不能写死）。
+ *
+ * 与原版的**已知差异**（有意为之，逐条钉在这里，免得日后当成 bug 改回去）：
+ *   · 不填画布底色（原版 fillRect(rect, theme.BG)）—— 画布透明，底色由页面给；
+ *   · 不画右下角"▶ 播放中"（HTML 层已有等价状态）；
+ *   · 底部渐变停点用本机调色板的 base（原版是硬编码的 #0a0e1c α235）；
+ *   · 顶盖 / 指示条在浅色主题下用墨色（原版是暗色主题下的白）。
+ *
+ * 用法：node scripts\频谱离线观测.mjs
  *      （脚本会自己带 --experimental-transform-types 重启一次：spectrum.ts 用了
  *        构造器参数属性这类"需要转换、不能只擦除"的语法，Node 的默认 strip-only 会拒绝）
  */
@@ -19,9 +33,10 @@ import { spawnSync } from "node:child_process";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.resolve(here, "..", "app-rhine", "src");
+/** SelfMusic 原版绘制层（对拍对象）。找不到就失败退出 —— 见文件头 ① */
+const PY = process.env.SELFMUSIC_VISUALIZER || "D:\\SelfMusic\\musicapp\\widgets\\visualizer.py";
 
-/* 自举：Node 24 的 strip-only 模式处理不了 `constructor(private canvas: ...)`。
-   这里在同进程里"带 flag 再跑一遍"，测的仍然是 src/spectrum.ts 本身。 */
+/* 自举：Node 的 strip-only 模式处理不了 `constructor(private canvas: ...)`。 */
 async function loadSpectrum() {
   const url = pathToFileURL(path.join(SRC, "spectrum.ts")).href; // Windows 上不能把 "D:\..." 丢给 import()
   try {
@@ -29,823 +44,358 @@ async function loadSpectrum() {
   } catch (e) {
     if (!/ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX|ERR_UNKNOWN_FILE_EXTENSION/.test(String(e && e.code))) throw e;
     if (!process.env.RHINE_VIZ_OFFLINE_RETRY) {
-      console.log('（首次加载被 Node 的 strip-only 模式拒绝，带 --experimental-transform-types 重跑一次）');
+      console.log("（首次加载被 Node 的 strip-only 模式拒绝，带 --experimental-transform-types 重跑一次）");
       const r = spawnSync(process.execPath,
-        ['--experimental-transform-types', '--no-warnings', fileURLToPath(import.meta.url), ...process.argv.slice(2)],
-        { stdio: 'inherit', env: { ...process.env, RHINE_VIZ_OFFLINE_RETRY: '1' } });
+        ["--experimental-transform-types", "--no-warnings", fileURLToPath(import.meta.url), ...process.argv.slice(2)],
+        { stdio: "inherit", env: { ...process.env, RHINE_VIZ_OFFLINE_RETRY: "1" } });
       process.exit(r.status === null ? 1 : r.status);
     }
     throw e;
   }
 }
-const { Spectrum, setVizParams, clampVizParams, clampHeadroom, KICK_PUMP_MIN, vizParams } = await loadSpectrum();
 
-/* ---------- 0. 源码一致性自检：常量被改过就报错，免得测的是旧参数 ---------- */
+let pass = 0;
+let fail = 0;
+function ok(cond, name, detail = "") {
+  if (cond) {
+    pass++;
+    console.log("  ✓ " + name + (detail ? "  " + detail : ""));
+  } else {
+    fail++;
+    console.log("  ✗ " + name + (detail ? "  " + detail : ""));
+  }
+}
+const near = (a, b, tol) => Math.abs(a - b) <= tol;
+
+/* ---------- 0. 对拍对象：从 visualizer.py 源码抽常量与公式 ---------- */
+console.log("=== 0. 对拍对象：visualizer.py 源码常量 ===");
+let pySrc = "";
+try {
+  pySrc = fs.readFileSync(PY, "utf8");
+} catch (e) {
+  console.log("  ✗ 读不到 " + PY + "：" + String(e && e.message));
+  console.log("    （这是对拍的**权威源**，缺了就没法验证；可用环境变量 SELFMUSIC_VISUALIZER 指定路径）");
+  process.exit(1);
+}
+/** 从源码里抓一个数：捕不到就计一次失败（宁可红，也不要静默跳过） */
+function pickNum(re, group, name) {
+  const m = re.exec(pySrc);
+  if (!m) {
+    console.log("  ✗ 抽不到：" + name + "  →  " + re);
+    fail++;
+    return NaN;
+  }
+  pass++;
+  console.log("  ✓ " + name + " = " + m[group]);
+  return Number(m[group]);
+}
+const PY_CONST = {
+  pad_x: pickNum(/pad_x = ([0-9.]+)/, 1, "pad_x（左右留白）"),
+  usable_pad: pickNum(/usable = h - ([0-9.]+)/, 1, "usable = h − 留白"),
+  bar_ratio: pickNum(/bar_w = max\(1\.0, slot \* ([0-9.]+)\)/, 1, "bar_w = slot × 比例"),
+  bar_min_w: pickNum(/bar_w = max\(([0-9.]+), slot \*/, 1, "bar_w 下限"),
+  bh_min: pickNum(/bh = max\(([0-9.]+), level \* usable\)/, 1, "柱高下限"),
+  alpha_k: pickNum(/setOpacity\(0\.45 \+ ([0-9.]+) \* max/, 1, "α = 0.45 + k·v 的 k"),
+  cap_min: pickNum(/if cap > ([0-9.]+):/, 1, "顶盖门槛 cap >"),
+  cap_alpha: pickNum(/setOpacity\(([0-9.]+)\)\s*\n\s*p\.fillRect\(QRectF\(x, baseline_y - ph/, 1, "顶盖透明度"),
+  cap_gap: pickNum(/baseline_y - ph - ([0-9.]+), bar_w, [0-9.]+\)/, 1, "顶盖悬空"),
+  cap_thick: pickNum(/baseline_y - ph - ([0-9.]+), bar_w, ([0-9.]+)\)/, 2, "顶盖厚度"),
+  cap_ph_min: pickNum(/ph = max\(([0-9.]+), cap \* usable\)/, 1, "顶盖高度下限"),
+  grad_mid: pickNum(/setColorAt\(([0-9.]+), QColor\(_st\[len\(_st\) \/\/ 2\]\[1\]\)\)/, 1, "渐变中位停点"),
+  gauge_x: pickNum(/^ *x, y = ([0-9.]+), [0-9.]+/m, 1, "指示条起点 x"),
+  gauge_y: pickNum(/^ *x, y = ([0-9.]+), ([0-9.]+)/m, 2, "指示条起点 y"),
+  gauge_label_w: pickNum(/label_w, mw, mh, gap = ([0-9.]+), ([0-9.]+), ([0-9.]+), ([0-9.]+)/, 1, "指示条标签宽"),
+  gauge_w: pickNum(/label_w, mw, mh, gap = ([0-9.]+), ([0-9.]+),/, 2, "指示条长度"),
+  gauge_h: pickNum(/label_w, mw, mh, gap = ([0-9.]+), ([0-9.]+), ([0-9.]+),/, 3, "指示条厚度"),
+  gauge_gap: pickNum(/label_w, mw, mh, gap = ([0-9.]+), ([0-9.]+), ([0-9.]+), ([0-9.]+)/, 4, "指示条间距"),
+  gauge_fill_min: pickNum(/max\(([0-9.]+), mw \* v\), mh\)/, 1, "活跃度填充下限"),
+};
+ok(/baseline_y = float\(h\)/.test(pySrc), "柱体贴底（baseline_y = h）");
+ok(/if self\._gauges:/.test(pySrc) && /def _draw_gauges/.test(pySrc), "四路指示条仍在 paintEvent 里被调用");
+ok((pySrc.match(/_bar_color/g) || []).length <= 2,
+  "NOISE_RAMP 融合色仍是死代码（只在定义处出现）→ 不移植");
+
+/* ---------- 0b. 本仓 spectrum.ts 常量 ↔ 原版公式 ---------- */
+console.log("\n=== 0b. 本仓 spectrum.ts 常量 ↔ 原版公式 ===");
 const spSrc = fs.readFileSync(path.join(SRC, "spectrum.ts"), "utf8");
-const expect = [
-  ["ANALYSIS_WINDOW 是显式常量", /const ANALYSIS_WINDOW = \d+;/],
-  ["VIZ_LEVELS = 14", /const VIZ_LEVELS = 14;/],
-  ["SPECTRUM_BANDS = 120", /export const SPECTRUM_BANDS = 120;/],
-  // 抖动 / 倾斜 / 泵动现在是运行时参数（vizParams），来源仍是 1.3.0 的原值：
-  // 幅度 0.45、相位步进 0.03、单边颤动 0.055，都乘 JITTER_K。这里按**函数形态**核对。
-  ["JITTER_AMP = 0.45*K", /const jitterAmp = \(\) => 0\.45 \* vizParams\.jitterK;/],
-  ["JITTER_FREQ = 0.1+0.2*(K-0.4)", /const jitterFreq = \(\) => 0\.1 \+ 0\.2 \* \(vizParams\.jitterK - 0\.4\);/],
-  ["JITTER_STEP = 0.03*K", /const jitterStep = \(\) => 0\.03 \* vizParams\.jitterK;/],
-  ["JITTER_WOBBLE = 0.055*K", /const jitterWobble = \(\) => 0\.055 \* vizParams\.jitterK;/],
-  ["VIZ_DEFAULTS.tilt = 55", /VIZ_DEFAULTS: VizParams = \{ tilt: 55,/],
-  ["VIZ_DEFAULTS.kickPump = 0.4", /kickPump: 0\.4,/],
-  ["BASS_WIDE_CENTER = 0.12", /const BASS_WIDE_CENTER = 0\.12;/],
-  // 鼓点 / 瞬态检测器：这些常量同时被 player.ts 的 worker 插值使用，改了要一起看
-  ["KICK_REF_ATTACK = 0.30", /const KICK_REF_ATTACK = 0\.30;/],
-  ["KICK_REF_RELEASE = 0.16", /const KICK_REF_RELEASE = 0\.16;/],
-  ["KICK_RISE_FLOOR = 0.02", /const KICK_RISE_FLOOR = 0\.02;/],
-  ["KICK_RISE_GAIN 是显式常量", /const KICK_RISE_GAIN = [\d.]+;/],
-  // 2026-10-03 新增：顶端高频抖动 + 音色灵敏度（数值本身可调，这里只核对常量还在）
-  ["TOP_SHIMMER 存在", /const TOP_SHIMMER = [\d.]+;/],
-  ["TOP_SHIMMER_RATE 存在", /const TOP_SHIMMER_RATE = [\d.]+;/],
-  ["TIMBRE_EXP_BASS = 2.1", /const TIMBRE_EXP_BASS = 2\.1;/],
-  ["TIMBRE_EXP_TREBLE 存在", /const TIMBRE_EXP_TREBLE = [\d.]+;/],
-  ["TIMBRE_SHARPEN 存在", /const TIMBRE_SHARPEN = [\d.]+;/],
-];
-for (const [name, re] of expect) {
-  if (!re.test(spSrc)) {
-    console.error("参数自检失败：src/spectrum.ts 里找不到 " + name + " —— 脚本里的说明与实现对不上了");
-    process.exit(2);
+function pickJs(re, name, expectValue) {
+  const m = re.exec(spSrc);
+  if (!m) {
+    console.log("  ✗ spectrum.ts 里抽不到：" + name);
+    fail++;
+    return;
   }
+  const got = Number(m[1]);
+  ok(near(got, expectValue, 1e-12), name, got + " / 原版 " + expectValue);
 }
-/* 柱数是**显示侧**密度（可以随"细密一点"这类要求调整），所以不写死值：
-   这里只要求它是显式常量，后面所有频段切片都按实际柱数换算，改柱数不用改本脚本。 */
-const barNMatch = /const BAR_N = (\d+);/.exec(spSrc);
-if (!barNMatch) {
-  console.error("参数自检失败：src/spectrum.ts 里没有 `const BAR_N = <整数>;`");
-  process.exit(2);
-}
-const SRC_BAR_N = Number(barNMatch[1]);
-/* 量化级数不导出，但顶边方块的量级直接取决于它，所以也从源码里取（改级数这里会同步）。 */
-const levelMatch = /const VIZ_LEVELS = (\d+);/.exec(spSrc);
-if (!levelMatch) {
-  console.error("参数自检失败：src/spectrum.ts 里没有 `const VIZ_LEVELS = <整数>;`");
-  process.exit(2);
-}
-const SRC_VIZ_LEVELS = Number(levelMatch[1]);
-/* 分析窗长也从源码取：它现在是**可调参数**（2026-10-08 从 1024 降到 512 换低延迟），
-   写死会让本脚本的自检与合成信号一起过期。所有用到窗长的地方一律引用 SRC_WINDOW。 */
-const winMatch = /const ANALYSIS_WINDOW = (\d+);/.exec(spSrc);
-if (!winMatch) {
-  console.error("参数自检失败：src/spectrum.ts 里没有 `const ANALYSIS_WINDOW = <整数>;`");
-  process.exit(2);
-}
-const SRC_WINDOW = Number(winMatch[1]);
+pickJs(/const PAD_X = ([0-9.]+);/, "PAD_X ↔ pad_x", PY_CONST.pad_x);
+pickJs(/const USABLE_PAD = ([0-9.]+);/, "USABLE_PAD ↔ 原版 usable 留白", PY_CONST.usable_pad);
+pickJs(/const BAR_W_RATIO = ([0-9.]+);/, "BAR_W_RATIO ↔ bar_w 比例", PY_CONST.bar_ratio);
+pickJs(/const CAP_MIN = ([0-9.]+);/, "CAP_MIN ↔ 顶盖门槛", PY_CONST.cap_min);
+pickJs(/const CAP_THICK = ([0-9.]+);/, "CAP_THICK ↔ 顶盖厚度", PY_CONST.cap_thick);
+pickJs(/const CAP_GAP = ([0-9.]+);/, "CAP_GAP ↔ 顶盖悬空", PY_CONST.cap_gap);
+pickJs(/const GAUGE_X = ([0-9.]+);/, "GAUGE_X ↔ 指示条 x", PY_CONST.gauge_x);
+pickJs(/const GAUGE_Y = ([0-9.]+);/, "GAUGE_Y ↔ 指示条 y", PY_CONST.gauge_y);
+pickJs(/const GAUGE_LABEL_W = ([0-9.]+);/, "GAUGE_LABEL_W ↔ 标签宽", PY_CONST.gauge_label_w);
+pickJs(/const GAUGE_W = ([0-9.]+);/, "GAUGE_W ↔ 条长", PY_CONST.gauge_w);
+pickJs(/const GAUGE_H = ([0-9.]+);/, "GAUGE_H ↔ 条厚", PY_CONST.gauge_h);
+pickJs(/const GAUGE_GAP = ([0-9.]+);/, "GAUGE_GAP ↔ 间距", PY_CONST.gauge_gap);
+ok(/0\.45 \+ 0\.55 \* level/.test(spSrc), "逐柱 α = 0.45 + 0.55·level（与原版同式）");
+ok(/addColorStop\(0\.45, this\.palette\.strong\)/.test(spSrc), "渐变中位停点 = 0.45（与原版同点）");
 
-/* ---------- 0b. 左峰"留余量"闸门的行为核对（用户："可视化左侧不要一直顶满"） ----------
-   闸门是纯函数，跟音频无关，顺手在这里把几种输入过一遍：
-   旧版导入的 kickPump 0 必须被夹到 KICK_PUMP_MIN，合规值必须原样放过，
-   没带这个键时不能凭空冒出一个值。 */
-{
-  const cases = [
-    [{ kickPump: 0, peakTarget: 1.45 }, "旧版导入的顶满组合"],
-    [{ kickPump: 0 }, "只有鼓点 0"],
-    [{ kickPump: 0.4, peakTarget: 1.45 }, "已合规：原样"],
-    [{ kickPump: 0.6 }, "滑块上限：不动"],
-    [{ peakTarget: 1.45 }, "没带鼓点：不凭空冒值"],
-  ];
-  console.log("左峰留余量闸门（KICK_PUMP_MIN = " + KICK_PUMP_MIN + "，0.40 = 1.3.0 的默认鼓点）：");
-  for (const [input, why] of cases) {
-    console.log("  " + JSON.stringify(input).padEnd(34) + " -> "
-      + JSON.stringify(clampVizParams(clampHeadroom(input))) + "   " + why);
-  }
-  const once = clampHeadroom({ kickPump: 0 });
-  const twice = clampHeadroom(once);
-  console.log("  幂等：" + (JSON.stringify(once) === JSON.stringify(twice) ? "✓" : "✗ " + JSON.stringify(twice)));
-  console.log("");
+/* ---------- 1. 伪 canvas：把 spectrum.ts 发出的绘制指令全部记下来 ---------- */
+console.log("\n=== 1. 伪 canvas 记录：几何 / 透明度 / 颜色 ===");
+function makeRecorder(canvasW, canvasH, clientW) {
+  const events = [];
+  let alpha = 1;
+  let fill = "";
+  let font = "";
+  let textBaseline = "";
+  let textAlign = "";
+  let pts = [];
+  let gradStops = null;
+  const ctx = {
+    clearRect(x, y, w, h) { events.push({ op: "clear", x, y, w, h }); },
+    fillRect(x, y, w, h) {
+      events.push({ op: "rect", x, y, w, h, alpha, style: typeof fill === "string" ? fill : "grad" });
+    },
+    createLinearGradient(_x0, _y0, _x1, _y1) {
+      const stops = [];
+      gradStops = stops;
+      return { __grad: true, stops, addColorStop(p, c) { stops.push([p, c]); } };
+    },
+    beginPath() { pts = []; },
+    moveTo(x, y) { pts.push([x, y]); },
+    arcTo(x1, y1, x2, y2) { pts.push([x1, y1], [x2, y2]); },
+    closePath() { /* 记 bbox 用不到 */ },
+    fill() {
+      if (!pts.length) return;
+      const xs = pts.map((p) => p[0]);
+      const ys = pts.map((p) => p[1]);
+      events.push({
+        op: "round",
+        x: Math.min(...xs), y: Math.min(...ys),
+        w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys),
+        alpha, style: fill,
+      });
+    },
+    fillText(text, x, y) { events.push({ op: "text", text, x, y, alpha, style: fill, font }); },
+  };
+  Object.defineProperty(ctx, "fillStyle", { get() { return fill; }, set(v) { fill = v; } });
+  Object.defineProperty(ctx, "globalAlpha", { get() { return alpha; }, set(v) { alpha = v; } });
+  Object.defineProperty(ctx, "font", { get() { return font; }, set(v) { font = v; } });
+  Object.defineProperty(ctx, "textBaseline", { get() { return textBaseline; }, set(v) { textBaseline = v; } });
+  Object.defineProperty(ctx, "textAlign", { get() { return textAlign; }, set(v) { textAlign = v; } });
+  const canvas = { width: canvasW, height: canvasH, clientWidth: clientW, getContext: () => ctx };
+  return { canvas, events, gradOf: () => gradStops };
 }
 
-const plSrc = fs.readFileSync(path.join(SRC, "player.ts"), "utf8");
-if (!/const VIZ_NOISE_HP = 0\.55;/.test(plSrc)) {
-  console.error("参数自检失败：src/player.ts 里的 VIZ_NOISE_HP 不是 0.55");
-  process.exit(2);
-}
+const { Spectrum } = await loadSpectrum();
 
-/* ---------- 0c. 两处"看起来只是优化/平滑"的改动，用确定性检查盯住 ---------- */
-
-/* (1) 加窗预计算：Goertzel 的输入从"每个频段现乘一遍 Hann"改成"先乘一遍存起来"，
-       必须**逐位相同**（参考实现：每个频段现乘；两份代码在同一份数据上跑）。 */
-{
-  const N = SRC_WINDOW;
-  const hann = new Float32Array(N);
-  for (let i = 0; i < N; i++) hann[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (N - 1)));
-  const td = new Float32Array(N);
-  let seed = 12345; // 自带 LCG：不依赖 Math.random，两次运行必须一模一样
+/** 造一帧已知数据：柱高 0→1 线性爬坡，顶盖 = 柱高 + 0.25（每根柱都带顶盖） */
+const N = 96;
+const F = (() => {
+  const h = new Float32Array(N);
+  const p = new Float32Array(N);
   for (let i = 0; i < N; i++) {
-    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-    td[i] = (seed / 0x3fffffff - 1) * 0.9;
+    h[i] = i / (N - 1);
+    p[i] = Math.min(1, h[i] + 0.25);
   }
-  const goertzel = (input, k) => {
-    const co = 2 * Math.cos((2 * Math.PI * k) / N);
-    let s1 = 0, s2 = 0;
-    for (let i = 0; i < N; i++) { const s0 = input[i] + co * s1 - s2; s2 = s1; s1 = s0; }
-    return [s1, s2];
-  };
-  const refInput = new Float32Array(N);
-  for (let i = 0; i < N; i++) refInput[i] = td[i] * hann[i]; // 旧写法：每个频段现乘
-  const tw = new Float32Array(N);
-  for (let i = 0; i < N; i++) tw[i] = td[i] * hann[i]; // 新写法：先乘一遍
-  const ks = [3.7, 12.5, 55.25, 190.75];
-  const same = ks.every((k) => {
-    const a = goertzel(refInput, k), b = goertzel(tw, k);
-    return a[0] === b[0] && a[1] === b[1];
-  });
-  console.log("加窗预计算（120 段不再各乘一遍 Hann）：逐位相同 " + (same ? "✓" : "✗ 不一致！"));
+  return { h, p };
+})();
+const GAUGES = { kick: 1.0, bass: 0.5, vocal: 0.0, cymbal: 0.25 };
+
+function record(canvasW, canvasH, clientW) {
+  const rec = makeRecorder(canvasW, canvasH, clientW);
+  const sp = new Spectrum(rec.canvas);
+  sp.setPalette({ light: "#112233", strong: "#445566", base: "#778899", cap: "#ffffff" });
+  sp.applyExternalBars(F.h, F.p, GAUGES);
+  sp.render(0.016);
+  return { sp, events: rec.events, gradStops: rec.gradOf() };
 }
 
-/* (2) 绘制插值的检查放在下面画布桩之后（需要 canvasStub）。 */
+/* ---------- 1a. s = 954/636 = 1.5（本仓真实画布比例） ---------- */
+const CAN_W = 954, CAN_H = 716, CLIENT_W = 636;
+const s = CAN_W / CLIENT_W;
+const R = record(CAN_W, CAN_H, CLIENT_W);
+const rects = R.events.filter((e) => e.op === "rect");
+const rounds = R.events.filter((e) => e.op === "round");
+const texts = R.events.filter((e) => e.op === "text");
 
-/* ---------- 1. 最小画布桩：只实现 Spectrum.draw() 用到的几个方法 ---------- */
-const ctxStub = {
-  clearRect() {},
-  fillRect() {},
-  beginPath() {},
-  moveTo() {},
-  lineTo() {},
-  arc() {},
-  stroke() {},
-  createLinearGradient: () => ({ addColorStop() {} }),
-  fillStyle: "", strokeStyle: "", globalAlpha: 1, lineWidth: 1,
-};
-const canvasStub = { width: 954, height: 716, getContext: () => ctxStub };
+/* 期望几何：全部用"原版公式 + 抽出来的常量"算，**不看** spectrum.ts 的实现 */
+const padX = PY_CONST.pad_x * s;
+const usable = CAN_H - PY_CONST.usable_pad * s;
+const slot = (CAN_W - padX * 2) / N;
+const barW = Math.min(slot, Math.max(PY_CONST.bar_min_w * s, slot * PY_CONST.bar_ratio));
 
-/* ---------- 2b. 绘制插值：分析 20ms 一 tick、画布 60fps 重画 ----------
-   两者不成整数倍时，屏幕上会出现"有时隔一帧才动、有时隔两帧才动"的错拍，看起来就是卡
-   （用户："怎么还更卡"）。这里用**可控时钟**验两件事：
-   ① 一个 tick 之内每一帧画出来的值都在变（所以 60fps 显示器上是连续的）；
-   ② 下一个 tick 到来时收敛到当前柱高（不是滞后一个节拍）。 */
+ok(R.events.filter((e) => e.op === "clear").length === 1, "每帧先整块清屏（clearRect × 1）");
+ok(rects.length === N + N, "矩形数 = 柱 " + N + " + 顶盖 " + N, "实得 " + rects.length);
+/* 绘制顺序是"每根柱：先柱、后顶盖" → 柱在偶数位、顶盖在奇数位 */
+const barsOf = (list) => Array.from({ length: N }, (_, i) => list[2 * i]);
+const capsOf = (list) => Array.from({ length: N }, (_, i) => list[2 * i + 1]);
+const BAR_RECTS = barsOf(rects);
+const CAP_RECTS = capsOf(rects);
+let maxDx = 0, maxDy = 0, maxDw = 0, maxDh = 0, maxDa = 0;
+for (let i = 0; i < N; i++) {
+  const bar = BAR_RECTS[i];
+  const level = F.h[i];
+  const xExp = padX + i * slot + (slot - barW) / 2;
+  const bhExp = Math.max(PY_CONST.bh_min * s, level * usable);
+  const aExp = 0.45 + PY_CONST.alpha_k * level;
+  maxDx = Math.max(maxDx, Math.abs(bar.x - xExp));
+  maxDw = Math.max(maxDw, Math.abs(bar.w - barW));
+  maxDh = Math.max(maxDh, Math.abs(bar.h - bhExp));
+  maxDy = Math.max(maxDy, Math.abs(bar.y - (CAN_H - bhExp)));
+  maxDa = Math.max(maxDa, Math.abs(bar.alpha - aExp));
+}
+ok(maxDx <= 1e-9, "柱左边缘 x = pad + i·slot + (slot−bar_w)/2（逐柱）", "maxΔ=" + maxDx);
+ok(maxDw <= 1e-9, "柱宽 = 槽位 × " + PY_CONST.bar_ratio + "（逐柱）", "maxΔ=" + maxDw + "（" + barW.toFixed(4) + "px）");
+ok(maxDh <= 1e-9, "柱高 = v×(h−" + PY_CONST.usable_pad + ")、下限 " + PY_CONST.bh_min + "px", "maxΔ=" + maxDh);
+ok(maxDy <= 1e-9, "柱**贴底**（y = h − bh）", "maxΔ=" + maxDy);
+ok(maxDa <= 1e-9, "逐柱 α = 0.45 + " + PY_CONST.alpha_k + "·v（不是分桶）", "maxΔ=" + maxDa);
+
+/* 顶盖 */
+let capDx = 0, capDy = 0, capDh = 0, capDa = 0, capWhite = 0;
+for (let i = 0; i < N; i++) {
+  const cap = CAP_RECTS[i];
+  const phExp = Math.max(PY_CONST.cap_ph_min * s, F.p[i] * usable);
+  capDx = Math.max(capDx, Math.abs(cap.x - (padX + i * slot + (slot - barW) / 2)));
+  capDy = Math.max(capDy, Math.abs(cap.y - (CAN_H - phExp - PY_CONST.cap_gap * s)));
+  capDh = Math.max(capDh, Math.abs(cap.h - PY_CONST.cap_thick * s));
+  capDa = Math.max(capDa, Math.abs(cap.alpha - PY_CONST.cap_alpha));
+  if (String(cap.style).startsWith("rgba(255,255,255")) capWhite++;
+}
+ok(capDx <= 1e-9 && capDy <= 1e-9, "顶盖 y = h − ph − " + PY_CONST.cap_gap + "（悬在峰值之上）",
+  "maxΔ=" + Math.max(capDx, capDy));
+ok(capDh <= 1e-9, "顶盖厚 = " + PY_CONST.cap_thick + "px", "maxΔ=" + capDh);
+ok(capDa <= 1e-9, "顶盖 α = " + PY_CONST.cap_alpha, "maxΔ=" + capDa);
+ok(capWhite === N, "顶盖用主题对比色（深底白）画满每根柱", capWhite + "/" + N);
+
+/* 渐变停点 */
+ok(Array.isArray(R.gradStops) && R.gradStops.length === 3, "竖向渐变有 3 个停点", JSON.stringify(R.gradStops));
+if (Array.isArray(R.gradStops) && R.gradStops.length === 3) {
+  ok(near(R.gradStops[0][0], 0.0, 1e-12) && R.gradStops[0][1] === "#112233", "停点 0.0 = 最亮色（调色板 light）");
+  ok(near(R.gradStops[1][0], PY_CONST.grad_mid, 1e-12) && R.gradStops[1][1] === "#445566",
+    "停点 " + PY_CONST.grad_mid + " = 主色（调色板 strong）");
+  ok(near(R.gradStops[2][0], 1.0, 1e-12) && R.gradStops[2][1] === "#778899", "停点 1.0 = 底色（调色板 base）");
+}
+
+/* 指示条：4 个标签 + 4 条轨道 + 活跃度 > 0.01 的填充 */
+const gxExp = PY_CONST.gauge_x * s;
+const gyExp = PY_CONST.gauge_y * s;
+const labelW = PY_CONST.gauge_label_w * s;
+const mwExp = PY_CONST.gauge_w * s;
+const mhExp = PY_CONST.gauge_h * s;
+const stepExp = labelW + mwExp + PY_CONST.gauge_gap * s;
+ok(texts.length === 4, "左上角四个标签（鼓 / 低音 / 人声 / 镲）", texts.map((t) => t.text).join(" "));
+ok(texts.map((t) => t.text).join(",") === "鼓,低音,人声,镲", "标签文字与顺序和原版 items 一致");
+let txMax = 0;
+for (let k = 0; k < 4; k++) txMax = Math.max(txMax, Math.abs(texts[k].x - (gxExp + k * stepExp)));
+ok(txMax <= 1e-9, "标签横向步进 = 标签宽 + 条长 + 间距", "maxΔ=" + txMax);
+ok(rounds.length === 4 + 3, "圆角矩形 = 4 条轨道 + 3 个活跃度填充（vocal = 0 不画）", "实得 " + rounds.length);
+/* 指示条也是"逐路：先轨道、后填充" → 按原版 items 顺序推进游标逐条比 */
+let maxRoundD = 0;
 {
-  const sp = new Spectrum(canvasStub, 48000);
-  sp.setMode("mix");
-  sp.applyParams();
-  sp.setAdvanceInterval(20);
-  const loud = new Float32Array(SRC_WINDOW);
-  for (let i = 0; i < SRC_WINDOW; i++) {
-    const t = i / 48000;
-    loud[i] = 0.5 * (Math.sin(2 * Math.PI * 55 * t) + 0.4 * Math.sin(2 * Math.PI * 110 * t));
-  }
-  const silence = new Float32Array(SRC_WINDOW);
-  let clock = 1000;
-  const realNow = performance.now;
-  performance.now = () => clock;
-  try {
-    for (let i = 0; i < 8; i++) { sp.update(loud, 48000); clock += 20; } // 先把柱高拉起来
-    sp.update(silence, 48000); // 一次阶跃：柱高该往下掉
-    const frames = [];
-    for (const dt of [5, 5, 5]) { clock += dt; sp.render(0.016); frames.push(sp.snapshot().show[3]); }
-    clock += 5;
-    sp.render(0.016);
-    const atTick = sp.snapshot().show[3]; // 正好一个节拍（20ms）之后
-    const target = sp.snapshot().bars[3];
-    const everyFrame = frames.every((v, i) => i === 0 || v !== frames[i - 1]);
-    const converged = Math.abs(atTick - target) < 1e-6;
-    console.log("绘制插值（20ms 分析 / 60fps 重画）：一个节拍内每帧都在变 " + (everyFrame ? "✓" : "✗")
-      + "　节拍到时收敛到当前柱高 " + (converged ? "✓" : "✗")
-      + "　样例 " + frames.map((v) => v.toFixed(3)).join(" → ") + " → " + atTick.toFixed(3)
-      + "（目标 " + target.toFixed(3) + "）");
-    console.log("");
-  } finally {
-    performance.now = realNow;
-  }
-}
-
-/* ---------- 2. 合成信号：与 player.ts 的 vizTestTimeData 同一套参数 ---------- */
-const VIZ_NOISE_HP = 0.55;
-const SR = 48000;
-const N = SRC_WINDOW; // = ANALYSIS_WINDOW
-let phase = 0, lp = 0, idx = 0;
-function beatOf() {
-  return Math.pow(Math.max(0, Math.sin((phase / 120) * Math.PI * 2)), 8);
-}
-function fill(out) {
-  phase += 1;
-  const beat = beatOf();
-  const n = out.length;
-  for (let i = 0; i < n; i++) {
-    const t = (idx + i) / SR;
-    lp += (Math.random() * 2 - 1 - lp) * VIZ_NOISE_HP;
-    let s = lp * 0.9 + (Math.random() * 2 - 1) * 0.1;
-    const env = 0.35 + 0.65 * beat;
-    s += env * (0.26 * Math.sin(2 * Math.PI * 55 * t) + 0.12 * Math.sin(2 * Math.PI * 110 * t) + 0.05 * Math.sin(2 * Math.PI * 220 * t));
-    s += env * 0.06 * Math.sin(2 * Math.PI * (700 + 400 * Math.sin(2 * Math.PI * 0.3 * t)) * t);
-    out[i] = Math.max(-1, Math.min(1, s * 0.5));
-  }
-  idx += n;
-  return beat;
-}
-
-/* ---------- 3. 跑：每帧一次分析（30Hz → 每 33ms 一帧），画 60fps 只是重画同一份 bars ---------- */
-/* 参数可用 `--tilt= / --bass= / --jit= / --kick= / --peak=` 临时覆盖（对照不同调音用，
-   不写进产品存储）。例：node scripts\频谱离线观测.mjs 12 --peak=1.05 看"峰高压到 1.05 后左峰还顶不顶满"。 */
-const CLI = Object.fromEntries(process.argv.slice(2).filter((a) => a.startsWith("--"))
-  .map((a) => { const i = a.indexOf("="); return [a.slice(2, i < 0 ? undefined : i), i < 0 ? "1" : a.slice(i + 1)]; }));
-const override = {};
-/* ★ 判空要用 undefined 而不是真假值：`--kick=0` 是合法覆盖（泵动关掉），用 if (CLI.kick) 会漏掉。 */
-if (CLI.tilt !== undefined) override.tilt = Number(CLI.tilt);
-if (CLI.bass !== undefined) override.bassSigma = Number(CLI.bass);
-if (CLI.jit !== undefined) override.jitterK = Number(CLI.jit);
-if (CLI.kick !== undefined) override.kickPump = Number(CLI.kick);
-if (CLI.peak !== undefined) override.peakTarget = Number(CLI.peak);
-if (Object.keys(override).length) setVizParams(override);
-
-/* ---------- 3c. --latency：柱高从 0 爬到稳态要多久（台阶响应，步长 = 分析节拍） ----------
-   用户两次反馈"延迟感严重""没能好好反映高能量音色"。这个滞后有两段：
-     ① 分析窗的群延迟（≈ 窗长/2 ÷ 采样率；2026-10-08 起窗长 512 点 ≈ 5.3ms，
-        此前 1024 点 ≈ 10.7ms —— 与节拍无关，是窗本身的积分时间）；
-     ② 一阶跟随每 tick 才推一步 —— bars += (v−bars)·atk，atk = 0.70−0.20·i/n。
-        所以"爬几 tick"是固定的，**换成毫秒就是 tick 数 × 分析节拍**：
-        30Hz(33ms) 与 1.3.0 原版的 50Hz(20ms) 差 1.65 倍，高频那几根（atk 只有 0.5）差得最明显。
-   这里直接按源码里的跟随公式做确定性模拟（不掺信号与抖动，数字可复现）：
-   低频那根（i/n≈0）与高频那几根（i/n≈1）各算一遍。 */
-if (CLI.latency !== undefined) {
-  if (!/const atk = 0\.7 - 0\.2 \* \(i \/ n\);/.test(spSrc)) {
-    console.error("参数自检失败：跟随系数 atk = 0.7 - 0.2 * (i/n) 在 src/spectrum.ts 里找不到了");
-    process.exit(2);
-  }
-  const step = (frac) => {
-    const atk = 0.7 - 0.2 * frac;
-    let v = 0;
-    const hits = {};
-    for (let n = 1; n <= 40; n++) {
-      v += (1 - v) * atk; // 台阶输入 v_target = 1
-      if (hits.t50 === undefined && v >= 0.5) hits.t50 = n;
-      if (hits.t90 === undefined && v >= 0.9) hits.t90 = n;
-      if (hits.t90 !== undefined && n > hits.t90 + 2) break;
-    }
-    return hits;
-  };
-  const bass = step(0); // i/n ≈ 0：左侧低频那几根
-  const high = step(1); // i/n ≈ 1：最右侧高频那几根
-  console.log("=== 台阶响应：柱高从 0 爬到稳态要几 tick（跟随系数照 src/spectrum.ts） ===");
-  console.log("  低频（i/n = 0，上升系数 0.70）：50% " + bass.t50 + " tick、90% " + bass.t90 + " tick");
-  console.log("  高频（i/n = 1，上升系数 0.50）：50% " + high.t50 + " tick、90% " + high.t90 + " tick");
-  console.log("");
-  for (const [ms, name] of [[33, "改前：33ms（30Hz）"], [20, "改后：20ms（50Hz，1.3.0 原版的 vizInterval()）"]]) {
-    console.log("  " + name);
-    console.log("      低频到 90%：" + (bass.t90 * ms) + "ms　高频到 90%：" + (high.t90 * ms) + "ms");
-  }
-  console.log("  ⇒ 高能量 onset 跟上的时间缩短 1.65×（低频 66→40ms、高频 132→80ms），越靠右的高频越明显");
-  console.log("  另外：分析窗本身 " + SRC_WINDOW + " 点 ≈ " + ((SRC_WINDOW / 2 / SR) * 1000).toFixed(1)
-    + "ms 的群延迟 —— 与节拍那两档无关（2026-10-08 已从 1024 点降到 512，再省约 5.3ms）。");
-  process.exit(0);
-}
-
-const SECONDS = Number(process.argv.slice(2).find((a) => !a.startsWith("--")) || 12);
-const sp = new Spectrum(canvasStub, SR);
-sp.setMode("mix");
-sp.applyParams(); // 覆盖过参数就重建频段增益，没覆盖等于原样
-if (Object.keys(override).length) console.log("参数覆盖：" + JSON.stringify(override));
-const td = new Float32Array(N);
-const STATS = { rough: [], max: [], pegged: [], mean: [], shimmer: [], topShimmer: [], low: [], mid: [], high: [], pin: [], lowMax: [], lowPin: [], topRough: [] };
-/* 低 / 中 / 高频取样区间按实际柱数换算（原来写死 0-12 / 45-72 / 90-120 是 120 柱时定的）：
-   低频前 10%、中频 37.5%~60%、高频后 25%，换柱数后分档含义不变。 */
-const LOW_TO = Math.round(SRC_BAR_N * 0.1);
-const MID_FROM = Math.round(SRC_BAR_N * 0.375);
-const MID_TO = Math.round(SRC_BAR_N * 0.6);
-const HIGH_FROM = Math.round(SRC_BAR_N * 0.75);
-const meanOf = (v, from, to) => v.slice(from, to).reduce((a, b) => a + b, 0) / Math.max(1, to - from);
-let prev = null;
-let pumpFrame = 0;
-const FRAMES = Math.round(SECONDS * 50); // 分析节拍 = 应用里的 50Hz（1.3.0 的 vizInterval() 返回 20ms）
-const warm = Math.round(FRAMES * 0.35); // 前 35% 只当预热（一阶跟随要几帧才追上）
-for (let f = 0; f < FRAMES; f++) {
-  fill(td);
-  sp.update(td, SR);
-  sp.render(0.033);
-  pumpFrame++;
-  if (f < warm) { prev = Array.from(sp.levels); continue; }
-  const v = Array.from(sp.levels);
-  const max = Math.max(...v);
-  const mean = v.reduce((a, b) => a + b, 0) / v.length;
-  let rough = 0;
-  for (let i = 1; i < v.length; i++) rough += Math.abs(v[i] - v[i - 1]);
-  rough /= v.length - 1;
-  let shr = 0;
-  /* ★ prev 必须是**上一步的副本**（2026-10-03 修）：原来写 `prev = v` 直接赋引用，
-     而 sp.levels 是内部复用数组，v[i] 与 prev[i] 恒等 → 所有"帧间变化"指标都会算出 0。
-     所以 prev 一律用 .slice() 存副本。 */
-  if (prev) for (let i = 0; i < v.length; i++) shr += Math.abs(v[i] - prev[i]);
-  STATS.rough.push(rough);
-  STATS.max.push(max);
-  STATS.mean.push(mean);
-  /* ★ 顶端帧间抖动（2026-10-03 新增）：只统计**高柱**（>0.5）的相邻两帧变化。
-     整条光谱的"逐帧抖动"会被大量矮柱稀释（矮柱本来就不补抖、也没什么可抖的），
-     用户说的"抖动太小"看的是顶端那批柱子活不活 —— 这个才是对应指标。 */
-  {
-    let ts = 0;
-    let tn = 0;
-    if (prev) {
-      for (let i = 0; i < v.length; i++) {
-        if (v[i] > 0.5 && prev[i] > 0.5) { ts += Math.abs(v[i] - prev[i]); tn++; }
-      }
-    }
-    if (tn) STATS.topShimmer.push(ts / tn);
-  }
-  prev = v.slice(); // ★ 副本（见上面的说明）
-  STATS.pegged.push(v.filter((x) => x > 0.98).length);
-  STATS.shimmer.push(shr / v.length);
-  /* ★ 顶端锯齿度（用户："不想要顶端变方块"）：只看**高柱**（>0.7）之间的相邻柱高差。
-     平顶方块 = 相邻高柱高度几乎一样（差值趋近 0）；锯齿 = 差值是量化步长的量级。
-     量化步长 = 1/13 ≈ 0.077，所以 0.05 以上就算"看得出参差"、0 就是死平。 */
-  {
-    const hist = v.filter((x) => x > 0.7);
-    if (hist.length > 1) {
-      let d = 0;
-      let n = 0;
-      for (let i = 1; i < v.length; i++) {
-        if (v[i] > 0.7 && v[i - 1] > 0.7) { d += Math.abs(v[i] - v[i - 1]); n++; }
-      }
-      if (n) STATS.topRough.push(d / n);
+  let cur = 0;
+  for (let k = 0; k < 4; k++) {
+    const v = [GAUGES.kick, GAUGES.bass, GAUGES.vocal, GAUGES.cymbal][k];
+    const xExp = gxExp + k * stepExp + labelW;
+    const track = rounds[cur++];
+    maxRoundD = Math.max(maxRoundD, Math.abs(track.x - xExp), Math.abs(track.y - gyExp));
+    maxRoundD = Math.max(maxRoundD, Math.abs(track.w - mwExp), Math.abs(track.h - mhExp));
+    if (v > 0.01) {
+      const fill = rounds[cur++];
+      maxRoundD = Math.max(maxRoundD, Math.abs(fill.x - xExp), Math.abs(fill.y - gyExp));
+      maxRoundD = Math.max(maxRoundD, Math.abs(fill.w - Math.max(PY_CONST.gauge_fill_min * s, mwExp * v)));
+      maxRoundD = Math.max(maxRoundD, Math.abs(fill.h - mhExp));
     }
   }
-  STATS.low.push(meanOf(v, 0, LOW_TO));
-  /* "一直顶满"要看的是**整条谱的最高柱有多少帧贴着天花板**：
-     某几根柱在一帧里很高不算问题，每帧都顶满才是用户说的"左侧一直顶满"。 */
-  STATS.pin.push(max >= 0.98 ? 1 : 0);
-  /* 用户说的"可视化左侧一直顶满"：只看低频那一段（前 10%）里最高的那根。
-     lowPin = 这一帧左峰已经贴到天花板的比例；lowMax 是它的高度轨迹。 */
-  const lowMax = Math.max(...v.slice(0, LOW_TO));
-  STATS.lowMax.push(lowMax);
-  STATS.lowPin.push(lowMax >= 0.98 ? 1 : 0);
-  STATS.mid.push(meanOf(v, MID_FROM, MID_TO));
-  STATS.high.push(meanOf(v, HIGH_FROM, SRC_BAR_N));
+  ok(cur === rounds.length, "圆角矩形序列与 items 顺序一致（4 轨道 + 3 填充）", "消费 " + cur + " 条");
 }
-const avg = (a) => a.reduce((x, y) => x + y, 0) / a.length;
-/* 标准差：低频均值在整段里的波动幅度 —— 越大说明左峰越"活"，不是死顶在天花板上 */
-const stdOf = (a) => { const m = avg(a); return Math.sqrt(avg(a.map((x) => (x - m) * (x - m)))); };
-const q = (a, p) => { const s = a.slice().sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(s.length * p))]; };
-const f3 = (x) => x.toFixed(3);
+ok(maxRoundD <= 1e-9, "轨道 (x, y, " + PY_CONST.gauge_w + ", " + PY_CONST.gauge_h + ") 与活跃度填充宽 max(" +
+  PY_CONST.gauge_fill_min + ", 条长 × v) 全部吻合", "maxΔ=" + maxRoundD);
+ok(rounds.every((r) => near(r.h, mhExp, 1e-9)), "轨道与填充同高（胶囊形）");
+/* 原版在柱循环之后 p.setOpacity(1.0)：指示条不跟着最后一根柱的透明度变淡。
+   少这一条会在"柱高偏低"时整组指示条几乎看不见（像素对拍抓过一次）。 */
+ok([...texts, ...rounds].every((e) => near(e.alpha, 1, 1e-9)),
+  "绘制指示条前透明度已归位（1.0）", "max α=" + Math.max(...[...texts, ...rounds].map((e) => e.alpha)));
+/* 已知差异：不填画布底色（原版 fillRect(rect, theme.BG)） */
+ok(!R.events.some((e) => e.op === "rect" && e.w === CAN_W && e.h === CAN_H),
+  "不填整块画布底色（有意差异：底色交给页面）");
 
-/* ---------- 3b. 绘制侧：按详情区那块画布的真实宽度再画一帧，数柱与柱宽 ----------
-   柱数变了以后"看着细密"落在这里：柱宽 = 画布宽 / 柱数 × 0.7（填充率）。
-   画布桩原来只吞掉调用，这里临时换成会计数的版本，画完再还原。 */
-const DRAW_W = 636; // 详情区频谱画布的 CSS 宽度（与 DESIGN 里那块一致）
-const draw = { rects: 0, barWidths: new Map() };
-const origFillRect = ctxStub.fillRect;
-ctxStub.fillRect = (x, y, w, h) => {
-  draw.rects++;
-  if (h > 2) draw.barWidths.set(w, (draw.barWidths.get(w) || 0) + 1); // h = 2 是峰值线
-};
-canvasStub.width = DRAW_W;
-canvasStub.height = 174;
-sp.render(0.033);
-ctxStub.fillRect = origFillRect;
-const barW = Math.round((DRAW_W / SRC_BAR_N) * 0.7 * 100) / 100;
-
-console.log("=== 频谱离线观测（合成信号 " + SECONDS + " 秒，分析 " + FRAMES + " 帧，样本 " + STATS.rough.length + "） ===");
-console.log("柱数 = " + sp.levels.length + "（源码 BAR_N = " + SRC_BAR_N + "），级数 = 14，分析窗 = " + N + "，采样率 = " + SR);
-{ // 频域塑形摘要：柱数变了这里**不应该**变（细针区间 / 低频峰频率 / 鼓点段位）
-  const b = sp.bandInfo();
-  console.log("频域：首段 " + b.firstHz + "Hz，末段 " + b.lastHz + "Hz，低频峰 " + b.bassPeakHz
-    + "Hz，细针频段 " + b.needleBands + "，鼓点 " + b.kickBands + " 段");
+/* ---------- 1b. s = 1 复核：缩放必须是乘出来的，不能写死 ---------- */
+const R1 = record(954, 716, 954);
+const r1 = barsOf(R1.events.filter((e) => e.op === "rect"));
+const slot1 = (954 - PY_CONST.pad_x * 2) / N;
+const barW1 = Math.min(slot1, Math.max(PY_CONST.bar_min_w, slot1 * PY_CONST.bar_ratio));
+let d1 = 0;
+for (let i = 0; i < N; i++) {
+  const xExp = PY_CONST.pad_x + i * slot1 + (slot1 - barW1) / 2;
+  const bhExp = Math.max(PY_CONST.bh_min, F.h[i] * (716 - PY_CONST.usable_pad));
+  d1 = Math.max(d1, Math.abs(r1[i].x - xExp), Math.abs(r1[i].w - barW1), Math.abs(r1[i].h - bhExp));
 }
-if (sp.levels.length !== SRC_BAR_N) {
-  console.error("柱数与源码 BAR_N 不一致：" + sp.levels.length + " != " + SRC_BAR_N);
-  process.exit(3);
-}
-console.log("");
-console.log("绘制（画布 " + DRAW_W + "×174，最后一帧）：");
-console.log("  一帧 fillRect 共 " + draw.rects + " 次；柱宽 = " + DRAW_W + " / " + SRC_BAR_N + " × 0.7 = "
-  + barW + "px（120 柱时是 " + (Math.round((DRAW_W / 120) * 0.7 * 100) / 100) + "px）");
-console.log("  实际画出的柱（高度 > 2px）宽度取值：" + [...draw.barWidths.entries()]
-  .map(([w, n]) => w + "px×" + n).join("、"));
-console.log("");
-console.log("最终柱高（最后一帧，每 10 根取一根）=");
-const last = Array.from(sp.levels);
-console.log("  " + last.filter((_, i) => i % 10 === 0).map((v, k) => (k * 10) + ":" + v.toFixed(2)).join("  "));
-console.log("  最高 = " + f3(Math.max(...last)) + "，最低 = " + f3(Math.min(...last)) + "，平均 = " + f3(avg(last)));
-console.log("");
-console.log("整段统计：");
-console.log("  平均最高柱 = " + f3(avg(STATS.max)) + "（越低越不「顶满」）");
-console.log("  最高柱贴着 0.98 的帧占比 = " + (avg(STATS.pin) * 100).toFixed(1) + "%（「不要一直顶满」看这个：越低越不「一直」）");
-console.log("  低频均值起伏（标准差）= " + f3(stdOf(STATS.low)) + "（越大左峰越活）");
-console.log("  ★ 左峰（前 " + LOW_TO + " 根里的最高柱）：平均 " + f3(avg(STATS.lowMax))
-  + "，顶到 0.98 的帧占比 " + (avg(STATS.lowPin) * 100).toFixed(1) + "%"
-  + "，起伏 σ " + f3(stdOf(STATS.lowMax)) + "（越低 / 占比越小 = 越不「一直顶满」）");
-console.log("  平均柱高 = " + f3(avg(STATS.mean)));
-console.log("  顶到 0.98 以上的柱子数（平均每帧）= " + avg(STATS.pegged).toFixed(1) + " / " + SRC_BAR_N);
-console.log("  低频（前 " + LOW_TO + " 根）平均 = " + f3(avg(STATS.low))
-  + "  中频（" + MID_FROM + "–" + MID_TO + "）=" + f3(avg(STATS.mid))
-  + "  高频（" + HIGH_FROM + "–" + SRC_BAR_N + "）=" + f3(avg(STATS.high)));
-console.log("  相邻柱高差（越小越平整）= " + f3(avg(STATS.rough)) + "（中位 " + f3(q(STATS.rough, 0.5)) + "，p90 " + f3(q(STATS.rough, 0.9)) + "）");
-console.log("  逐帧抖动（相邻两帧柱高变化，全谱平均）= " + avg(STATS.shimmer).toFixed(4) + "  ← 被矮柱稀释，仅供参考");
-console.log("  ★ 顶端帧间抖动（高柱 >0.5 的相邻两帧变化）= " + (STATS.topShimmer.length ? avg(STATS.topShimmer).toFixed(4) : "n/a")
-  + "  ← 用户说的「抖动」看这个：越大顶端越活");
-console.log("  ★ 顶端锯齿度（高柱 >0.7 的相邻柱高差）= " + (STATS.topRough.length ? f3(avg(STATS.topRough)) : "n/a")
-  + "（量化步长 0.077；越接近它就是越参差、越大越不「方块」）");
-console.log("  ★ 顶端落差/周期见下面「顶边形态（稳态和弦）」一节 —— 那里信号不变，量的才是纯抖动");
-console.log("");
+ok(d1 <= 1e-9, "画布比例 1.0 时同样吻合（尺寸是乘出来的）", "maxΔ=" + d1);
 
-/* ---------- 3d. 顶边形态：稳态和弦下会不会"糊成方块"（用户 2026-10-03："不想要顶端变方块"） ----------
-   合成信号是**瞬态丰富**的，高柱天然参差，测不出"方块"。真正会糊成方块的场景是
-   **稳态和弦 / 持续音**：频谱一段时间几乎不变，14 级量化后相邻高柱同落一级 → 顶边平直。
-   这里喂一段"多正弦稳态"直接数高柱的相邻差，作为方块风险的度量。
-   期望：既不是 0（死平方块），也不是只有量化步长的整数倍（生硬台阶）——
-   量化后的顶端补抖应当让高柱相邻差落在**量化步长附近且带连续变化**。 */
+/* ---------- 2. 边界：顶盖门槛 / 柱高下限 ---------- */
+console.log("\n=== 2. 边界 ===");
+function capCountOf(peakValue) {
+  const rec = makeRecorder(954, 716, 636);
+  const sp = new Spectrum(rec.canvas);
+  sp.applyExternalBars(new Float32Array(N), new Float32Array(N).fill(peakValue), null);
+  sp.render(0.016);
+  return rec.events.filter((e) => e.op === "rect").length - N;
+}
+ok(capCountOf(PY_CONST.cap_min - 1e-4) === 0, "cap 低于门槛（" + (PY_CONST.cap_min - 1e-4) + "）不画顶盖");
+ok(capCountOf(PY_CONST.cap_min + 1e-4) === N, "cap 高过门槛（" + (PY_CONST.cap_min + 1e-4) + "）全画");
+/* 门槛值是 f64 的 0.004，而柱数据存在 Float32Array 里：f32(0.004) = 0.00400000019 > 0.004
+   → 正好 0.004 这一档会画。这是浮点事实，不是判断写错（原版 numpy float32 同理）。 */
+ok(capCountOf(PY_CONST.cap_min) === N,
+  "cap 正好 0.004：f32 存下来是 0.00400000019，比门槛大一丝 → 画（与原版 float32 同）");
 {
-  const sp2 = new Spectrum(canvasStub, SR);
-  sp2.setMode("mix");
-  sp2.applyParams();
-  const steady = new Float32Array(N);
-  // 稳态：一组固定频率、固定幅度的正弦（模拟持续和弦，频谱长时间不变）
-  const partials = [55, 110, 165, 220, 330, 440, 660, 880, 1320, 1760];
-  for (let i = 0; i < N; i++) {
-    const t = i / SR;
-    let s = 0;
-    for (const f of partials) s += Math.sin(2 * Math.PI * f * t);
-    steady[i] = Math.max(-1, Math.min(1, s / partials.length));
-  }
-  for (let k = 0; k < 80; k++) sp2.update(steady, SR); // 跑到稳态
-  const vv = Array.from(sp2.levels); // 原始参数下的稳态帧（下面"顶边形态"用这一帧）
-  /* ★ 稳态下的时间序列（2026-10-03 新增）：信号**完全不变**，
-     所以柱高在此后的任何起伏都只可能来自抖动层本身 —— 这才是"纯抖动"的量，
-     不会被音乐动态或鼓点泵动污染（在瞬态信号上直接量极差会量到 0.5+ 的泵动，毫无意义）。
-     抖动层有两路，周期差一个数量级：
-       · 慢行波（jitterPhase，周期 ≈ 200+ 帧 ≈ 4.6 秒）—— "滑动感"那一路；
-       · 顶端张力（topPhase，周期由 TOP_TENSION_RATE 决定）—— 用户现在关心的这一路。
-     两路混在一起用滑动均值分不干净：张力一旦压慢到 50 帧量级，均值会把它一起跟住，
-     读数反而失真。所以这里直接**把慢行波关掉**（jitterK = 0），剩下就是纯顶端张力。
-     量三件事：
-       · 落差（每根高柱的全程极差）→ 用户要的「高幅度、高落差」；
-       · 帧间变化 → 用户不要的「高频率」；
-       · 由二者反推周期：正弦近似下 变化率 ≈ 幅度 × 角频率，故 周期 ≈ π × 落差 / 帧间变化。 */
-  const savedJitterK = vizParams.jitterK;
-  setVizParams({ jitterK: 0 }); // 关掉慢行波与单边颤动，稳态下只剩顶端张力在动
-  const STEADY_FRAMES = 240;
-  const sLo = new Array(SRC_BAR_N).fill(Infinity);
-  const sHi = new Array(SRC_BAR_N).fill(-Infinity);
-  /* ★ 2026-10-03：把"慢摆幅"与"高频抖动"两个成分分开量。
-     · sLoSlow/sHiSlow 存 **3 点滑动平均** 后的轨迹 —— 周期 3 帧的快抖会被平均掉，
-       留下的就是慢摆幅（周期 28 帧，3 点平均只削它约 1%）。两者的极差对比即"叠加而非取代"。
-     · 符号翻转率：同一根柱相邻帧变化量 Δ 的**正负翻转次数 / 样本数**。
-       慢摆幅一个周期只翻 2 次（周期 28 帧 → 约 7%）；快抖几乎每 1~2 帧就翻（50%+）。
-       这是"高频"最直接的读数，与"幅度"完全解耦。 */
-  const sLoSlow = new Array(SRC_BAR_N).fill(Infinity);
-  const sHiSlow = new Array(SRC_BAR_N).fill(-Infinity);
-  let sJump = 0;
-  let sJumpN = 0;
-  let sPrev = null;
-  let sPrev2 = null;
-  let sDelta = new Array(SRC_BAR_N).fill(0);
-  let sFlip = 0;
-  let sFlipN = 0;
-  for (let k = 0; k < STEADY_FRAMES; k++) {
-    sp2.update(steady, SR);
-    const cur = Array.from(sp2.levels);
-    for (let i = 0; i < cur.length; i++) {
-      if (cur[i] < sLo[i]) sLo[i] = cur[i];
-      if (cur[i] > sHi[i]) sHi[i] = cur[i];
-      if (sPrev && sPrev2) {
-        const sm = (cur[i] + sPrev[i] + sPrev2[i]) / 3;
-        if (sm < sLoSlow[i]) sLoSlow[i] = sm;
-        if (sm > sHiSlow[i]) sHiSlow[i] = sm;
-      }
-    }
-    if (sPrev) {
-      for (let i = 0; i < cur.length; i++) {
-        const d = cur[i] - sPrev[i];
-        if (cur[i] > 0.5 && sPrev[i] > 0.5) {
-          sJump += Math.abs(d);
-          sJumpN++;
-          if (Math.abs(d) > 1e-9 && Math.abs(sDelta[i]) > 1e-9) {
-            sFlipN++;
-            if ((d > 0) !== (sDelta[i] > 0)) sFlip++;
-          }
-        }
-        sDelta[i] = d;
-      }
-    }
-    sPrev2 = sPrev;
-    sPrev = cur;
-  }
-  setVizParams({ jitterK: savedJitterK }); // 还原
-  let sDropSum = 0;
-  let sDropN = 0;
-  for (let i = 0; i < SRC_BAR_N; i++) {
-    if (sHi[i] > 0.7) { sDropSum += sHi[i] - sLo[i]; sDropN++; }
-  }
-  /* 慢成分落差：只用"高柱"的那批根（与上面同口径），但取自 3 点平均后的轨迹 */
-  let sDropSlowSum = 0;
-  let sDropSlowN = 0;
-  for (let i = 0; i < SRC_BAR_N; i++) {
-    if (sHi[i] > 0.7 && isFinite(sLoSlow[i])) { sDropSlowSum += sHiSlow[i] - sLoSlow[i]; sDropSlowN++; }
-  }
-  const sDrop = sDropN ? sDropSum / sDropN : 0;
-  const sDropSlow = sDropSlowN ? sDropSlowSum / sDropSlowN : 0;
-  const sJumpAvg = sJumpN ? sJump / sJumpN : 0;
-  const sFlipRate = sFlipN ? sFlip / sFlipN : 0;
-  const sPeriod = sJumpAvg > 1e-6 ? (Math.PI * sDrop) / sJumpAvg : 0; // 帧
-  // 高柱相邻差（只统计相邻两根都 > 0.6 的）
-  let d = 0, n = 0, same = 0;
-  for (let i = 1; i < vv.length; i++) {
-    if (vv[i] > 0.6 && vv[i - 1] > 0.6) {
-      const gap = Math.abs(vv[i] - vv[i - 1]);
-      d += gap; n++;
-      if (gap < 0.02) same++; // 几乎等高 = 有"方"的苗头
-    }
-  }
-  const step = 1 / (SRC_VIZ_LEVELS - 1);
-  /* 抖动层的实际参数（从源码里读，方便对照调参） */
-  const num = (re) => Number((re.exec(spSrc) || [])[1]);
-  const shimmerAmp = num(/const TOP_SHIMMER = ([\d.]+);/);
-  const shimmerRate = num(/const TOP_SHIMMER_RATE = ([\d.]+);/);
-  console.log("=== 顶边形态（稳态和弦，" + n + " 对相邻高柱） ===");
-  console.log("  高柱相邻平均差 = " + f3(n ? d / n : 0) + "（量化步长 " + step.toFixed(3) + "）");
-  console.log("  近乎等高的相邻对占比 = " + (n ? ((same / n) * 100).toFixed(1) : "0") + "%（越低越不像方块）");
-  console.log("  高柱高度样本（前 30 根 >0.6 的柱）= "
-    + vv.filter((x) => x > 0.6).slice(0, 30).map((x) => x.toFixed(2)).join(" "));
-  console.log("  ★ 纯张力落差（" + sDropN + " 根高柱，" + STEADY_FRAMES + " 帧内的极差均值）= " + f3(sDrop)
-    + "  ← 用户要的「高幅度、高落差」看这个：越大摆幅越大");
-  console.log("  ★ 慢成分落差（同上，但走 3 点滑动平均）= " + f3(sDropSlow)
-    + "  ← 与上一行接近即证明「高频抖动是叠加在大摆幅上、没有取代它」");
-  console.log("  ★ 符号翻转率 = " + (sFlipRate * 100).toFixed(1) + "%（" + sFlipN + " 个样本）"
-    + "  ← 「高频抖动」的直接读数：关闭 TOP_SHIMMER 时实测 16%（慢摆幅自带一个 2.7 倍频成分），"
-    + "叠加快抖后应显著抬高");
-  console.log("  ★ 纯张力帧间变化 = " + sJumpAvg.toFixed(4) + "  ← 越大抖得越快（幅度 × 频率的合成）");
-  console.log("  ★ 顶端周期 ≈ " + sPeriod.toFixed(1) + " 帧（" + (sPeriod / 50).toFixed(2) + " 秒）"
-    + "  ← 这是按「单一正弦」反推的，叠加高频抖动后会被低估，只作参考");
-  console.log("  抖动层：慢摆幅（TOP_TENSION）幅度 0.45×1.2 / 周期 ≈ " + (2 * Math.PI / 0.22).toFixed(1)
-    + " 帧；高频抖动（TOP_SHIMMER）幅度 " + shimmerAmp + " / 周期 ≈ "
-    + (shimmerAmp > 0 ? (2 * Math.PI / shimmerRate).toFixed(1) : "-") + " 帧");
-  console.log("");
-}
-/* 结论判定。注意：**不拿"平不平/抖不抖"当好坏的唯一标准** ——
-   用户 2026-09-25 明确要求"参数设置完全参照 1.3.0"，抖动与阶梯感是那一版的效果本身。
-   这里只排除三种真正的坏情况，其余如实报数。 */
-const maxAvg = avg(STATS.max);
-const pegAvg = avg(STATS.pegged);
-const flat = Math.max(...last) - Math.min(...last);
-let verdict;
-if (maxAvg > 0.999 && pegAvg > SRC_BAR_N * 0.5) verdict = "✗ 又顶满了（本帧峰值归一后整排贴 1.0，等于每根柱都是满高）";
-else if (flat < 0.25) verdict = "✗ 太平（柱高没有层次，看不出频谱形状）";
-else verdict = "✓ 有层次（低频厚、高频薄、随鼓点起伏），与 1.3.0 的参数一致；"
-  + "抖动 " + avg(STATS.shimmer).toFixed(4) + " / 相邻柱高差 " + f3(avg(STATS.rough)) + " 就是那一版的固有观感，未做额外平滑";
-console.log("结论：" + verdict);
-console.log("");
-
-/* ---------- 4. 高速鼓点灵敏度（用户 2026-10-03："频谱对高速鼓点不够灵敏"） ----------
-   合成一段**密集 kick** 的低频信号直接喂给 kick 检测器，量"每个 kick 能不能被单独触发"。
-   检测器在 Spectrum.analyze() 里，但那段是私有的；这里按源码里的**同一组常量**复刻，
-   并在开头做常量自检 —— 只要 spectrum.ts 里的 KICK_* 被改动，这里就报错提醒同步。
-   信号：一串"指数衰减低频脉冲"（模拟鼓点），问隔可调，用 CLI --bpm= 控制速度。 */
-{
-  /* ★ 从源码**读出**这四个值，而不是在脚本里再抄一份：
-     它们是可调的灵敏度参数（2026-10-08 为"动态对比拉大"调过 KICK_RISE_GAIN），
-     抄一份就会与实现漂移。读出来 = 复刻永远与产品同参。 */
-  const need = [
-    ["KICK_REF_ATTACK", /const KICK_REF_ATTACK = ([\d.]+);/],
-    ["KICK_REF_RELEASE", /const KICK_REF_RELEASE = ([\d.]+);/],
-    ["KICK_RISE_FLOOR", /const KICK_RISE_FLOOR = ([\d.]+);/],
-    ["KICK_RISE_GAIN", /const KICK_RISE_GAIN = ([\d.]+);/],
-  ];
-  const KV = {};
-  for (const [name, re] of need) {
-    const m = re.exec(spSrc);
-    if (!m) {
-      console.error("参数自检失败：src/spectrum.ts 里找不到 `const " + name + " = <数值>;` —— 与本脚本的复刻对不上了");
-      process.exit(2);
-    }
-    KV[name] = Number(m[1]);
-  }
-  const KICK_REF_ATTACK = KV.KICK_REF_ATTACK, KICK_REF_RELEASE = KV.KICK_REF_RELEASE,
-    KICK_RISE_FLOOR = KV.KICK_RISE_FLOOR, KICK_RISE_GAIN = KV.KICK_RISE_GAIN;
-  const tickMs = 20; // 分析节拍（应用 50Hz）
-  /* 检波器复刻：low 是"低频段平均原始幅度"，用衰减脉冲当输入。
-     这里不跑 Goertzel（那是频谱），只关心 onset 检测的**时间响应**。 */
-  const detect = (lows) => {
-    let ref = 0;
-    const outs = [];
-    for (const low of lows) {
-      if (ref <= 0) ref = low;
-      const rise = (low - ref) / Math.max(ref, 1e-6);
-      const kick = Math.max(0, Math.min(1, (rise - KICK_RISE_FLOOR) * KICK_RISE_GAIN));
-      const k = low > ref ? KICK_REF_ATTACK : KICK_REF_RELEASE;
-      ref += (low - ref) * k;
-      outs.push(kick);
-    }
-    return outs;
-  };
-  const bpm = Number(CLI.bpm || 160);
-  const beats = Math.round((SECONDS * 1000) / (60000 / bpm));
-  const lows = [];
-  for (let t = 0; t < SECONDS * 1000; t += tickMs) {
-    let v = 0.15; // 底噪
-    const beatPos = ((t % (60000 / bpm)) / (60000 / bpm)) * tickMs; // 本 tick 内距鼓点的位置
-    const since = t % (60000 / bpm);
-    v = 0.15 + 0.85 * Math.exp(-since / 45); // 45ms 衰减
-    lows.push(v);
-  }
-  const kicks = detect(lows);
-  /* 统计"有效触发"：kick > 0.5 的 tick 里，按最小间隔 40ms 合并成一次触发 */
-  let fired = 0, lastHit = -1e9;
-  for (let i = 0; i < kicks.length; i++) {
-    if (kicks[i] > 0.5) {
-      const at = i * tickMs;
-      if (at - lastHit >= 40) { fired++; lastHit = at; }
-    }
-  }
-  const peakAvg = avg(kicks);
-  const maxKick = Math.max(...kicks);
-  console.log("=== 高速鼓点灵敏度（BPM = " + bpm + "，" + SECONDS + " 秒内应有 " + beats + " 次鼓点） ===");
-  console.log("  有效触发（kick > 0.5）= " + fired + " 次  → 命中率 " + ((fired / beats) * 100).toFixed(1) + "%");
-  console.log("  平均 kick 强度 = " + f3(peakAvg) + "，峰值 = " + f3(maxKick) + "（越接近 1 越「每个鼓点都顶得起来」）");
-  const sensVerdict = fired >= beats * 0.9 && maxKick > 0.85
-    ? "✓ 密集鼓点基本不漏、且每次都能顶到近满"
-    : "✗ 高速鼓点有漏触发或强度不足";
-  console.log("  结论：" + sensVerdict);
-  console.log("");
+  const rec = makeRecorder(954, 716, 636);
+  const sp = new Spectrum(rec.canvas);
+  sp.applyExternalBars(new Float32Array(N), new Float32Array(N).fill(0.5), null);
+  sp.render(0.016);
+  const zeroBars = barsOf(rec.events.filter((e) => e.op === "rect"));
+  ok(zeroBars.every((r) => near(r.h, PY_CONST.bh_min * s, 1e-9)),
+    "v = 0 时柱高 = 下限 " + PY_CONST.bh_min + "px（不是 0）");
+  ok(zeroBars.every((r) => near(r.alpha, 0.45, 1e-9)), "v = 0 时 α = 0.45（原版同式）");
 }
 
-/* ---------- 5. 瞬态保真度（用户 2026-10-03："频谱最好能精细反映歌曲里的鼓点、音色"） ----------
-   只靠低频 onset 时，只有底鼓会推起左峰 —— 军鼓 / 踩镲这类**宽带或高频**敲击
-   在显示上几乎看不出来。这里给三种典型敲击各喂一 tick，量"哪一半柱子在抬"：
-     · 底鼓型（55Hz）   → 应当抬 LOW 半区；
-     · 军鼓型（2kHz+噪声）→ 应当抬 HIGH 半区；
-     · 踩镲型（9kHz）   → 应当抬 HIGH 半区，且 LOW 半区几乎不动。
-   判据是**相对关系**（升高的重心在正确的一侧），不依赖具体幅度，因此对音量不敏感。
-   另外测"持续大音量不该被当成敲击"：底床连喂 60 tick 后 onset 门应当回落。 */
+/* ---------- 3. 回落 / 清零 / 读数口 ---------- */
+console.log("\n=== 3. 回落与清零 ===");
+const spD = new Spectrum(makeRecorder(954, 716, 636).canvas);
+spD.applyExternalBars(F.h, F.p, GAUGES);
+ok(spD.levels.length === N && spD.levels[10] === F.h[10],
+  "levels 直通引擎柱高（不重采样、不插值）", spD.levels.length + " 段");
+const before = spD.levels[90];
+const live = spD.decay();
+ok(near(spD.levels[90], before * 0.9, 1e-6) && live === true, "decay()：柱高 × 0.9，并报告仍在动",
+  spD.levels[90].toFixed(4));
+ok(near(spD.gauges.kick, GAUGES.kick * 0.9, 1e-6), "decay() 连指示条一起收");
+spD.resetPeaks();
+ok(spD.levels.every((v) => v === 0) && spD.peakLevels.every((v) => v === 0) &&
+  spD.gauges.kick === 0 && spD.gauges.cymbal === 0, "resetPeaks()：柱高 / 顶盖 / 指示条全清零");
 {
-  const SRC_SPEC = fs.readFileSync(path.join(SRC, "spectrum.ts"), "utf8");
-  const trBoost = Number((/const TRANSIENT_BOOST = ([\d.]+);/.exec(SRC_SPEC) || [])[1]);
-  /* 确定性伪随机：保证多次运行读数一致 */
-  let seed = 20261003;
-  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return (seed / 0x7fffffff) * 2 - 1; };
-  const tone = (partials, noise, offset) => {
-    const td = new Float32Array(N);
-    for (let i = 0; i < N; i++) {
-      const t = (offset + i) / SR;
-      let s = 0;
-      for (const [f, a] of partials) s += a * Math.sin(2 * Math.PI * f * t);
-      if (noise) s += noise * rnd();
-      td[i] = Math.max(-1, Math.min(1, s));
-    }
-    return td;
-  };
-  /* 底床：中低频铺底 + 少量宽带噪声，让整排柱子先站到中等高度。
-     噪声量可用 --trbednoise= 覆盖：白噪声会在每个频段都产生微小通量，
-     测试"频谱特异性"时应当把它关掉（那一层不是产品行为的问题）。 */
-  const BED_NOISE = CLI.trbednoise !== undefined ? Number(CLI.trbednoise) : 0.06;
-  const BED = [[160, 0.22], [320, 0.12]];
-  const bed = (k) => tone(BED, BED_NOISE, k * N);
-  const BURSTS = [
-    ["底鼓型 55Hz", [[55, 0.95], [110, 0.3]], 0.02, "LOW"],
-    ["军鼓型 2kHz+噪声", [[2000, 0.5]], 0.45, "HIGH"],
-    /* ★ 踩镲用例原为"纯 9kHz + 12kHz 正弦"，2026-10-08 改成**宽带型**：
-       那对纯音的频点恰好踩在两个坑上 —— 12kHz **超出频段覆盖上限**
-       （F_MAX_RATIO 0.45 × 24kHz = 10.8kHz，段 119 就是天花板），永远检测不到；
-       9kHz 落在"频段缝隙"里（段 116 的检测器在 9216Hz，偏 216Hz），
-       512 点窗的 Hann 主瓣半宽只有 ~187Hz，落在主瓣外只能靠旁瓣收（≈ −31dB）。
-       于是那一路 flux 近似为 0，门开不了。**这是用例选频不真实**，
-       不是产品缺陷 —— 真实踩镲是宽带的（5–14kHz 都有能量），
-       密集谐波 + 噪声铺满高频带时 onset = 1.0（见 dist/flux诊断.mjs）。 */
-    ["踩镲型 宽带（5.2–10kHz）", [[5200, 0.35], [6400, 0.4], [7600, 0.45], [8800, 0.45], [10000, 0.4]], 0.35, "HIGH"],
-  ];
-  console.log("=== 瞬态保真度（敲击的频谱形状能不能看出来；抬升量 = 敲击这一 tick 的柱高增量） ===");
-  console.log("  低半区 = 第 0–74 根（低频）；高半区 = 第 75–149 根（中高频）");
-  let allPass = true;
-  for (const [name, partials, noise, expectSide] of BURSTS) {
-    const sp = new Spectrum(canvasStub, SR);
-    sp.setMode("mix");
-    sp.applyParams();
-    sp.setAdvanceInterval(20);
-    sp.resetPeaks();
-    let off = 0;
-    for (let k = 0; k < 60; k++) { sp.update(bed(k), SR); off += N; }
-    const pre = Array.from(sp.levels);
-    const bedOnset = sp.snapshot().transient;
-    const fpreSnap = sp.snapshot().freq;
-    sp.update(tone(partials, noise, off), SR);
-    const post = Array.from(sp.levels);
-    const hitOnset = sp.snapshot().transient;
-    let lo = 0, hi = 0, bestAt = 0, best = -9;
-    for (let i = 0; i < 75; i++) lo += post[i] - pre[i];
-    for (let i = 75; SRC_BAR_N > i; i++) hi += post[i] - pre[i];
-    for (let i = 0; i < post.length; i++) { const d = post[i] - pre[i]; if (d > best) { best = d; bestAt = i; } }
-    lo /= 75; hi /= (SRC_BAR_N - 75);
-    const preLo = pre.slice(0, 75).reduce((a, b) => a + b, 0) / 75;
-    const preHi = pre.slice(75).reduce((a, b) => a + b, 0) / (SRC_BAR_N - 75);
-    const side = lo > hi ? "LOW" : "HIGH";
-    /* 三条判据：抬升重心在正确一侧、敲击时 onset 门确实打开、持续底床不误触发 */
-    const ok = side === expectSide && hitOnset > 0.3 && best > 0.02 && bedOnset < 0.3;
-    if (!ok) allPass = false;
-    console.log("  " + name.padEnd(16) + " 低半区 +" + f3(lo) + "  高半区 +" + f3(hi)
-      + "  （敲击前 低 " + f3(preLo) + " / 高 " + f3(preHi) + "）"
-      + "  峰值柱 #" + bestAt + " (+" + f3(best) + ")"
-      + "  onset 底床 " + f3(bedOnset) + " → 敲击 " + f3(hitOnset)
-      + "  → 抬升重心 " + side + (ok ? " ✓" : " ✗（期望 " + expectSide + "）"));
-    /* 粗粒度剖面（10 段）：确认抬升是不是"只落在它该在的频区"，而不是整排一起亮 */
-    const BUCK = 10, w = SRC_BAR_N / BUCK;
-    const prof = [];
-    for (let b = 0; b < BUCK; b++) {
-      let s = 0, c = 0;
-      for (let i = Math.floor(b * w); i < Math.floor((b + 1) * w); i++) { s += post[i] - pre[i]; c++; }
-      prof.push((s / Math.max(1, c)).toFixed(2));
-    }
-    console.log("      柱高增量剖面（低频→高频 10 段）：" + prof.join("  "));
-    const fpre = fpreSnap, fpost = sp.snapshot().freq;
-    const fp = [];
-    for (let b = 0; b < 12; b++) {
-      let s = 0, c = 0;
-      for (let i = Math.floor(b * 120 / 12); i < Math.floor((b + 1) * 120 / 12); i++) { s += fpost[i] - fpre[i]; c++; }
-      fp.push((s / Math.max(1, c)).toFixed(2));
-    }
-    console.log("      频段增量剖面（20Hz→10.8kHz 12 段）：" + fp.join(" "));
-  }
-  console.log("  瞬态强调系数 TRANSIENT_BOOST = " + trBoost + "（置 0 即关闭这一层）");
-  console.log("  结论：" + (allPass
-    ? "✓ 三种敲击各自抬起正确的半区，敲击的频谱形状被如实带出来"
-    : "✗ 有敲击没有抬起正确的一侧（或 onset 门未打开）"));
-  console.log("");
+  const spQuiet = new Spectrum(makeRecorder(954, 716, 636).canvas);
+  spQuiet.applyExternalBars(new Float32Array(N), new Float32Array(N), null);
+  ok(spQuiet.decay() === false, "全零之后 decay() 报告已经停稳（调用方据此降帧）");
 }
+let emptyOk = true;
+try {
+  const spE = new Spectrum(makeRecorder(954, 716, 636).canvas);
+  spE.render(0.016);
+  spE.decay();
+  spE.resetPeaks();
+} catch (e) {
+  emptyOk = false;
+}
+ok(emptyOk, "还没喂数据就渲染 / 回落 / 清零：不抛异常");
 
-/* ---------- 6. 音色灵敏度（用户 2026-10-03："对歌曲的音色要更加敏感"） ----------
-   音色就是频谱的**形状**。这里造两个"基频相同、响度相同、谐波结构相反"的稳态音：
-     · 「暗」：110Hz 及其低次谐波（能量压在低频）；
-     · 「亮」：110Hz 及高次泛音（5/8/12/16/20 次）。
-   两者在"低频厚、高频薄"的大轮廓上几乎一样，差别只落在形状细节里 ——
-   两个向量之间的距离越大，就说明频谱对音色的分辨力越强。
-   ★ 稳态音下柱高仍带抖动，所以这里采 30 帧取平均把抖动抹掉，量的才是形状。
-   ★ 对照方法：把 src/spectrum.ts 里的 TIMBRE_EXP_TREBLE 改回 2.1、TIMBRE_SHARPEN 改回 0
-     再跑一次本脚本，即可看到"未做音色增强"时的距离读数（这次不自动改源码）。 */
-{
-  const mkTone = (partials) => {
-    const td = new Float32Array(N);
-    for (let i = 0; i < N; i++) {
-      const t = i / SR;
-      let s = 0;
-      for (const [f, a] of partials) s += a * Math.sin(2 * Math.PI * f * t);
-      td[i] = Math.max(-1, Math.min(1, s));
-    }
-    /* 归一化到相同 RMS：响度不参与比较，测的纯粹是形状 */
-    let ms = 0;
-    for (let i = 0; i < N; i++) ms += td[i] * td[i];
-    const g = 0.5 / Math.max(1e-9, Math.sqrt(ms / N));
-    for (let i = 0; i < N; i++) td[i] *= g;
-    return td;
-  };
-  const DARK = [[110, 1], [220, 0.55], [330, 0.32], [440, 0.18]];
-  const BRIGHT = [[110, 0.5], [550, 0.62], [880, 0.58], [1320, 0.5], [1760, 0.42], [2200, 0.34]];
-  const steadyOf = (partials) => {
-    const sp = new Spectrum(canvasStub, SR);
-    sp.setMode("mix");
-    sp.applyParams();
-    sp.setAdvanceInterval(20);
-    sp.resetPeaks();
-    const td = mkTone(partials);
-    for (let k = 0; k < 90; k++) sp.update(td, SR); // 跑到稳态
-    const acc = new Array(SRC_BAR_N).fill(0);
-    for (let k = 0; k < 30; k++) { // 采 30 帧平均：抹掉抖动，只留形状
-      sp.update(td, SR);
-      const v = sp.levels;
-      for (let i = 0; i < v.length; i++) acc[i] += v[i] / 30;
-    }
-    return { bars: acc, freq: sp.snapshot().freq.slice(0, 120) };
-  };
-  const A = steadyOf(DARK);
-  const B = steadyOf(BRIGHT);
-  const l1 = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]); return s / a.length; };
-  const avgRange = (a, from, to) => { let s = 0; for (let i = from; i < to; i++) s += a[i]; return s / (to - from); };
-  const roughOf = (a) => { let s = 0; for (let i = 1; i < a.length; i++) s += Math.abs(a[i] - a[i - 1]); return s / (a.length - 1); };
-  const HALF = Math.floor(SRC_BAR_N / 2);
-  const peak = (a) => Math.max(...a);
-  const barDist = l1(A.bars, B.bars);
-  const freqDist = l1(A.freq, B.freq);
-  const aHi = avgRange(A.bars, HALF, SRC_BAR_N);
-  const bHi = avgRange(B.bars, HALF, SRC_BAR_N);
-  const aLo = peak(A.bars.slice(0, Math.floor(SRC_BAR_N * 0.1)));
-  const bLo = peak(B.bars.slice(0, Math.floor(SRC_BAR_N * 0.1)));
-  const expTreble = Number((/const TIMBRE_EXP_TREBLE = ([\d.]+);/.exec(spSrc) || [])[1]);
-  const sharp = Number((/const TIMBRE_SHARPEN = ([\d.]+);/.exec(spSrc) || [])[1]);
-  console.log("=== 音色灵敏度（两个同基频、同响度的稳态音：低次谐波 vs 高次泛音） ===");
-  console.log("  中高频半区（第 " + HALF + "–" + (SRC_BAR_N - 1) + " 根）平均柱高：暗音色 " + f3(aHi)
-    + " / 亮音色 " + f3(bHi) + "（差 " + f3(bHi - aHi) + "）"
-    + "  ← 差异越大 = 泛音结构越看得出来");
-  console.log("  左峰高度：暗音色 " + f3(aLo) + " / 亮音色 " + f3(bLo) + "（差 " + f3(Math.abs(aLo - bLo)) + "）"
-    + "  ← 越接近 = 高频细节没有把低频峰挤掉");
-  console.log("  ★ 柱高形状距离（150 维 L1）= " + f3(barDist) + "  ← 用户在屏幕上能否分辨这两种音色，看这个");
-  console.log("  ★ 频段形状距离（120 维 L1）= " + f3(freqDist) + "  ← 谱锐化那一层直接作用在这 120 段上");
-  console.log("  相邻柱高差（细节度）：暗 " + f3(roughOf(A.bars)) + " / 亮 " + f3(roughOf(B.bars))
-    + "  ← 越大 = 峰谷越分明（音色的「纹理」越清晰）");
-  console.log("  音色层参数：幂次低端 2.1 → 高端 " + expTreble + "，谱锐化 " + sharp
-    + "（置 2.1 / 0 即回到 1.3.0 的原始观感）");
-  /* ★ 左峰差的阈值 2026-10-08 由 0.1 放宽到 0.12（配合降窗 512）。
-     成因（不是产品退化，别据此去调 bandBoost）：
-       · 两个测试信号的**基频振幅本来就不同** —— DARK 的 110Hz 是 1.0、BRIGHT 只有 0.5，
-         所以"亮音色左峰更低"一半是信号设定造成的，不是"被高频挤掉"；
-       · 降窗后高频 mags 相对更突出，本帧归一化的分母 mx 更被高频主导，
-         低频段读数被压得更低，这个**相对差**因此从 0.069 变到 0.101；
-       · 但左峰的**绝对高度**仍在高位（暗 0.73 / 亮 0.63），"低频厚"的观感没有丢 ——
-         真正代表"用户能否分辨音色"的主指标是下面的柱高形状距离，
-         它反而从降窗前的 0.178 提升到 0.25+（这正是用户要的"区分度极端"）。 */
-  const LEFT_PEAK_TOL = 0.12;
-  const ok = bHi > aHi + 0.02 && Math.abs(aLo - bLo) < LEFT_PEAK_TOL && barDist > 0.02;
-  console.log("  结论：" + (ok
-    ? "✓ 高次泛音型音色在中高频明显更高、低频峰高度基本不动 —— 频谱能分辨音色"
-    : "✗ 两种音色的形状区分度不足（或低频峰被高频细节挤掉）"));
-  console.log("");
-}
+/* ---------- 汇总 ---------- */
+console.log("\n" + "=".repeat(64));
+console.log(fail === 0
+  ? "★ 频谱离线观测（绘制层 ↔ visualizer.py 对拍）：" + pass + " 项全绿"
+  : "✗ 频谱离线观测：" + pass + " 通过 / " + fail + " 失败");
+console.log("=".repeat(64));
+process.exit(fail === 0 ? 0 : 1);

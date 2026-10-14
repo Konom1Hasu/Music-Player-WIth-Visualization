@@ -1,11 +1,13 @@
 /*
  * 频谱画面观测：驱动产物 exe，进详情态（合成信号 viztest），把频谱那块截下来 + 抓柱高快照。
  *
- * 用途：算法换成 SelfMusic 档（96 段 → 150 柱，见 selfmusic-spectrum.ts）之后，
+ * 用途：频谱全量换成 SelfMusic 档（引擎 96 段直画，见 selfmusic-spectrum.ts / spectrum.ts）之后，
  *   "画布上长什么样"要能被人看到、也能被脚本读到。这个脚本一次做两件事：
  *     ① 截两张图（全页 + 频谱放大）—— 给人看；
- *     ② 连采 N 帧 `__spectrum` 的 bars / display / peaks，落 JSON —— 给量化用。
+ *     ② 连采 N 帧 `__spectrum` 的 bars / peaks / gauges，落 JSON —— 给量化用。
  *   两者都存进 dist\（本地 scratch 区）。
+ *   ★ v2.7.7：显示侧的插值（display）随旧绘制层一起删了 —— 画的就是 bars 本身，
+ *     所以快照只有 bars / peaks / gauges 三样。
  *
  * 用法：node scripts\探针\频谱画面观测.cjs [采样帧数，默认 24]
  */
@@ -118,12 +120,12 @@ const SONG = { id: 'tl1', title: 'Viz Check', artist: 'Rhine Lab', album: 'Probe
   })()`);
   console.log('截图前状态:', state);
 
-  /* 连采柱高快照：bars（算法输出，直接画的目标）/ display（插值后的即时绘制值）/ peaks（峰值线） */
+  /* 连采柱高快照：bars（引擎输出，直接画的）/ peaks（顶盖）/ gauges（四路音色活跃度） */
   const frames = [];
   for (let k = 0; k < N_SAMPLE; k++) {
     const one = await ev(`(()=>{
       const sp = window.__spectrum; if (!sp) return null;
-      return JSON.stringify({ bars: Array.from(sp.bars), disp: Array.from(sp.display), peaks: Array.from(sp.peaks) });
+      return JSON.stringify({ bars: Array.from(sp.bars), peaks: Array.from(sp.peaks), gauges: { ...sp.gauges } });
     })()`);
     if (one) frames.push(JSON.parse(one));
     await wait(60);

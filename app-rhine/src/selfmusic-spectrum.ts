@@ -351,6 +351,8 @@ export class SelfSpectrumEngine {
   readonly heights: Float32Array;
   /** 峰值顶盖（×peakFall 衰减；供渲染层取用，可选） */
   readonly lastPeaks: Float32Array;
+  /** 四路音色活跃度（照 selfmusic.py 的 last_timbre；渲染层左上角指示条用）。 */
+  readonly lastTimbre = { kick: 0, bass: 0, vocal: 0, cymbal: 0 };
 
   /** 环形时域缓冲 */
   private ring: Float32Array;
@@ -752,6 +754,8 @@ export class SelfSpectrumEngine {
     this.contrastSm.fill(1.0);
     this.agcEnv.fill(0);
     this.timbreEnv.fill(0);
+    this.lastTimbre.kick = 0; this.lastTimbre.bass = 0;
+    this.lastTimbre.vocal = 0; this.lastTimbre.cymbal = 0;
     this.emphasis.fill(1.0);
     this.timbreMa.fill(1e-6);
     this.rmsMa = 0; this.onset = 0; this.bassMa = 0; this.surge = 0;
@@ -875,6 +879,11 @@ export class SelfSpectrumEngine {
       const v = Math.max(act[t], this.timbreEnv[t] * this._fTimbre);
       this.timbreEnv[t] = v;
     }
+    /* 快照（照 selfmusic.py 的 last_timbre：取平滑后的 env 值，f32 存储读成 number） */
+    this.lastTimbre.kick = this.timbreEnv[0];
+    this.lastTimbre.bass = this.timbreEnv[1];
+    this.lastTimbre.vocal = this.timbreEnv[2];
+    this.lastTimbre.cymbal = this.timbreEnv[3];
     for (let i = 0; i < B; i++) {
       let emph = 0;
       for (let t = 0; t < 4; t++) {

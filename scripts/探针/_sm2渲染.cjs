@@ -1,8 +1,9 @@
 /*
  * 「还原 + 更激进」定档渲染：驱动产物 exe（viztest + rhine-diag），冻结渲染四档 × 3 帧 → 截图。
  * 数据源：dist/_sm2出图.json（旧引擎素材 / 新·原版裸 / 新·默认 / 新·更激进）。
- * 冻结手法与 _激进渲染.cjs 相同：打桩 applyExternalBars/update/decay + 直写
- * bars / prevBars / display / peaks。
+ * 冻结手法与 _激进渲染.cjs 相同：打桩 applyExternalBars/decay + 直写 bars / peaks / gauges。
+ * ★ v2.7.7：绘制层换成 SelfMusic 直译后，显示侧不再有插值（prevBars / display 两个数组没了）
+ *   —— 画面每帧就是 bars 本身，所以这里只写 bars / peaks。
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -97,7 +98,6 @@ const slug = (s) => s.replace(/[^\w\u4e00-\u9fa5]+/g, '').slice(0, 14);
     const sp = window.__spectrum; if (!sp) return 'no-spectrum';
     window.__origAEB = sp.applyExternalBars.bind(sp);
     sp.applyExternalBars = () => {};
-    sp.update = () => {};
     sp.decay = () => {};
     document.body.classList.remove('rhine-night');
     return 'frozen; bars=' + sp.bars.length;
@@ -124,8 +124,8 @@ const slug = (s) => s.replace(/[^\w\u4e00-\u9fa5]+/g, '').slice(0, 14);
       const set = await ev(`(()=>{
         const sp = window.__spectrum;
         const d = ${JSON.stringify(fr.data)};
-        for (let i = 0; i < sp.bars.length; i++) { const v = i < d.length ? d[i] : 0; sp.bars[i] = v; sp.prevBars[i] = v; sp.display[i] = v; sp.peaks[i] = v; }
-        return JSON.stringify({ n: d.length, h0: sp.display[0], h10: sp.display[10], h75: sp.display[75] });
+        for (let i = 0; i < sp.bars.length; i++) { const v = i < d.length ? d[i] : 0; sp.bars[i] = v; sp.peaks[i] = v; }
+        return JSON.stringify({ n: d.length, h0: sp.bars[0], h10: sp.bars[10], h75: sp.bars[75] });
       })()`);
       await wait(450);
       const hash = crypto.createHash('md5').update(Buffer.from(Float32Array.from(fr.data).buffer)).digest('hex').slice(0, 8);

@@ -152,8 +152,12 @@ const RE = /DevTools listening on (ws:\/\/[^\s]+)/;
   } else {
     console.log('  （没拿到间隔样本：诊断开关可能没生效）');
   }
-  console.log('  分析节拍 cadenceMs = ' + (await ev('window.__rhineViz.cadenceMs')) + 'ms（应为 20）');
-  console.log('  worker 生效 = ' + (await ev('window.__rhineViz.workerOn')));
+  /* v2.7.7：分析节拍固定 16ms（SelfMusic 的 QTimer）；worker 那条路随旧流水线一起删了，
+     改报活路径状态（pcm / stream / wait）与实际 tick 频率。 */
+  console.log('  分析节拍 cadenceMs = ' + (await ev('window.__rhineViz.cadenceMs')) + 'ms（应为 16）');
+  console.log('  分析 tick 实测 = ' + (await ev('window.__rhineViz.tickFps')) + ' Hz（应为 ~62）');
+  console.log('  活路径模式 = ' + (await ev('window.__rhineViz.mode'))
+    + '（pcm = 整曲解码正常；stream = 回退流式；wait = 解码中）');
 
   try { child.kill(); } catch {}
   process.exit(0);

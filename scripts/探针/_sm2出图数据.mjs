@@ -38,17 +38,12 @@ function readWav(buf) {
 }
 
 const { sr, data } = readWav(fs.readFileSync(path.join(root, "dist", "_ref视频帧", "ref.wav")));
-const WIN = 4096, BAR_N = 150;
+const WIN = 4096;
 
-function resample(h) {
-  const out = new Float32Array(BAR_N);
-  for (let i = 0; i < BAR_N; i++) {
-    const x = (i / (BAR_N - 1)) * (h.length - 1);
-    const i0 = Math.floor(x), i1 = Math.min(h.length - 1, i0 + 1), f = x - i0;
-    out[i] = h[i0] * (1 - f) + h[i1] * f;
-  }
-  return out;
-}
+/* ★ v2.7.7：出图数据就是**引擎输出的 96 条**，不再重采样到 150 —— 绘制层已经改成直画
+   引擎频段数（96→150 的线性重采样随旧流水线一起删了）。这里再重采样的话，冻结点进画布的
+   就只剩前 64% 的频段（低频被拉满整个画面），出图全错。 */
+const BAR_N = 96;
 
 /* V5 形态：T0=190.0s、20ms 驱动（窗首 [190.0+j*960, +4096)）、每 5 tick 记录一帧 */
 function runChain(display) {
@@ -59,7 +54,10 @@ function runChain(display) {
     const wStart = t0 + j * 960;
     eng.push(data.subarray(wStart, wStart + WIN));
     const h = eng.compute();
-    if (j % 5 === 0) rows.push(Array.from(resample(h), (v) => Math.round(v * 1e8) / 1e8));
+    if (j % 5 === 0) {
+      if (h.length !== BAR_N) throw new Error("引擎频段数变了：" + h.length + " ≠ " + BAR_N);
+      rows.push(Array.from(h, (v) => Math.round(v * 1e8) / 1e8));
+    }
   }
   return rows;
 }
@@ -73,10 +71,10 @@ out.rows.push({ name: "滑块顺滑3", frames: runChain(p("smooth", 3)) });
 out.rows.push({ name: "滑块尖塔340谷深20", frames: runChain(Object.assign(p("expanda", 340), p("valley", 20))) });
 
 fs.writeFileSync(path.join(root, "dist", "_sm2出图.json"), JSON.stringify(out));
-console.log("五档数据落盘 dist/_sm2出图.json");
+console.log("五档数据落盘 dist/_sm2出图.json（每帧 " + BAR_N + " 条 = 引擎频段数）");
 for (const r of out.rows) {
   const f0 = r.frames[0];
-  const mean = (r.frames[10].reduce((a, x) => a + x, 0) / 150).toFixed(3);
+  const mean = (r.frames[10].reduce((a, x) => a + x, 0) / BAR_N).toFixed(3);
   console.log(`${r.name}: f0 前8 = ` + f0.slice(0, 8).map((v) => v.toFixed(3)).join(" ") + `  f10均值=${mean}`);
 }
 fs.unlinkSync(TMP);

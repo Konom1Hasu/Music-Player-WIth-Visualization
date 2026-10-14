@@ -96,8 +96,9 @@ const html = `<!DOCTYPE html>
   <p class="sub">
     同一段真实音乐（参考原声 190.0s 起，每帧相隔 20ms），<b>产物 exe 的实际渲染器出图</b>，逐帧冻结、同口径。<br>
     引擎 = <b>SelfMusic 最新版全量移植</b>（web/spectrum.mjs 内核 + selfmusic.py 的全部可调显示层 16 项）；
-    默认档 = <b>你机器上 SelfMusic 的实跑值</b>（非面板出厂默认）；活路径（原生采样率 PCM / 平滑时钟 /
-    16ms 节拍 / 位置前视窗）同样与 SelfMusic 对齐 —— 活路径对拍 400 帧 heights+peaks max|Δ| = 1.8e-07。<br>
+    绘制层 = <b>visualizer.py 的 Canvas 直译</b>（柱贴底 / 槽位 70% / 逐柱 α / 顶盖 2px 悬 3px / 左上四路指示条），
+    <b>96 段直画</b>（不再重采样）；默认档 = <b>你机器上 SelfMusic 的实跑值</b>（非面板出厂默认）；
+    活路径（原生采样率 PCM / 平滑时钟 / 16ms 节拍 / 位置前视窗）同样与 SelfMusic 对齐。<br>
     十六枚滑块在「系统设置 → SELF-MUSIC VISUALIZER」，<b>拖动实时生效</b>并自动记住，RESET 一键回默认。
   </p>
   <div class="hint">
@@ -111,7 +112,9 @@ const html = `<!DOCTYPE html>
     （中性 / 实测档 / 扫档，各 1000 帧 × 96 条）与逐项 16 + 累进 16 档对拍全绿；<b>活路径对拍</b>（同一 PCM +
     同一 (位置, 帧间隔) 序列，400 帧 × heights+peaks 双通道）max|Δ| = 1.788e-07；真实 wav 驱动 exe 的
     活路径 smoke（mode=pcm / 48000Hz / 位置推进）通过。
-    <br><b>滑块路径</b>：拖动 → localStorage('rhine-sm-display') 落盘 → 下一分析 tick 应用；实测 head 300→120 使均值 +41%、smooth 0→3 使相邻柱差 -79%。
+    <br><b>绘制层对拍</b>（v2.7.7）：从 visualizer.py 源码抽常量与公式 → 与 spectrum.ts 发出的绘制指令逐条比
+    （72 项全绿）；再把产物 exe 的画面像素读回来量几何 —— 96 根柱的柱顶/贴底/顶盖位置/指示条全中（10 项全绿）。
+    <br><b>滑块路径</b>：拖动 → localStorage('rhine-sm-display') 落盘 → 下一分析 tick 应用；实测 head 300→120 使均值 +49%、smooth 0→3 使相邻柱差 -83%。
   </div>
 </body>
 </html>`;
