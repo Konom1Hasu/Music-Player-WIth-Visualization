@@ -2074,23 +2074,47 @@ function startSelfmusicPcm(s: Song) {
 /* ---------- 可视化调节（十六滑块）：存储 + 应用 ----------
    滑块键、范围、默认值与换算全部照 SelfMusic mainwindow 的「可视化调节」面板
    （在 selfmusic-spectrum.ts 里与那边逐项对齐：SELFMUSIC_SLIDER_* 与 smSliderPatch）。
-   当前值存 localStorage；拖动时经 setSmDisplayValue → 引擎 setDisplayParams 实时生效。 */
+   当前值存 localStorage；拖动时经 setSmDisplayValue → 引擎 setDisplayParams 实时生效。
+   ★ 存储格式 v2（2026-10-14）：{ v: 2, values: {…16 项} }。
+     v1 = 无版本戳的裸对象（v2.7.5 及更早写下的档）。它定格在**旧出厂档**上，会遮住
+     v2.7.6 起升级的「用户 SelfMusic 实测档」——面板里 12 项值与 SelfMusic 面板不符
+     （用户反馈"参数也要复刻"的实锤：rhine-sm-display 里是 knee78/detail50/timbre45…）。
+     读到 v1 → **不再沿用**，一次性升级为当前出厂档并写回 v2；v2 档按原样读回，
+     用户此后自己调出的值不会再被迁移动到。 */
 const LS_SM_DISPLAY = "rhine-sm-display";
+const SM_STORE_VERSION = 2;
 const SM_KEYS = Object.keys(SELFMUSIC_SLIDER_DEFAULTS) as SmSliderKey[];
 let smDisplayValues: Record<SmSliderKey, number> = { ...SELFMUSIC_SLIDER_DEFAULTS };
 
-/** 读存储（脏值逐键回落默认，并按滑块范围夹住） */
+/** 存档写回（v2 格式） */
+function persistSmDisplayValues(v: Record<SmSliderKey, number>) {
+  try {
+    localStorage.setItem(LS_SM_DISPLAY, JSON.stringify({ v: SM_STORE_VERSION, values: v }));
+  } catch { /* ignore */ }
+}
+/** 读存储（脏值逐键回落默认，并按滑块范围夹住）。
+    ★ v1 档（无版本戳的裸对象）、或损坏档 → 不沿用：直接以当前出厂档收尾并写回 v2
+    （见上方说明）。无键（从未存过）→ 只返回默认，不写。 */
 export function readSmDisplayValues(): Record<SmSliderKey, number> {
-  let raw: Record<string, unknown> = {};
-  try { raw = JSON.parse(localStorage.getItem(LS_SM_DISPLAY) || "{}") || {}; } catch { raw = {}; }
   const out = { ...SELFMUSIC_SLIDER_DEFAULTS };
-  for (const k of SM_KEYS) {
-    const v = Number(raw[k]);
-    if (isFinite(v)) {
-      const [lo, hi] = SELFMUSIC_SLIDER_RANGES[k];
-      out[k] = Math.max(lo, Math.min(hi, Math.round(v)));
+  let raw: string | null = null;
+  try { raw = localStorage.getItem(LS_SM_DISPLAY); } catch { raw = null; }
+  if (raw === null) return out;                        // 从未存过 → 不落盘
+  let parsed: unknown = null;
+  try { parsed = JSON.parse(raw); } catch { parsed = null; }
+  const obj = (parsed && typeof parsed === "object") ? (parsed as Record<string, unknown>) : null;
+  if (obj && Number(obj.v) === SM_STORE_VERSION) {
+    const values = (obj.values && typeof obj.values === "object" ? obj.values : {}) as Record<string, unknown>;
+    for (const k of SM_KEYS) {
+      const v = Number(values[k]);
+      if (isFinite(v)) {
+        const [lo, hi] = SELFMUSIC_SLIDER_RANGES[k];
+        out[k] = Math.max(lo, Math.min(hi, Math.round(v)));
+      }
     }
+    return out;
   }
+  persistSmDisplayValues(out);   // v1 / 脏 / 损坏 → 一次性升级写回
   return out;
 }
 /** 当前十六值（UI 回显用；以存储为准） */
@@ -2114,14 +2138,20 @@ export function setSmDisplayValue(key: SmSliderKey, value: number) {
   const v = readSmDisplayValues();
   const [lo, hi] = SELFMUSIC_SLIDER_RANGES[key];
   v[key] = Math.max(lo, Math.min(hi, Math.round(value)));
-  try { localStorage.setItem(LS_SM_DISPLAY, JSON.stringify(v)); } catch { /* ignore */ }
+  persistSmDisplayValues(v);
   applySmValues(v);
 }
-/** 一键重置：清掉存储、所有滑块回到出厂默认（= 用户 SelfMusic 实测档，见 selfmusic-spectrum.ts） */
+/** 一键重置：所有滑块回到出厂默认（= 用户 SelfMusic 实测档，见 selfmusic-spectrum.ts）。
+    写回 v2 存档（不是 removeItem —— 存储里明确留下"已升级"的档，与迁移后的形态一致）。 */
 export function resetSmDisplayValues() {
-  try { localStorage.removeItem(LS_SM_DISPLAY); } catch { /* ignore */ }
-  applySmValues({ ...SELFMUSIC_SLIDER_DEFAULTS });
+  const v = { ...SELFMUSIC_SLIDER_DEFAULTS };
+  persistSmDisplayValues(v);
+  applySmValues(v);
 }
+/* ★ 启动即读一次（不等任何用户动作）：v1 旧档会在读到时一次性升级为 v2。
+   以前只在引擎懒建（进详情页）/ 面板渲染时读取 —— 用户不进详情页就不会升级，
+   面板打开前看到的可能还是旧值。模块被 import 时执行（渲染进程里 localStorage 随时可用）。 */
+readSmDisplayValues();
 /* ---------- 频谱：SelfMusic 桌面端引擎 + 绘制直译（见 selfmusic-spectrum.ts / spectrum.ts） ---------- */
 let actx: AudioContext | null = null;
 let analyserNode: AnalyserNode | null = null;
