@@ -87,24 +87,7 @@ let currentId: string | null = null;
    所以 currentId 和 loadedId 要分开：前者是"界面上的当前曲目"，后者是"音频里的那一首"。 */
 let loadedId: string | null = null;
 let mode = "list"; // list | order | single | shuffle
-/* 诊断开关：URL 参数或 localStorage（探针页刷新后仍要生效，于是也认 localStorage）。
-   只把内部对象挂到 window 上，不改变任何播放 / 频谱行为。 */
-const LS_VIZ_TEST = (() => {
-  try {
-    return localStorage.getItem("rhine-viztest") === "1";
-  } catch {
-    return false;
-  }
-})();
-const LS_DIAG = (() => {
-  try {
-    return localStorage.getItem("rhine-diag") === "1";
-  } catch {
-    return false;
-  }
-})();
-const VIZ_TEST = new URLSearchParams(location.search).get("viztest") === "1" || LS_VIZ_TEST;
-const DIAG = new URLSearchParams(location.search).get("diag") === "1" || LS_DIAG;
+/* 调试钩子已移除（原 ?viztest / ?diag 开关） */
 const LIB_LOAD_TIMEOUT = 8000;
 let orderSeq = 0;
 let currentUrl: string | null = null;
@@ -822,16 +805,6 @@ function armPendingSeek(s: Song) {
   pendingSeek = rememberPos() && s.pos > 3 ? s.pos : 0;
   posSavedAt = rememberPos() && s.pos > 3 ? s.pos : 0;
 }
-function diagLoad(s: Song) {
-  if (!DIAG) return;
-  (window as any).__lastLoad = {
-    id: s.id,
-    title: s.title,
-    pos: s.pos,
-    pendingSeek,
-    urlKind: s.srcUrl ? (s.path ? "bili" : "url") : s.file ? "blob" : "none",
-  };
-}
 /** 装 B 站缓存那一路的音源：**走内存读取（blob）**。
     ────────────────────────────────────────────────────────────
     这里曾经改成"副本 file:// 直读优先、失败再降级 blob"，理由是省一次 IPC + 少占内存。
@@ -847,7 +820,6 @@ async function loadBiliAudio(s: Song, autoplay: boolean) {
   const token = ++loadSeq;
   loadedId = null; // 装好之前不算"已装载"，用户这时点它 playAt 会真的来加载
   armPendingSeek(s);
-  diagLoad(s);
   if (autoplay) audio.pause(); // 先把上一首停住，免得异步备源期间它还在响
   /* 首次走这条路时，把曲库里历史遗留的 8.3 短名路径修成长名。
      一次性、很轻（每首两次 stat），但能彻底断掉"文件不存在：C:\Users\KONOMI~1\..."。 */
@@ -1088,7 +1060,6 @@ export async function rereadAllCovers() {
   }
   loadedId = s.id;
   armPendingSeek(s);
-  diagLoad(s);
 }
 function selectSong(id: string, autoplay = false) {
   /* ★ 离开这一首时**不落位置**了：以前这里会把 audio.currentTime 写进 leaving.pos 再落库，
@@ -1174,7 +1145,6 @@ export function playAt(i: number) {
   followWithArchive(i);
 }
 /* 诊断开关：?viztest=1 / ?diag=1 时把播放内核挂到 window 上，自动化核对"点歌续播"用 */
-if (VIZ_TEST || DIAG) (window as any).__playAt = playAt;
 /* 「下一首播放」：把曲目排到当前这首后面（不动曲库顺序，只在队列里记 id） */
 let nextQueue: string[] = [];
 export function queueNext(id: string) {
@@ -2189,7 +2159,7 @@ let spectrum: Spectrum | null = null;
 /* 这一 tick 要分析吗：播放中、或 ?viztest 的合成信号。暂停后不需要分析
    （柱高回落由 rAF 那条循环的 decay() 负责）。 */
 function vizAnalysing() {
-  return VIZ_TEST || (Boolean(analyserNode) && !audio.paused);
+  return Boolean(analyserNode) && !audio.paused;
 }
 /** 起分析定时器（幂等：已经在跑就不重复起）。
     节拍固定 16ms —— 与 SelfMusic mainwindow 的 QTimer（v2.7.6 起唯一档）一致。 */
@@ -2215,16 +2185,6 @@ function analysisTick() {
     vizTickFps = Math.round((vizTickCount * 1000) / (nowMs - vizTickT0));
     vizTickCount = 0;
     vizTickT0 = nowMs;
-  }
-  if (VIZ_TEST) {
-    if (!spectrum) return;
-    if (!timeDataRef || timeDataRef.length !== SPECTRUM_WINDOW_REF) timeDataRef = new Float32Array(SPECTRUM_WINDOW_REF);
-    vizTestTimeData(timeDataRef);
-    smPublishWindow(timeDataRef);
-  } else if (analyserNode && spectrum) {
-    smTickFrame();
-  } else if (spectrum) {
-    spectrum.decay();
   }
   armVizAnalysis();
 }
@@ -2456,8 +2416,6 @@ function paintTicks(now = 0) {
     }
   }
 }
-/* 诊断对象：?viztest=1 时暴露到 window.__rhineViz，用于自动化核对帧率与观感指标 */
-const vizDiag: Record<string, unknown> = { frames: 0, fps: 0 };
 function vizFrame(ts: number) {
   vizRaf = 0;
   /* 渲染节拍：播放中 60fps（16ms 预算），暂停后 15fps（只画收起动画）。
@@ -2473,7 +2431,7 @@ function vizFrame(ts: number) {
      实际帧率被削到 ~55fps。现在跟着 rAF 走满刷新率。
      暂停后仍降到 64ms（≈15fps）：收起动画本身就是频谱的一部分，停掉会让画面僵住，
      但没必要按满帧率跑没人看的画面。 */
-  const busy = VIZ_TEST || !audio.paused;
+  const busy = !audio.paused;
   const budget = busy ? 0 : 64;
   if (ts - vizLast < budget) {
     vizRaf = requestAnimationFrame(vizFrame);
@@ -2486,24 +2444,8 @@ function vizFrame(ts: number) {
   }
   armVizAnalysis();
   paintTicks(ts);
-  const d = vizDiag as any;
-  d.frames++;
-  d.rendered = (d.rendered || 0) + 1;
-  d.dt = Math.round(dt * 1000);
-  d.busy = busy;
   /* 帧间隔分布：中位数与 p90 比"平均帧率"更能看出卡顿（探针用它判断是否真顺） */
-  if (DIAG) {
-    (d.intervals || (d.intervals = [])).push(Math.round(dt * 1000));
-    if (d.intervals.length > 240) d.intervals.shift();
-  }
-  d.cadenceMs = SM_ANALYSIS_MS; // 分析节拍固定 16ms（SelfMusic QTimer）
-  d.tickFps = vizTickFps;       // 实测的分析 tick 频率（应 ≈62）
   /* 活路径状态（v2.7.7）：mode=pcm 为正常，stream 为解码失败回退，wait 为解码中 */
-  d.mode = smPcmState;
-  d.rate = smPcmRate;
-  d.posMs = smDriver ? Math.round(smDriver.positionMs) : 0;
-  d.bars = spectrum ? spectrum.levels.length : 0;
-  if (spectrum) d.gauges = { ...spectrum.gauges };
   vizRaf = requestAnimationFrame(vizFrame);
 }
 function vizStop() {
@@ -3278,10 +3220,9 @@ export function mountSongEdit(root: ParentNode) {
   if (cv) {
     spectrum = new Spectrum(cv);
     spectrum.setPalette(spectrumPalette());
-    if (VIZ_TEST || DIAG) (window as any).__rhineViz = vizDiag;
   }
   if (!vizRaf) {
-    const live = (analyserNode && !audio.paused) || VIZ_TEST;
+    const live = Boolean(analyserNode) && !audio.paused;
     if (live || spectrum) vizRaf = requestAnimationFrame(vizFrame);
   }
   armVizAnalysis();
@@ -3475,41 +3416,9 @@ export function mountSongDetail(root: ParentNode) {
     spectrum = new Spectrum(cv);
     spectrum.setPalette(spectrumPalette());
     // 诊断开关：?viztest=1 时把实例与帧率对象挂到 window 上，便于自动化核对（见功能说明）
-    if (VIZ_TEST || DIAG) {
-      (window as any).__audioEl = audio;
-      (window as any).__rhineViz = vizDiag;
-      /* 歌词推进的诊断入口：给一个秒数 → 等价于"播到那一秒"。
-         验证脚本拿它核对高亮行与滚动位置（真实 audio 在无音源时推不动）。 */
-      (window as any).__rhineLyricSeek = (sec: number) => setLyricTimeForTest(sec);
-      (window as any).__rhineStepLyrics = () => stepLyrics();
-      /* SelfMusic 活路径状态（诊断/探针）：模式（wait/pcm/stream）、原生采样率、
-         平滑时钟位置、上一帧真实间隔、引擎采样率、实时柱高样例。 */
-      (window as any).__smState = () => ({
-        mode: smPcmState,
-        rate: smPcmRate,
-        durMs: smPcmDurMs,
-        posMs: smDriver ? Math.round(smDriver.positionMs) : 0,
-        dtMs: Math.round(smLastTickDt * 10) / 10,
-        engineRate: refEngine ? Number((refEngine as any).sampleRate) || 0 : 0,
-        bars: smDriver && smDriver.lastHeights
-          ? Array.from(smDriver.lastHeights.slice(0, 6)).map((v) => +Number(v).toFixed(4))
-          : null,
-      });
-      if (VIZ_TEST) {
-        (window as any).__spectrum = spectrum;
-        // 合成信号的峰值：用来核对 ?viztest=1 的时域数据到底有没有在跑
-        (window as any).__vizTestProbe = () => {
-          const out = new Float32Array(SPECTRUM_WINDOW_REF);
-          const beat = vizTestTimeData(out);
-          let peak = 0;
-          for (let i = 0; i < out.length; i++) peak = Math.max(peak, Math.abs(out[i]));
-          return { beat, peak, sr: actx?.sampleRate ?? 0 };
-        };
-      }
-    }
   }
   if (vizRaf) return;
-  const live = (analyserNode && !audio.paused) || VIZ_TEST;
+  const live = Boolean(analyserNode) && !audio.paused;
   if (live) vizRaf = requestAnimationFrame(vizFrame);
   armVizAnalysis();
 }
@@ -3606,13 +3515,11 @@ audio.addEventListener("loadedmetadata", () => {
   if (pendingSeek > 3 && audio.duration && pendingSeek < audio.duration - Math.max(5, audio.duration * 0.04)) {
     try {
       audio.currentTime = pendingSeek;
-      if (DIAG) (window as any).__lastSeek = { at: "loadedmetadata", want: pendingSeek, got: audio.currentTime };
       if (Math.abs(audio.currentTime - pendingSeek) < 1) pendingSeek = 0;
     } catch {
       pendingSeek = 0;
     }
   } else {
-    if (DIAG) (window as any).__lastSeek = { at: "loadedmetadata", want: pendingSeek || 0, got: -1, skipped: true };
     pendingSeek = 0;
   }
 });
@@ -3730,7 +3637,6 @@ function restorePlayhead() {
   if (tc) tc.textContent = fmt(pos);
   if (td) td.textContent = dur > 0 ? fmt(dur) : "--:--";
   markRestored(true);
-  if (DIAG) (window as any).__restored = { id: s.id, title: s.title, pos, dur };
   // 让档案阵列与详情面板也停在上一首上（用户看到的是"上次听的这首"）
   const index = songs.findIndex((x) => x.id === s.id);
   if (index >= 0) window.dispatchEvent(new CustomEvent("rhine-track", { detail: index }));
@@ -4089,7 +3995,6 @@ function applyLibrary(saved: Song[]) {
        旧版本写进库里的那些值就此作废，不会再让某首歌"从中间开始放"。 */
     for (const s of songs) s.pos = 0;
   }
-  if (VIZ_TEST) (window as any).__libraryLoaded = songs.length;
   /* 曲库到位后：先按用户选的顺序排好（默认＝导入顺序），再清历史重复、恢复播放条，
      最后刷阵列 / 列表 / 详情 */
   applySort();
