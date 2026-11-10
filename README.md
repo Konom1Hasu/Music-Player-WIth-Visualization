@@ -540,6 +540,26 @@ Windows 操作系统的媒体控制键属于**独占**系统级资源，同一�
 > 如果这份署名有不准确或需要补充的地方，请提 issue，我会立刻更正。
 
 ---
+## 贡献者
+
+本项目的界面与三维资产并非从零搭建，而是在上游开源项目的基础上改造而来，贡献者按来源分列如下。
+
+**本项目**
+
+- **Konom1Hasu** —— 播放器内核、曲库与播放逻辑、频谱可视化接入、构建与发布脚本、文档。
+
+**上游引用（界面源码与三维美术）**
+
+- **LBEILC**（B 站 [@路北路陈](https://space.bilibili.com/3546646728820438)，GitHub [LBEILC](https://github.com/LBEILC)）—— [RhineLabUI](https://github.com/LBEILC/RhineLabUI) 的作者。本仓库的界面骨架、动效时间轴、三维档案阵列、解密与内构展示、启动片头以及配套音效，均来自该项目；`app-rhine/` 以 vendored 方式引入，`app/assets/archive-*.glb` 等三维资产导出自其 Blender 工程。该项目同样以 MIT 协议发布，本项目在其基础上做二次开发。
+
+**第三方依赖的作者**
+
+- [Electron](https://github.com/electron/electron)（MIT）
+- [ncmdump](https://github.com/taurusxin/ncmdump)（MIT）
+- 其余依赖见 `app/package.json`
+
+如果署名有遗漏或需要调整，提 issue 即可，会尽快更正。
+
 ## 版权与许可
 
 本项目的版权分为四层，彼此的许可与归属并不相同，使用与再分发时需要分开对待。

@@ -26,3 +26,14 @@ Third-party components bundled with or used by this project:
 
 - Electron (https://github.com/electron/electron) — MIT License
 - ncmdump (https://github.com/taurusxin/ncmdump) — MIT License
+
+---------------------------------------------------------------------------
+第三方归属说明（不属于 MIT 条款的组成部分，仅作署名与来源记录）
+
+本仓库包含来自 RhineLabUI 的界面源码与三维美术资产，
+原作者为 LBEILC（GitHub: https://github.com/LBEILC ，B 站: @路北路陈），
+该项目以 MIT 协议发布：https://github.com/LBEILC/RhineLabUI
+上述内容在本仓库中同样以 MIT 条款提供，著作权归原作者所有。
+
+界面内嵌 MiSans 字体，版权归小米科技有限责任公司所有，
+按字体自身许可原样内嵌，许可原文见 app-rhine/public/fonts/MiSans-license.pdf 。
