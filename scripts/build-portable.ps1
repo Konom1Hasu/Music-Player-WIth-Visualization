@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     构建「音乐播放器」便携版。
@@ -183,7 +183,7 @@ if (Test-Path (Join-Path $RhineDir 'package.json')) {
             #   vite / npm 会把进度与告警写到 stderr，而本脚本开头是 $ErrorActionPreference='Stop'，
             #   PowerShell 5.1 会把原生命令的 stderr 当成**终止性错误**直接中断 ——
             #   表现为"vite build 一闪就失败，像是编译不过"，其实构建可能刚刚开始。
-            # （发布流程里 release.ps1 用 `| Out-Null` 调本脚本，更容易踩到这一点。）
+            # （被别的脚本以 `| Out-Null` 调用时更容易踩到这一点。）
             $oldEap = $ErrorActionPreference
             $ErrorActionPreference = 'Continue'
             try { & npm.cmd run build } finally { $ErrorActionPreference = $oldEap }
