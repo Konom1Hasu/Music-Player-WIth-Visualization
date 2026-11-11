@@ -2186,6 +2186,15 @@ function analysisTick() {
     vizTickCount = 0;
     vizTickT0 = nowMs;
   }
+  /* ★ 这里原先还挂着两条分支，2026-11-10 的「清理调试残留」把它们整段删掉了 ——
+     连**生产那条**一起删（`else if (analyserNode && spectrum) smTickFrame();`）。
+     症状：画布还在、一直重画，但引擎从没被喂过任何一窗数据 → 柱高恒 0 →
+     「可视化没了」。调试钩子可以删，这条分析调用不能删。 */
+  if (analyserNode && spectrum) {
+    smTickFrame();
+  } else if (spectrum) {
+    spectrum.decay();
+  }
   armVizAnalysis();
 }
 /* ?viztest=1：不播音乐，用合成信号跑频谱 —— 用来在无音频的环境里核对频谱观感。
