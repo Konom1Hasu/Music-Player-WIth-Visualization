@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     构建「音乐播放器」便携版。
@@ -59,7 +59,7 @@ function Write-Warn2($msg){ Write-Host "    $msg" -ForegroundColor Yellow }
 Write-Step "校验应用源码：$AppDir"
 if (-not (Test-Path $AppDir)) { throw "找不到 app 目录：$AppDir" }
 
-$required = @('index.html', 'main.js', 'preload.js', 'mini.html', 'package.json')
+$required = @('main.js', 'preload.js', 'package.json')
 $missing  = @()
 foreach ($f in $required) {
     if (-not (Test-Path (Join-Path $AppDir $f))) { $missing += $f }
@@ -67,7 +67,7 @@ foreach ($f in $required) {
 if ($missing.Count -gt 0) { throw "app 目录缺少必需文件：$($missing -join ', ')" }
 Write-Ok "必需文件齐全（$($required.Count) 个）"
 
-$optional = @('bili.js', 'cover.js', 'ncmdump.exe')
+$optional = @('bili.js', 'cover.js', 'ncmdump.exe', 'recover.html')
 foreach ($f in $optional) {
     if (Test-Path (Join-Path $AppDir $f)) { Write-Ok "可选模块存在：$f" }
     else { Write-Warn2 "可选模块缺失：$f（对应功能会不可用）" }
@@ -198,8 +198,17 @@ if (Test-Path (Join-Path $RhineDir 'package.json')) {
         if (Test-Path $UiDir) { Remove-Item $UiDir -Recurse -Force }
         New-Item -ItemType Directory -Force -Path $UiDir | Out-Null
         Copy-Item (Join-Path $DistDir '*') $UiDir -Recurse -Force
-        # 观测探针页（_probe*.html）只用于自动化核对，不进发布包
-        Get-ChildItem $UiDir -Filter '_probe*.html' -File | Remove-Item -Force
+        # 观测探针（probe*.html / _probe*.html / perf.html 以及 .probe 目录）只用于
+        # 自动化核对与帧耗时测量，不进发布包 —— 之前只挡了 _probe*.html，
+        # probe.html / perf.html 就这么漏进了 resources\app\ui。
+        Get-ChildItem -LiteralPath $UiDir -Filter '*.html' -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like '_probe*.html' -or $_.Name -like 'probe*.html' -or $_.Name -eq 'perf.html' } |
+            ForEach-Object { Write-Warn2 "排除探针页：$($_.Name)"; Remove-Item -LiteralPath $_.FullName -Force }
+        $probeDir = Join-Path $UiDir '.probe'
+        if (Test-Path -LiteralPath $probeDir) {
+            Remove-Item -LiteralPath $probeDir -Recurse -Force
+            Write-Warn2 '排除探针目录：.probe'
+        }
     }
 
     $uiJs  = @(Get-ChildItem (Join-Path $UiDir 'assets') -Filter 'index-*.js'  -File)

@@ -57,6 +57,8 @@ export class ModelViewer {
   private onClose: () => void;
   private provider?: () => Promise<ModelSource>;
   isOpen = false;
+  /** WebGL 上下文是否已丢失（GPU 重置 / 驱动崩溃 / 休眠唤醒）。丢失期间 update() 直接空转。 */
+  private contextLost = false;
 
   constructor(
     parent: HTMLElement,
@@ -103,6 +105,21 @@ export class ModelViewer {
       "档案三维模型：拖动旋转，方向键平移，滚轮或加减键缩放，Home 复位",
     );
     this.canvasHost.appendChild(this.renderer.domElement);
+    /* ---------- WebGL 上下文丢失 / 恢复 ----------
+       这个 viewer 有**自己的**一个 GL 上下文（主场景那个是另一个），
+       GPU 重置时两个各自丢、各自要 restore。不 preventDefault 就永远收不到恢复事件；
+       恢复时不重跑 resize() 的话，composer 的 render target 还是丢之前那批失效对象，
+       画面会是一整块黑（或者干脆不出图）。 */
+    const glCanvas = this.renderer.domElement;
+    glCanvas.addEventListener("webglcontextlost", (event) => {
+      event.preventDefault();
+      this.contextLost = true;
+    });
+    glCanvas.addEventListener("webglcontextrestored", () => {
+      this.contextLost = false;
+      this.lastTime = 0;
+      this.resize();
+    });
     this.scene.background = new THREE.Color("#eae5e1");
     this.scene.fog = new THREE.Fog("#eae5e1", 13.5, 26.5);
     // Render-target textures belong to their WebGL context. Recreate the main
@@ -191,6 +208,8 @@ export class ModelViewer {
     this.lastTime = 0;
     this.root.dataset.exploded = "false";
     this.resetView(false);
+    /* 上一次关闭时画布被缩到 1×1 了（releaseRenderTargets），这里必须重算回来 ——
+       root.hidden = false 之后 canvasHost 才有真实尺寸，所以顺序不能往前挪。 */
     this.resize();
     this.renderer.domElement.focus({ preventScroll: true });
     this.enter();
@@ -356,8 +375,19 @@ export class ModelViewer {
     this.groups.clear();
     this.siblings.forEach(({ node, inert }) => (node.inert = inert));
     this.siblings = [];
+    this.releaseRenderTargets();
     this.opener?.focus({ preventScroll: true });
     this.onClose();
+  }
+
+  /** 关掉 360° 视图后把画布和 composer 的 render target 缩到 1×1。
+      视口是满屏的，8MP 上下 —— 主 render target、SMAA 的两张、OutputPass 的
+      读写 buffer 全是这个尺寸，全都由 GPU 显存托着；不缩的话这几十 MB
+      在"回到档案页"之后一直被这个隐藏的 viewer 占着。
+      下次 open() 里的 resize() 会按 canvasHost 真实尺寸重新分配，画面不受影响。 */
+  private releaseRenderTargets() {
+    this.renderer.setSize(1, 1, false);
+    this.pipeline.composer.setSize(1, 1);
   }
 
   private setButtonsDisabled(disabled: boolean) {
@@ -522,7 +552,7 @@ export class ModelViewer {
   }
 
   update(time: number) {
-    if (!this.isOpen) return;
+    if (!this.isOpen || this.contextLost) return;
     const dt = Math.min(this.lastTime ? time - this.lastTime : 1 / 60, 0.05);
     this.lastTime = time;
     if (this.source) {

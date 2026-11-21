@@ -417,7 +417,6 @@ function readAt(fd, offset, len) {
   try { fs.readSync(fd, b, 0, b.length, offset); } catch (e) { return b; }
   return b;
 }
-const readU32 = (fd, off) => { const b = readAt(fd, off, 4); return b.length < 4 ? -1 : b.readUInt32BE(0); };
 
 /* ID3v2 标签比头部缓冲还大：按标签声明的长度精确读一次（上限 32MB，防坏标签让我们读整盘） */
 function id3CoverFromFd(fd, size, sourceTag) {

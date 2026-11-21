@@ -6,10 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "check:content": "node --experimental-strip-types --test scripts/check-content.mjs",
-    "export:archives": "node scripts/export-records.mjs",
     "build": "tsc && vite build",
-    "format": "prettier --write src scripts index.html package.json tsconfig.json",
+    "format": "prettier --write src index.html package.json tsconfig.json",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {

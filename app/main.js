@@ -1,9 +1,8 @@
-const { app, BrowserWindow, ipcMain, screen, powerSaveBlocker, globalShortcut, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, powerSaveBlocker, globalShortcut, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
-const https = require('https');
 const http = require('http');
 const { spawn } = require('child_process');
 
@@ -19,8 +18,16 @@ const sniffImageMime = coverLib.sniffImageMime;
    私有头得到的可播放 m4a。这两类数据都属于原平台的受限内容，一旦被随手复制出去，
    就成了非法传播源。因此这里做三层管控：
 
-     ① 最小落盘：派生数据只允许存在于"本次会话专属"的临时目录，进程退出即整体销毁；
-        解密结果本身只走内存（Buffer → 渲染进程），从不写到用户音乐目录。
+     ① 最小落盘：NCM 解密结果与"仅供播放用"的临时副本只存在于**本次会话专属**的
+        临时目录（SESSION_TMP），进程退出即整体擦除；解密结果本身只走内存
+        （Buffer → 渲染进程），**从不写到用户的音乐目录**（音乐目录 = 用户自己
+        指定的曲库/下载目录，例如 音乐\\、下载\\）。
+        ★ 唯一例外（也是实际发生的事，别按旧注释理解）：**导入**的 B 站缓存音频会被
+        固化一份到 <userData>\\library\\audio（见 LIBRARY_AUDIO_DIR / biliOpts().keepDir）。
+        那是播放器自己的私有数据目录，不属于"用户的音乐目录"；这么做的原因是源缓存
+        随时会被 B 站客户端清掉，不固化就等于让曲目变成永远报错的僵尸条目。
+        ★ 这份固化副本**不会被退出擦除**（它就是设计成长期留存的）：所谓"退出即销毁"
+        只对 SESSION_TMP 成立。本地保留副本占用可通过 local-audio-info 查询。
      ② 不可导出：程序不提供任何"另存为 / 导出 / 分享"能力，没有任何 IPC 能把派生数据
         写到调用方指定的路径。渲染进程拿到的只有内存中的字节。
      ③ 可追溯：每次解密 / 提取都写一条本地审计记录（时间 + 操作 + 来源文件），
@@ -222,10 +229,6 @@ function audit(event, info) {
     fs.writeFileSync(f, lines.join('\n') + '\n', 'utf8');
   } catch (e) { /* 审计失败不影响主流程 */ }
 }
-function auditCount() {
-  try { return fs.readFileSync(auditFile(), 'utf8').split('\n').filter(Boolean).length; }
-  catch (e) { return 0; }
-}
 
 /* ---------- NCM 专用：封面在该格式里是明文挂在头部的 ----------
    NCM 布局： CTENFDAM(8) 00 00 keyLen(4) key | metaLen(4) meta | CRC(4) 间隔(5) imgSize(4) img | 加密音频
@@ -261,7 +264,7 @@ function ncmCover(buf) {
   }
   return null;
 }
-/* NCM 那一份解析（也用于旧的 ncm-cover 通道，保持兼容） */
+/* NCM 内嵌封面解析（供 read-cover 通道调用） */
 function ncmCoverReply(arg) {
   try {
     let buf = null;
@@ -280,7 +283,8 @@ function ncmCoverReply(arg) {
   }
 }
 /* arg: { path }（主进程自己读文件）或 { bytes, name }（渲染层读的用户自选文件） */
-ipcMain.handle('read-cover', (_e, arg) => {
+ipcMain.handle('read-cover', (e, arg) => {
+  if (!isTrustedSender(e)) return UNAUTHORIZED;
   try {
     const name = (arg && arg.name) || (arg && arg.path) || '';
     if (/\.ncm$/i.test(String(name))) return ncmCoverReply(arg);
@@ -298,14 +302,9 @@ ipcMain.handle('read-cover', (_e, arg) => {
     return { error: String((e && e.message) || e) };
   }
 });
-/* 旧通道：只认 NCM（老的渲染层仍会调用，保留以免兼容性回退） */
-ipcMain.handle('ncm-cover', (_e, arg) => ncmCoverReply(arg));
-
 /* ================= 主进程全局兜底 =================
-   任何一处未捕获异常原本都会让整个播放器直接消失（实例：小窗缩放时 setSize 收到小数 →
-   "TypeError: Error processing argument at index 1, conversion failure" → 窗口全没了，
-   用户只能看到一个英文报错框）。这里把异常写进日志并保持运行 ——
-   局部功能（某次缩放）出错不该赔上整个程序。日志：userData/main-error.log */
+   任何一处未捕获异常原本都会让整个播放器直接消失。这里把异常写进日志并保持运行，
+   避免局部功能出错赔上整个程序。日志：userData/main-error.log */
 function logMainError(tag, err) {
   try {
     const p = path.join(app.getPath('userData'), 'main-error.log');
@@ -373,10 +372,6 @@ const SOFTWARE_RENDER = process.argv.includes('--software-render');
 if (SOFTWARE_RENDER) app.disableHardwareAcceleration();
 
 let mainWin = null;
-let miniWin = null;
-let miniResizeStart = null; // 缩放时 {sx, sy, w, h, scale}
-let miniOpacity = 1;       // 小窗透明度（会话内记忆）
-let miniKeepTopTimer = null; // 周期重申置顶的定时器
 
 /* ================= 内嵌 UI 静态服务 =================
    app-rhine（Vite 构建的 RhineLabUI 三维终端）用了 ES module + 绝对路径 /assets/...，
@@ -406,21 +401,52 @@ function startUiServer() {
       try {
         let p = decodeURIComponent(String(req.url || '/').split('?')[0].split('#')[0]);
         if (p === '/') p = '/index.html';
-        const file = path.normalize(path.join(UI_DIR, p));
-        if (file !== UI_DIR && !file.startsWith(UI_DIR + path.sep)) {
+        const isRecoverReq = (RECOVER_MODE || INGEST_MODE) && p === '/recover.html';
+        const file = isRecoverReq
+          ? path.join(__dirname, 'recover.html')
+          : path.normalize(path.join(UI_DIR, p));
+        if (!isRecoverReq && file !== UI_DIR && !file.startsWith(UI_DIR + path.sep)) {
           res.writeHead(403); res.end('forbidden'); return;
         }
         fs.readFile(file, (err, data) => {
           if (err) { res.writeHead(404); res.end('not found'); return; }
           res.writeHead(200, {
             'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
-            'Cache-Control': 'no-cache'
+            'Cache-Control': 'no-cache',
+            'X-Content-Type-Options': 'nosniff',
+            /* ★ CSP 是按 app/ui 的真实产物一条条核过的，不是抄模板：
+               · ui/index.html 只有 <script type="module" src="/assets/index-*.js"> 与
+                 一个外链 css，**没有 inline script**（实测 19 行：meta/link/script/body），
+                 所以 script-src 可以硬锁 'self'，不需要 'unsafe-eval'；
+               · 打包产物里 eval/new Function/WebAssembly 出现次数均为 0（实测 grep），
+                 少了这三样脚本就能全锁死；
+               · style-src 必须带 'unsafe-inline'：Vite 产物与三维界面会给元素写 style 属性；
+               · worker-src 必须带 blob:：频谱分析用的是 new Blob([...]) + new Worker(blobUrl)
+                 （打包产物里 createObjectURL 6 处、Blob( 4 处，其中就是这条 Worker）；
+               · img-src/media-src 带 data: blob: —— 封面是 data URL、音频是 blob:，
+                 media-src 还要带 file: —— 曲库里的固化副本直接以 file:// 喂给 <audio>；
+               · font-src 带 data:：MiSans 走 /fonts/*.woff2，但个别回退字形会被内联成 data URL。
+               · 例外：仅在 --recover-library / --recover-ingest 模式下访问 /recover.html 时，
+                 该页脚本为单文件内联，需要临时放行 'unsafe-inline'。 */
+            'Content-Security-Policy': [
+              "default-src 'self'",
+              isRecoverReq ? "script-src 'self' 'unsafe-inline'" : "script-src 'self'",
+              "style-src 'self' 'unsafe-inline'",
+              "img-src 'self' data: blob:",
+              "media-src 'self' data: blob: file:",
+              "connect-src 'self' data: blob:",
+              "worker-src 'self' blob:",
+              "font-src 'self' data:",
+              "object-src 'none'",
+              "frame-src 'none'",
+              "base-uri 'none'",
+              "form-action 'none'"
+            ].join('; ')
           });
           res.end(data);
         });
       } catch (e) { res.writeHead(500); res.end(); }
     });
-    uiServer.on('error', reject);
     /* ★ 端口必须固定。界面跑在 http://127.0.0.1:<port>，而 IndexedDB 是按"源"隔离的
        （scheme + host + port 三者一起算）—— 用 listen(0) 每次启动随机端口，
        等于每次都是全新的存储域：曲库、收藏、播放进度全部读不回来。
@@ -449,6 +475,83 @@ function startUiServer() {
   });
 }
 
+/* ================= IPC 调用来源校验 =================
+   为什么需要：preload 里已经给 send/on 加了白名单，但 **invoke 型通道（handle）**
+   仍然可以被"任何拿到了 preload 的窗口"调用 —— 包括被导航过去的第三方页面
+   （旧代码没有拦导航、也没有拦 window.open，子窗口还会继承 preload）。
+   只要有一个窗口被导航到外部页面，那个页面就能直接调 read-audio / convert-ncm。
+
+   所以下面这些"按调用方给的路径读盘 / 起子进程 / 碰临时目录"的 handle 首行都必须过这一关
+   （read-cover、read-audio、audio-exists、find-lyrics、bili-scan、prepare-bili-audio、
+   bili-keep、local-audio-info、convert-ncm）：
+     · http(s)：必须是本机内嵌 UI 服务（固定端口 41739）这个源，端口/主机精确比对；
+     · file：必须是 app 目录下的文件（如 recover.html）；
+   其余一律拒。判据用 senderFrame.url —— 它是渲染进程真实所在文档的地址，
+   不是页面自己声明的字符串。 */
+const APP_DIR = path.normalize(__dirname);
+const UNAUTHORIZED = { error: '未授权的调用源' };
+function isTrustedUrl(frameUrl) {
+  try {
+    if (!frameUrl) return false;
+    let u = null;
+    try { u = new URL(frameUrl); } catch (err) { return false; }
+    // ① 本机内嵌 UI 服务
+    if (u.protocol === 'http:' || u.protocol === 'https:') {
+      if (!uiServerUrl) return false;
+      let base = null;
+      try { base = new URL(uiServerUrl); } catch (err) { return false; }
+      const host = String(u.hostname || '').toLowerCase();
+      return u.protocol === base.protocol && host === String(base.hostname).toLowerCase()
+        && String(u.port || '') === String(base.port || '');
+    }
+    // ② app 目录下的 file://
+    if (u.protocol === 'file:') {
+      let p = u.pathname || '';
+      try { p = decodeURIComponent(p); } catch (err) { /* 保留原串 */ }
+      p = p.replace(/^\/+/, '').replace(/\//g, path.sep);
+      const file = path.normalize(p);
+      const lower = process.platform === 'win32' ? file.toLowerCase() : file;
+      const dir = process.platform === 'win32' ? APP_DIR.toLowerCase() : APP_DIR;
+      return lower === dir || lower.indexOf(dir + path.sep) === 0;
+    }
+    return false;
+  } catch (err) {
+    return false;
+  }
+}
+function isTrustedSender(e) {
+  return isTrustedUrl(e && e.senderFrame ? e.senderFrame.url : '');
+}
+
+/* ================= 恢复页专用来源校验 =================
+   曲库恢复的 reader 页必须跑在"旧数据的源"上（file:// 或上一版用过的随机端口），
+   这两个都不是本机 UI 服务的源，所以它不能用 isTrustedSender 判。
+   判据换成"必须是 recover.html 这个特定页面"：
+     · file:// → 仍是 app 目录下的文件（isTrustedUrl 覆盖）；
+     · http    → 只认本机 UI 服务端口，或 serveForOrigin 现开的旧端口（下方集合记录）。
+   recover-from-reader 会往临时目录写音频明文，这道门不能松。 */
+const recoverServePorts = new Set();
+function isRecoveryPage(e) {
+  try {
+    const frameUrl = e && e.senderFrame ? e.senderFrame.url : '';
+    if (!frameUrl) return false;
+    let u = null;
+    try { u = new URL(frameUrl); } catch (err) { return false; }
+    if (!/\/recover\.html$/i.test(u.pathname || '')) return false;
+    if (u.protocol === 'file:') return isTrustedUrl(frameUrl);
+    if (u.protocol !== 'http:') return false;
+    const host = String(u.hostname || '').toLowerCase();
+    if (host !== '127.0.0.1' && host !== 'localhost') return false;
+    const port = Number(u.port || 80);
+    if (uiServerUrl) {
+      try { if (Number(new URL(uiServerUrl).port) === port) return true; } catch (err) { /* ignore */ }
+    }
+    return recoverServePorts.has(port);
+  } catch (err) {
+    return false;
+  }
+}
+
 async function createMainWindow() {
   mainWin = new BrowserWindow({
     width: 1380,
@@ -463,21 +566,25 @@ async function createMainWindow() {
       nodeIntegration: false,
       preload: path.join(__dirname, 'preload.js'),
       spellcheck: false,
-      backgroundThrottling: false // 最小化/隐藏时 rAF 仍满帧 → 小窗可视化不暂停
+      backgroundThrottling: false
     }
   });
-  /* 主界面 = RhineLabUI 三维档案终端（Vite 构建，走 localhost 静态服务）。
-     若内嵌 UI 缺失，退回 terminal.html（单面板 3D），再退 index.html。 */
+  /* 主界面 = RhineLabUI 三维档案终端（Vite 构建，走 localhost 静态服务）。 */
   try {
     const url = await startUiServer();
     mainWin.loadURL(url);
   } catch (e) {
     logMainError('UI 服务', e);
-    if (fs.existsSync(path.join(__dirname, 'terminal.html'))) {
-      mainWin.loadFile(path.join(__dirname, 'terminal.html'));
-    } else {
-      mainWin.loadFile(path.join(__dirname, 'index.html'));
-    }
+    try { if (mainWin && !mainWin.isDestroyed()) mainWin.destroy(); } catch (err) { /* ignore */ }
+    mainWin = null;
+    dialog.showErrorBox(
+      '界面资源缺失',
+      '无法启动内嵌 UI 服务（app/ui/index.html 缺失或端口不可用）：\n' +
+        String((e && e.message) || e) +
+        '\n\n请先运行 scripts\\build-portable.ps1 或在 app-rhine 下执行 npm run build 并同步产物到 app\\ui。'
+    );
+    app.quit();
+    return false;
   }
   // 不设 setFrameRate：可视化循环已由页面内定时器自驱动（不依赖 rAF），
   // 显式 setFrameRate 会在双窗口时干扰合成器的 BeginFrame 调度
@@ -497,76 +604,7 @@ async function createMainWindow() {
   // 切回窗口时补注册：游戏退出/切桌面后往往立刻就能拿回媒体键（幂等，不会误报）
   mainWin.on('focus', () => { try { registerMediaHotkeys(); } catch (e) { /* ignore */ } });
   mainWin.on('closed', () => { mainWin = null; });
-}
-
-function createMiniWindow() {
-  if (miniWin && !miniWin.isDestroyed()) { miniWin.show(); return; }
-  miniWin = new BrowserWindow({
-    width: 330,
-    height: 356,
-    // 最小值原来写死 270×280（被内容撑出来的），而默认是 330×356 →
-    // 只能缩 60×76 px，用户感觉"只能放大不能缩小"。现在内容会随窗口自适应
-    // （mini.html 里按宽高分档隐藏封面/歌词/透明度条/进度条），所以最小值可以放得很低。
-    minWidth: 150,
-    minHeight: 96,
-    maxWidth: 720,
-    maxHeight: 900,
-    frame: false,
-    transparent: false, // 透明窗口在 Windows 上强制昂贵合成路径，拖累主窗口
-    backgroundColor: '#141828',
-    alwaysOnTop: true,
-    resizable: false,
-    skipTaskbar: true,
-    hasShadow: false,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      preload: path.join(__dirname, 'preload.js'),
-      backgroundThrottling: false
-    }
-  });
-  miniWin.loadFile(path.join(__dirname, 'mini.html'));
-  // 置顶用最高 'screen-saver' 层级：盖过全屏/无边框游戏窗口，游戏里也看得见
-  miniWin.setAlwaysOnTop(true, 'screen-saver');
-  // 点击穿透：小窗默认不吃鼠标事件（forward 让页面仍能收到 mousemove），
-  // 只有光标悬停到按钮/进度条/拖动栏等控件上时，页面才通过 mini-set-ignore 临时恢复可点。
-  // 这样打游戏时鼠标划过小窗不会误点到它。
-  miniIgnoreState = null; miniRegions = [];
-  try { miniWin.setIgnoreMouseEvents(true, { forward: true }); miniIgnoreState = true; } catch (e) { /* ignore */ }
-  startMiniPoll();   // 光标轮询：穿透状态自愈，避免'快速移动后立刻按下拖不动'
-  if (miniOpacity < 1) miniWin.setOpacity(miniOpacity);
-  // 周期重申置顶：无边框全屏游戏运行时会重新抢占 Z 序
-  if (miniKeepTopTimer) clearInterval(miniKeepTopTimer);
-  miniKeepTopTimer = setInterval(() => {
-    if (!miniWin || miniWin.isDestroyed()) { clearInterval(miniKeepTopTimer); miniKeepTopTimer = null; return; }
-    try { miniWin.setAlwaysOnTop(true, 'screen-saver'); miniWin.moveTop(); } catch (e) { /* ignore */ }
-  }, 800);
-  // 拖动结束后自动吸附屏幕边缘
-  let snapTimer = null;
-  miniWin.on('moved', () => {
-    clearTimeout(snapTimer);
-    snapTimer = setTimeout(() => snapMiniToEdge(), 180);
-  });  miniWin.on('closed', () => {
-    if (miniKeepTopTimer) { clearInterval(miniKeepTopTimer); miniKeepTopTimer = null; }
-    miniWin = null;
-  });
-}
-function snapMiniToEdge() {
-  if (!miniWin || miniWin.isDestroyed()) return;
-  const TH = 48;
-  const disp = screen.getDisplayMatching(miniWin.getBounds());
-  const wa = disp.workArea;
-  const b = miniWin.getBounds();
-  let x = b.x, y = b.y;
-  if (Math.abs(b.x - wa.x) < TH) x = wa.x;
-  else if (Math.abs((wa.x + wa.width) - (b.x + b.width)) < TH) x = wa.x + wa.width - b.width;
-  if (Math.abs(b.y - wa.y) < TH) y = wa.y;
-  else if (Math.abs((wa.y + wa.height) - (b.y + b.height)) < TH) y = wa.y + wa.height - b.height;
-  // setPosition 同样只接受整数（分数缩放的显示器上 workArea 可能是小数），必须取整 + 兜异常
-  x = Math.round(toNum(x, b.x)); y = Math.round(toNum(y, b.y));
-  if (x !== b.x || y !== b.y) {
-    try { miniWin.setPosition(x, y); } catch (e) { /* ignore */ }
-  }
+  return true;
 }
 
 /* 单实例锁：避免重复启动导致双实例同时播放/渲染 → 卡顿 */
@@ -581,11 +619,50 @@ if (!gotLock) {
     }
   });
 
-  app.whenReady().then(() => {
+  /* ================= 子窗口 / 导航收口 =================
+     旧代码两个洞（P0）：
+       ① 没有任何窗口设 setWindowOpenHandler —— 页面里 window.open / target=_blank
+          出来的子窗口会**继承 preload**，等于凭空多一个能直接调 IPC 的窗口；
+       ② 没有拦 will-navigate —— 主窗口可以被导航到任意外部站点，而 preload 还在，
+          那个页面就成了"合法持有 window.desktop 的第三方页面"。
+     统一挂在 web-contents-created 上：对所有 webContents 生效（主窗、小窗、恢复窗、
+     以及以后新开的任何窗口）—— 一处挂载比每个 BrowserWindow 各写一遍更不容易漏。 */
+  app.on('web-contents-created', (_ev, contents) => {
+    /* ① 新窗口：一律 deny。
+       返回 { action: 'deny' } 时 Electron 根本不创建窗口，也就不存在"继承 preload 的
+       子窗口"。真正的站外链接（http/https、且不是本机 UI 服务自己）顺手交给系统浏览器，
+       这样界面里的版权/许可链接照旧能点开。 */
+    contents.setWindowOpenHandler(({ url }) => {
+      try {
+        const target = String(url || '');
+        if (/^https?:\/\//i.test(target) && !isTrustedUrl(target)) {
+          shell.openExternal(target).catch((err) => logMainError('外链', err));
+        }
+      } catch (e) { logMainError('外链', e); }
+      return { action: 'deny' };
+    });
+    /* ② 导航：只允许停在本机内嵌 UI 服务或 app 目录下的 file://。
+       will-navigate 只对"页面自己发起的导航"触发（点链接、改 location、把文件拖进窗口），
+       程序里的 loadURL / loadFile 不触发 —— 所以这一拦不影响正常启动。
+       will-redirect 一并拦：3xx 跳转不保证走 will-navigate。 */
+    const blockUntrustedNav = (evt, url) => {
+      try {
+        if (isTrustedUrl(url)) return;
+        evt.preventDefault();
+        logMainError('导航拦截', new Error('已拦截非受信导航：' + String(url).slice(0, 200)));
+      } catch (e) { /* ignore */ }
+    };
+    contents.on('will-navigate', (evt, url) => blockUntrustedNav(evt, url));
+    contents.on('will-redirect', (evt, url) => blockUntrustedNav(evt, url));
+  });
+
+  app.whenReady().then(async () => {
     /* 启动自证：记录本次加载的代码指纹与会话路径（排查"进程没重启"这类误判） */
     writeStartupSelfReport();
     // 数据管控：清掉上次崩溃/强杀残留的会话临时目录（派生数据不留宿）
     sweepStaleSessions();
+    // 数据管控：再清一遍过期的曲库恢复交接区（那边是明文音频，见函数内注释）
+    sweepStaleRecoverBundle();
     // 数据管控：擦除 1.0.x 遗留在 userData 里的长期副本（升级清理）
     purgeLegacyAudioCache();
     /* --recover-library：只跑曲库恢复，不开主界面 */
@@ -622,7 +699,8 @@ if (!gotLock) {
     // 阻止显示睡眠 + 应用挂起：保持系统与显卡持续活跃
     powerSaveBlocker.start('prevent-display-sleep');
     powerSaveBlocker.start('prevent-app-suspension');
-    createMainWindow();
+    const ok = await createMainWindow();
+    if (!ok) return;
     registerMediaHotkeys(); // 全局媒体快捷键（独占全屏游戏里也能用）
     setTimeout(notifyHotkeyState, 1500);   // 媒体键注册失败就提示备用键（不再静默失效）
     app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createMainWindow(); });
@@ -714,16 +792,6 @@ function registerMediaHotkeys() {
   tryReg('CommandOrControl+Alt+N', () => mediaAction('next', 'Ctrl+Alt+N'));
   tryReg('CommandOrControl+Alt+B', () => mediaAction('prev', 'Ctrl+Alt+B'));
   hotkeyState.fallback = f1 || f2 || f3 || f4 || f5 || f6 || f7;
-  /* 小窗控制键（游戏里鼠标拖不动时靠这些）——见下面 nudgeMini/scaleMini。
-     ★ 位移从 Ctrl+Alt+方向键 改到 **Ctrl+Alt+Shift+方向键**：把 Ctrl+Alt+← / → 让给
-     耳机的上一首 / 下一首（那是耳机软件最常绑的两个方向键）。 */
-  regHotkey('CommandOrControl+Alt+Shift+Left', () => nudgeMini(-MINI_STEP, 0));
-  regHotkey('CommandOrControl+Alt+Shift+Right', () => nudgeMini(MINI_STEP, 0));
-  regHotkey('CommandOrControl+Alt+Shift+Up', () => nudgeMini(0, -MINI_STEP));
-  regHotkey('CommandOrControl+Alt+Shift+Down', () => nudgeMini(0, MINI_STEP));
-  regHotkey('CommandOrControl+Alt+0', () => scaleMini(20, 20));
-  regHotkey('CommandOrControl+Alt+9', () => scaleMini(-20, -20));
-  regHotkey('CommandOrControl+Alt+L', () => setMiniLock(!miniLocked));
   // 失败的重试：游戏退出、切到桌面后往往就能拿回来
   if (!hotkeyRetryTimer) {
     hotkeyRetryTimer = setInterval(() => {
@@ -743,196 +811,16 @@ function notifyHotkeyState() {
   try { mainWin.webContents.send('hotkey-status', JSON.parse(JSON.stringify(hotkeyState))); } catch (e) { /* ignore */ }
 }
 
-/* ================= 小窗：位移 / 缩放 / 穿透锁定 =================
-   设计原因：
-     · 拖动曾经"很奇怪"：缩放用的是渲染层 e.screenX 再除显示器缩放，但 Chromium 的
-       screenX 本来就是 DIP（已含缩放）→ 再除一次，125% 缩放下窗口增长比光标慢 20%。
-       现在位移/缩放全部改用主进程的 screen.getCursorScreenPoint()，两边同一坐标系，
-       彻底不涉及 scaleFactor。
-     · 点击穿透原本靠"页面 mousemove → IPC → 主进程"，快速移动后立刻按下时状态还没切过来
-       → "有时候拖不动"。现在主进程按 50ms 轮询光标位置（页面只回报可交互矩形），
-       即使某个 mousemove 丢了也会在 50ms 内自愈。
-     · 独占全屏/原始输入的游戏里，overlay 根本收不到鼠标事件（系统层面限制）。
-       所以加了全局快捷键位移/缩放，以及"穿透锁定"开关。 */
-function nudgeMini(dx, dy) {
-  if (!miniWin || miniWin.isDestroyed()) return;
-  try {
-    const b = miniWin.getBounds();
-    miniWin.setPosition(Math.round(toNum(b.x) + dx), Math.round(toNum(b.y) + dy));
-  } catch (e) { /* ignore */ }
-}
-function scaleMini(dw, dh) {
-  if (!miniWin || miniWin.isDestroyed()) return;
-  try {
-    const s = miniWin.getSize();
-    const w = Math.round(Math.max(MINI_MIN_W, Math.min(MINI_MAX_W, toNum(s[0], 330) + dw)));
-    const h = Math.round(Math.max(MINI_MIN_H, Math.min(MINI_MAX_H, toNum(s[1], 356) + dh)));
-    miniWin.setSize(w, h);
-  } catch (e) { /* ignore */ }
-}
-function setMiniLock(v) {
-  miniLocked = !!v;
-  if (miniWin && !miniWin.isDestroyed()) {
-    try { miniWin.webContents.send('mini-lock-state', miniLocked); } catch (e) { /* ignore */ }
-  }
-  if (mainWin && !mainWin.isDestroyed()) {
-    try { mainWin.webContents.send('mini-lock-changed', miniLocked); } catch (e) { /* ignore */ }
-  }
-  if (miniLocked) setMiniIgnore(true);
-}
-
-/* ---------------- IPC：小窗与主窗口通信 ---------------- */
-ipcMain.on('mini-open', () => createMiniWindow());
-ipcMain.on('mini-close', () => { if (miniWin && !miniWin.isDestroyed()) { miniWin.destroy(); miniWin = null; } });
-/* 小窗页面回报"可交互矩形"（相对视口），主进程据此判断光标是否该让窗口吃鼠标事件 */
-ipcMain.on('mini-set-regions', (_e, regions) => {
-  if (!Array.isArray(regions)) return;
-  miniRegions = regions.slice(0, 40).map((r) => ({
-    x: toNum(r && r.x), y: toNum(r && r.y), w: toNum(r && r.w), h: toNum(r && r.h)
-  })).filter((r) => r.w > 0 && r.h > 0);
-});
-/* 低延迟通路（页面 mousemove 直接切换，比 50ms 轮询更快）；锁定穿透时忽略 */
-ipcMain.on('mini-set-ignore', (_e, v) => {
-  if (miniLocked) return;
-  setMiniIgnore(!!v);
-});
-ipcMain.on('mini-lock', (_e, v) => setMiniLock(v === undefined ? !miniLocked : !!v));
+/* ---------------- IPC：快捷键状态 ---------------- */
 ipcMain.handle('get-hotkey-status', () => hotkeyState);
-
-/* 小窗数据转发。拆成两条通道，原因：原来是一条 **50 次/秒的大包**，
-   每次都带上封面 data URL（几百 KB）+ Array.from(bars) 新建的普通数组 ——
-   等于每秒几十 MB 的 IPC 流量，小窗那边还会每帧重设一次 <img src> 并读 scrollWidth
-   （强制同步布局）。开着别的应用时，这些开销会直接表现为整机卡顿。
-   ① mini-meta：标题/歌手/专辑/封面/主题色 —— 只在换歌、换主题、换封面时发一次
-   ② mini-bars：96 根柱（Float32Array 整体拷贝，比普通数组便宜得多）+ 时间/播放状态/歌词 —— 每帧发
-   主进程只做转发，不解析内容。 */
-ipcMain.on('mini-meta', (_e, data) => {
-  if (miniWin && !miniWin.isDestroyed()) miniWin.webContents.send('mini-meta', data);
-});
-ipcMain.on('mini-bars', (_e, data) => {
-  if (miniWin && !miniWin.isDestroyed()) miniWin.webContents.send('mini-bars', data);
-});
-/* 兼容旧通道名 */
-ipcMain.on('mini-state', (_e, data) => {
-  if (miniWin && !miniWin.isDestroyed()) miniWin.webContents.send('mini-meta', data);
-});
-/* 渲染模式（旧界面遗留通道）。新版界面已经不用软件渲染了，但仍要"顺手清理"：
-   老用户的 settings.json 里可能还留着 renderMode:'software'，虽然主进程已经不读它，
-   留着会误导后来看这个文件的人（也误导排查"为什么卡"的人）。所以收到切换指令时
-   把这项直接删掉，而不是写回一个再也不会被读取的值。 */
-ipcMain.on('set-render-mode', (_e, mode) => {
-  delete userSettings.renderMode;
-  try { fs.writeFileSync(path.join(app.getPath('userData'), 'settings.json'), JSON.stringify(userSettings)); } catch (e) { /* ignore */ }
-  if (mode === 'software') {
-    logMainError('渲染模式', new Error(
-      '旧界面请求切换到软件渲染，已忽略：新版只认命令行 --software-render'));
-  }
-});
-/* GPU 渲染状态自检 + 当前显卡名 */
-ipcMain.handle('get-gpu-status', () => {
-  try {
-    let device = '';
-    try {
-      const i = app.getGPUInfo('basic');
-      const a = (i && i.auxAttributes) || {};
-      device = a.gl_renderer || a.gl_vendor || '';
-    } catch (e) { /* ignore */ }
-    return { features: app.getGPUFeatureStatus(), device };
-  } catch (e) { return { features: {}, device: '' }; }
-});
-/* 显示器信息（刷新率） */
-ipcMain.handle('get-display-info', () => {
-  try {
-    const w = mainWin && !mainWin.isDestroyed() ? mainWin : BrowserWindow.getAllWindows()[0];
-    const d = w ? screen.getDisplayMatching(w.getBounds()) : screen.getPrimaryDisplay();
-    return { refreshRate: d.refreshRate || 60, scaleFactor: d.scaleFactor || 1, internal: !!d.internal };
-  } catch (e) { return { refreshRate: 60, scaleFactor: 1, internal: false }; }
-});
-/* 小窗透明度 */
-ipcMain.on('mini-opacity', (_e, v) => {
-  miniOpacity = Math.max(0.3, Math.min(1, toNum(v, 1)));   // NaN 会让 setOpacity 抛同样的转换错误
-  if (miniWin && !miniWin.isDestroyed()) miniWin.setOpacity(miniOpacity);
-});
-/* 小窗尺寸上下限：构造 BrowserWindow 与拖拽 clamp 必须用同一组常量，
-   否则会出现"拖到某处卡住不动"的错觉。内容自适应在 mini.html 里按宽高分档处理。 */
-const MINI_MIN_W = 150, MINI_MIN_H = 96, MINI_MAX_W = 720, MINI_MAX_H = 900;
-const MINI_STEP = 14;              // 全局快捷键每次移动的像素
-let miniRegions = [];              // 小窗页面回报的可交互矩形（视口坐标）
-let miniLocked = false;            // 穿透锁定：锁定后整窗穿透，只能用快捷键移动
-let miniIgnoreState = null;        // 当前 setIgnoreMouseEvents 状态（避免重复调用）
-let miniPollTimer = null;
-
-function setMiniIgnore(v) {
-  if (!miniWin || miniWin.isDestroyed()) return;
-  if (miniIgnoreState === v) return;
-  miniIgnoreState = v;
-  try { miniWin.setIgnoreMouseEvents(v, { forward: true }); } catch (e) { /* ignore */ }
-}
-/* 光标是否落在"可交互矩形"内。全部用主进程坐标（光标点 - 窗口原点），不涉及缩放比 */
-function miniCursorHit() {
-  if (!miniWin || miniWin.isDestroyed()) return false;
-  let pt, b;
-  try { pt = screen.getCursorScreenPoint(); b = miniWin.getBounds(); } catch (e) { return false; }
-  const x = toNum(pt.x) - toNum(b.x), y = toNum(pt.y) - toNum(b.y);
-  if (x < 0 || y < 0 || x > toNum(b.width) || y > toNum(b.height)) return false;
-  for (const r of miniRegions) {
-    if (x >= r.x - 2 && x <= r.x + r.w + 2 && y >= r.y - 2 && y <= r.y + r.h + 2) return true;
-  }
-  return false;
-}
-function startMiniPoll() {
-  if (miniPollTimer) return;
-  miniPollTimer = setInterval(() => {
-    if (!miniWin || miniWin.isDestroyed()) { clearInterval(miniPollTimer); miniPollTimer = null; return; }
-    if (miniLocked) { setMiniIgnore(true); return; }
-    setMiniIgnore(!miniCursorHit());
-  }, 50);
-}
-
-/* 小窗缩放（右下角手柄）
-   ── 曾经崩过一次主进程：`setSize(nw, nh)` 的 nw/nh 是浮点数，
-   Electron 原生层要求整数（宽度、高度都会走 int 转换），一旦传入小数就抛
-   "TypeError: Error processing argument at index 1, conversion failure"，
-   而且是**主进程未捕获异常**（整个窗口直接挂掉）。所以这里必须：
-     ① 所有参与运算的值先 Number() 化并检查 isFinite；
-     ② 最终 setSize 传 Math.round 后的整数；
-     ③ scale 兜底成 1（避免除零得到 Infinity，同样会触发 int 转换失败）。 */
-function toNum(v, dflt) {
-  const n = Number(v);
-  return isFinite(n) ? n : (dflt || 0);
-}
-ipcMain.on('mini-resize-start', () => {
-  if (!miniWin || miniWin.isDestroyed()) return;
-  let pt, size;
-  try { pt = screen.getCursorScreenPoint(); size = miniWin.getSize(); } catch (e) { return; }
-  // 起点用主进程光标坐标（与后面的当前位置同一坐标系），不再用渲染层的 screenX：
-  // Chromium 的 screenX 已经是 DIP（含缩放），旧代码又除了一次 scaleFactor，
-  // 结果 125% 缩放下拖拽比光标慢 20% —— 这就是"拖动很奇怪"的来源。
-  miniResizeStart = { cx: toNum(pt.x), cy: toNum(pt.y), w: toNum(size[0], 330), h: toNum(size[1], 356) };
-});
-ipcMain.on('mini-resize-move', () => {
-  if (!miniResizeStart || !miniWin || miniWin.isDestroyed()) return;
-  let pt;
-  try { pt = screen.getCursorScreenPoint(); } catch (e) { return; }
-  const rawW = miniResizeStart.w + (toNum(pt.x) - miniResizeStart.cx);
-  const rawH = miniResizeStart.h + (toNum(pt.y) - miniResizeStart.cy);
-  if (!isFinite(rawW) || !isFinite(rawH)) return;
-  // 与 BrowserWindow 的 min/max 保持一致；两处必须同步，否则会出现"拖到某尺寸就卡住"
-  const nw = Math.round(Math.max(MINI_MIN_W, Math.min(MINI_MAX_W, rawW)));
-  const nh = Math.round(Math.max(MINI_MIN_H, Math.min(MINI_MAX_H, rawH)));
-  try { miniWin.setSize(nw, nh); }
-  catch (e) { /* 缩放过程中窗口被关掉等极端情况，忽略即可，不能让主进程崩 */ }
-});
-ipcMain.on('mini-resize-end', () => { miniResizeStart = null; });
-/* 小窗移动改用原生 app-region 拖动（mini.html 的 .row 上 -webkit-app-region: drag），
-   由系统直接拖动窗口、完全跟手；原先"每 16ms 轮询光标 + setPosition"的方案有量化延迟，
-   观感卡顿，已移除。拖动结束后仍由下面的 moved 事件做边缘吸附。 */
 
 /* 自动搜索歌词：在音频文件所在目录及其上级目录查找匹配的 .lrc 文件 */
 function normL(s) {
   return (s || '').toLowerCase().replace(/[\s\-_—–~·,，。.()（）\[\]【】"'“”‘’]/g, '');
 }
-ipcMain.handle('find-lyrics', (_e, filePath, title, artist) => {
+ipcMain.handle('find-lyrics', (e, filePath, title, artist) => {
+  // 读的是调用方给的任意路径所在目录 —— 必须先确认调用源是本机界面
+  if (!isTrustedSender(e)) return UNAUTHORIZED;
   try {
     if (!filePath || typeof filePath !== 'string') return null;
     const dir = path.dirname(filePath);
@@ -1080,7 +968,17 @@ function convertNcmWithExe(buf) {
       fs.mkdirSync(outDir, { recursive: true });
     } catch (e) { wipeDir(root); return resolve(null); }
     let settled = false;
-    const finish = v => { if (settled) return; settled = true; resolve(v); };
+    /* ★ 定时器必须能清掉。旧写法 setTimeout 从来不 clearTimeout：
+       每一次成功的转换都会留下一个 120 秒后才触发的定时器 —— Node 里挂着的定时器
+       会让进程多活两分钟（用户感受就是"点了退出，程序卡一会儿才消失"）。
+       现在正常完成 / 出错都 clearTimeout，只有真的超时才走那条分支。 */
+    let timer = null;
+    const finish = v => {
+      if (settled) return;
+      settled = true;
+      if (timer) { clearTimeout(timer); timer = null; }
+      resolve(v);
+    };
     let child;
     try {
       // stdio:'ignore' —— 不需要它的输出，也避免管道在某些环境下受限
@@ -1089,6 +987,7 @@ function convertNcmWithExe(buf) {
     child.on('error', () => { wipeDir(root); finish(null); });
     child.on('exit', code => {
       try {
+        if (settled) { try { wipeDir(root); } catch (e2) { /* ignore */ } return; }   // 超时分支已收尾：补一次擦除即可，别再读
         if (code !== 0) { wipeDir(root); return finish(null); }
         const files = fs.readdirSync(outDir).filter(f => /\.(mp3|flac)$/i.test(f));
         if (!files.length) { wipeDir(root); return finish(null); }
@@ -1099,59 +998,104 @@ function convertNcmWithExe(buf) {
         finish(bytes.length ? { bytes, ext, title: '', artist: '', album: '' } : null);
       } catch (e) { wipeDir(root); finish(null); }
     });
-    // 超时保护（大文件也给足时间）
-    setTimeout(() => {
+    /* 超时保护（大文件也给足时间）。★ 擦除顺序是这里的关键：
+       旧写法 kill() 之后**立刻**同步 wipeDir(root) —— 可 ncmdump 可能还攥着 out/ 里
+       文件的句柄，Windows 上 unlink 会 EBUSY/EPERM 失败，目录就留在那儿了；
+       而 wipeDir 是同步调用、失败只是静默吞掉，随后 finish(null) 走人，再没人回来擦。
+       结果：超时一次，明文 mp3/flac 就长期躺在临时目录里（违反数据管控第 ① 条）。
+       现在改成：kill → 等 exit（进程真退出了句柄才释放）→ 再擦；
+       exit 迟迟不来或进程早已消失，1500ms 后兜底重试擦除；5 秒后无论如何收尾，
+       保证这个 Promise 不会永远挂着。 */
+    timer = setTimeout(() => {
       if (settled) return;
       try { child.kill(); } catch (e) { /* ignore */ }
-      wipeDir(root);
-      finish(null);
+      let wiped = false;
+      const doWipe = () => {
+        if (wiped) return;
+        wiped = true;
+        try { wipeDir(root); } catch (e) { /* ignore */ }
+      };
+      try {
+        child.once('exit', () => { doWipe(); finish(null); });
+      } catch (e) { doWipe(); finish(null); }
+      // 兜底一：exit 没等到（进程僵死 / 已被系统回收）→ 1.5 秒后再擦一次
+      setTimeout(() => { if (!wiped) { try { child.kill(); } catch (e) { /* ignore */ } doWipe(); } }, 1500);
+      // 兜底二：无论如何 5 秒内必须给调用方一个结果，不许挂死
+      setTimeout(() => { doWipe(); finish(null); }, 5000);
     }, 120000);
   });
 }
-ipcMain.handle('convert-ncm', async (_e, arr) => {
-  const buf = Buffer.isBuffer(arr) ? arr : Buffer.from(arr);
+/* ---------- NCM 解密的准入闸门 ----------
+   · 输入上限 200MB：.ncm 再大也就百兆级，超过的一律不接 —— 这条通道会把整个
+     Buffer 读进主进程、再写一份到临时目录、再被 ncmdump 读一遍，等于三倍内存/磁盘开销；
+     没有上限时一次误拖（拖进来一个安装包/镜像）就能把主进程顶到卡死。
+   · 并发上限 2：每次解密都会 spawn 一个 ncmdump.exe。原来多少个请求就起多少个进程，
+     用户批量拖 30 个 .ncm 就是 30 个进程同时抢盘 + 各自一份明文临时目录。
+     超出的请求排队（FIFO），不是丢弃 —— 排队的曲目最后都会轮到。 */
+const NCM_MAX_BYTES = 200 * 1024 * 1024;
+const NCM_MAX_CONCURRENT = 2;
+let ncmRunning = 0;
+const ncmWaiters = [];
+function acquireNcmSlot() {
+  if (ncmRunning < NCM_MAX_CONCURRENT) { ncmRunning++; return Promise.resolve(); }
+  return new Promise((r) => { ncmWaiters.push(r); });
+}
+function releaseNcmSlot() {
+  const next = ncmWaiters.shift();
+  if (next) { next(); return; }         // 名额直接转交给排队者，ncmRunning 不增不减
+  ncmRunning = Math.max(0, ncmRunning - 1);
+}
+ipcMain.handle('convert-ncm', async (e, arr) => {
+  if (!isTrustedSender(e)) {
+    audit('ncm-decrypt', { result: 'rejected:untrusted-origin' });
+    return UNAUTHORIZED;
+  }
+  /* 输入可能是 Buffer / TypedArray / ArrayBuffer / 甚至普通对象（畸形调用）。
+     先把长度取出来做上限判断，再交给 Buffer.from —— 但 Buffer.from 本身也可能抛
+     （比如传进来一个纯对象），所以这一段单独 try 住，不让异常穿透成 invoke 拒绝。 */
+  let rawLen = 0;
+  try {
+    rawLen = Buffer.isBuffer(arr) ? arr.length
+      : (arr && typeof arr.byteLength === 'number' ? arr.byteLength : 0);
+  } catch (e) { rawLen = 0; }
+  if (rawLen > NCM_MAX_BYTES) {
+    audit('ncm-decrypt', { result: 'rejected:too-large', bytes: rawLen });
+    return { error: '文件过大（>200MB），已拒绝解密：' + Math.round(rawLen / 1048576) + 'MB' };
+  }
+  let buf = null;
+  try {
+    buf = Buffer.isBuffer(arr) ? arr : Buffer.from(arr);
+  } catch (e) {
+    audit('ncm-decrypt', { result: 'rejected:bad-payload' });
+    return { error: '解密输入格式不对（期望二进制字节）' };
+  }
   // 先校验容器魔数：只处理真正的 NCM，不做"拿任意文件来试解"的通用解密器
   if (!buf || buf.length < 32 || buf.toString('latin1', 0, 8) !== 'CTENFDAM') {
     audit('ncm-decrypt', { result: 'rejected:not-ncm', bytes: buf ? buf.length : 0 });
     return { error: '不是有效的 NCM 文件（缺少 CTENFDAM 头）' };
   }
-  // 首选：随包 ncmdump.exe（官方实现，兼容性最好）
+  await acquireNcmSlot();
   try {
-    const viaExe = await convertNcmWithExe(buf);
-    if (viaExe && viaExe.bytes && viaExe.bytes.length) {
-      audit('ncm-decrypt', { result: 'ok:exe', bytes: viaExe.bytes.length, ext: viaExe.ext });
-      return viaExe;
+    // 首选：随包 ncmdump.exe（官方实现，兼容性最好）
+    try {
+      const viaExe = await convertNcmWithExe(buf);
+      if (viaExe && viaExe.bytes && viaExe.bytes.length) {
+        audit('ncm-decrypt', { result: 'ok:exe', bytes: viaExe.bytes.length, ext: viaExe.ext });
+        return viaExe;
+      }
+    } catch (e) { /* 继续回退 */ }
+    // 回退：内置 JS 解密（结果同样只在内存里）
+    try {
+      const r = decryptNcmBuffer(buf);
+      audit('ncm-decrypt', { result: 'ok:builtin', bytes: r && r.bytes ? r.bytes.length : 0, ext: r && r.ext });
+      return r;
     }
-  } catch (e) { /* 继续回退 */ }
-  // 回退：内置 JS 解密（结果同样只在内存里）
-  try {
-    const r = decryptNcmBuffer(buf);
-    audit('ncm-decrypt', { result: 'ok:builtin', bytes: r && r.bytes ? r.bytes.length : 0, ext: r && r.ext });
-    return r;
-  }
-  catch (e) {
-    audit('ncm-decrypt', { result: 'failed' });
-    return { error: String((e && e.message) || e) };
-  }
-});
-ipcMain.on('mini-control', (_e, action) => {
-  if (!mainWin || mainWin.isDestroyed()) return;
-  const code = {
-    play: "document.getElementById('playBtn').click()",
-    prev: "document.getElementById('prevBtn').click()",
-    next: "document.getElementById('nextBtn').click()",
-    mode: "document.getElementById('modeBtn').click()"
-  }[action];
-  if (code) {
-    mainWin.webContents.executeJavaScript(code);
-    return;
-  }
-  if (typeof action === 'string' && action.indexOf('seek:') === 0) {
-    const frac = parseFloat(action.slice(5));
-    if (isFinite(frac)) {
-      mainWin.webContents.executeJavaScript(
-        `(function(){ var a=document.getElementById('audio'); if(a.duration) a.currentTime = ${frac} * a.duration; })()`);
+    catch (e) {
+      audit('ncm-decrypt', { result: 'failed' });
+      return { error: String((e && e.message) || e) };
     }
+  } finally {
+    releaseNcmSlot();
   }
 });
 
@@ -1201,7 +1145,9 @@ function longDir(d) {
   }
 }
 
-ipcMain.handle('bili-scan', async (_e, presetDir) => {
+ipcMain.handle('bili-scan', async (e, presetDir) => {
+  // 校验放在最前面：不通过就不弹文件夹选择框（别为一个不受信的调用弹系统对话框）
+  if (!isTrustedSender(e)) return UNAUTHORIZED;
   let dir = longDir(presetDir);
   if (!dir) {
     const r = await dialog.showOpenDialog(mainWin, {
@@ -1221,24 +1167,19 @@ ipcMain.handle('bili-scan', async (_e, presetDir) => {
     return { error: String((e && e.message) || e) };
   }
 });
-ipcMain.handle('bili-scan-dir', async (_e, rawDir) => {
-  const dir = longDir(rawDir);
-  try {
-    const items = await bili.scan(dir, biliOpts());
-    audit('bili-scan', { src: dir, result: 'ok', bytes: items.length });
-    return { ok: true, dir: dir, items: items };
-  } catch (e) {
-    audit('bili-scan', { src: dir, result: 'failed' });
-    return { error: String((e && e.message) || e) };
-  }
-});
 
 /* 把 B 站缓存的原始 .m4s 变成"可播放副本"，供渲染进程在播放前调用。
    force = true 时强制重建（播放报"格式不支持"时的自愈路径）。
    注意：旧版本留下的副本是硬链接，与源文件共享 inode —— 绝不能直接覆盖，
    bili.ensureM4a 内部会先摘掉目录项再写新文件，源缓存不受影响。
-   副本一律落在会话临时目录，不写进 userData，退出时整体擦除。 */
-ipcMain.handle('prepare-bili-audio', (_e, originalPath, force) => {
+   ★ 落点要说准（旧注释写"一律不写 userData"，与事实不符）：
+     · **本通道**（prepare-bili-audio）的副本确实只落会话临时目录 SESSION_AUDIO_DIR，
+       退出即擦 —— 它只为"这一次播放"服务；
+     · 但**导入扫描**（bili-scan → bili.scan，keepDir=LIBRARY_AUDIO_DIR）
+       和 **bili-keep** 会把副本固化进 <userData>\library\audio，那是长期留存的。
+     两处是同一个 ensureM4a、不同目标目录，别混着理解。 */
+ipcMain.handle('prepare-bili-audio', (e, originalPath, force) => {
+  if (!isTrustedSender(e)) return UNAUTHORIZED;
   try {
     if (!originalPath || typeof originalPath !== 'string') return { error: '缺少原始路径' };
     /* 曲库里的老记录可能存着 8.3 短名（扫描目录修复之前导入的），先拧成长名再判存在。
@@ -1266,7 +1207,8 @@ ipcMain.handle('prepare-bili-audio', (_e, originalPath, force) => {
    幂等：同一个源算出的目标文件名固定，已存在就直接返回，不重复占盘。
    源缓存已被删掉时调用会失败（原始文件不存在）—— 渲染侧据此标"音源缺失"，
    而不是静默无声。 */
-ipcMain.handle('bili-keep', (_e, originalPath) => {
+ipcMain.handle('bili-keep', (e, originalPath) => {
+  if (!isTrustedSender(e)) return UNAUTHORIZED;
   try {
     if (!originalPath || typeof originalPath !== 'string') return { error: '缺少原始路径' };
     const srcPath = longPath(originalPath);
@@ -1284,47 +1226,9 @@ ipcMain.handle('bili-keep', (_e, originalPath) => {
   }
 });
 
-/* ================= 旧版设置导入 =================
-   旧版独立播放器跑在 **file:// 域**，新版跑在 **http://127.0.0.1:41739 域** ——
-   localStorage 按 origin 隔离，新版**读不到**旧版存的那几个调音滑块值：
-     mp_tilt（平衡）/ mp_bassw2（峰宽）/ mp_jit2（抖动）/ mp_kick（鼓点）/ mp_peakh（峰高）
-     / mp_viz（可视化模式）…
-   所以这里开一个**隐藏的 file:// 窗口**（空白页，不加载旧界面、不跑旧代码），
-   让 Chromium 自己去读那份存储，再把值交给渲染进程去应用。 */
-const LEGACY_SETTING_KEYS = [
-  'mp_tilt', 'mp_bassw2', 'mp_jit2', 'mp_kick', 'mp_peakh', 'mp_viz',
-  'mp_speed', 'mp_sort', 'mp_theme', 'mp_lyr', 'mp_drawer', 'mp_cover3d', 'mp_state'
-];
-ipcMain.handle('import-legacy-settings', async () => {
-  let win = null;
-  try {
-    ensureSessionTmp();
-    const page = path.join(SESSION_TMP, 'legacy-read.html');
-    fs.writeFileSync(page, '<!doctype html><meta charset="utf-8"><title>legacy</title>', 'utf8');
-    win = new BrowserWindow({
-      show: false,
-      width: 240,
-      height: 160,
-      webPreferences: { contextIsolation: true, nodeIntegration: false, spellcheck: false }
-    });
-    await win.loadFile(page);
-    const out = await win.webContents.executeJavaScript(
-      '(() => { const keys = ' + JSON.stringify(LEGACY_SETTING_KEYS) + ';' +
-      ' const o = {}; for (const k of keys) { try { const v = localStorage.getItem(k); if (v !== null) o[k] = String(v); } catch (e) {} } return o; })()'
-    );
-    const count = out ? Object.keys(out).length : 0;
-    audit('import-legacy-settings', { src: 'file://', result: 'ok', bytes: count });
-    return { ok: true, origin: 'file://', values: out || {} };
-  } catch (e) {
-    audit('import-legacy-settings', { src: 'file://', result: 'failed' });
-    return { error: String((e && e.message) || e) };
-  } finally {
-    try { if (win && !win.isDestroyed()) win.destroy(); } catch (e) { /* ignore */ }
-  }
-});
-
 /* 本地保留副本的占用情况（设置面板里显示"本地副本 N 个 · X MB"） */
-ipcMain.handle('local-audio-info', () => {
+ipcMain.handle('local-audio-info', (e) => {
+  if (!isTrustedSender(e)) return { error: '未授权的调用源' };
   try {
     ensureLibraryAudio();
     let count = 0, bytes = 0;
@@ -1340,60 +1244,6 @@ ipcMain.handle('local-audio-info', () => {
   }
 });
 
-/* ---------- 数据管控：策略自检 / 审计日志 ---------- */
-ipcMain.handle('get-data-policy', () => {
-  return {
-    version: APP_VERSION,
-    sessionId: SESSION_ID,
-    auditCount: auditCount(),
-    policy: {
-      // 解密结果只在内存中传递，从不写入用户音乐目录
-      decryptInMemory: true,
-      // 派生数据（解出的音频 / 剥离头的副本）只存在于会话临时目录
-      derivedScope: 'session-temp',
-      tempCleanup: 'on-quit',
-      /* ★ 唯一的例外，且是刻意为之：**导入**的 B 站缓存音频会在曲库里固化一份
-         可播放副本（<userData>\library\audio）。源缓存在用户自己的 Videos\bilibili
-         下，随时可能被 B 站客户端或用户清掉 —— 不固化就等于把"能不能播"押在
-         一个不属于播放器的目录上（真实事故：《scualee》的源被删，记录成了
-         永远报错的僵尸条目）。
-         这份副本是"用户自己导入的内容"，只存在于本机，不导出、不上传。 */
-      importedAudioKeptIn: 'userData/library/audio',
-      // 程序不提供任何导出 / 另存为 / 分享能力
-      exportApi: false,
-      // 只处理真正的 NCM 容器，不做通用解密
-      ncmMagicCheck: true,
-      // 本地审计可追溯，可一键清空
-      auditLog: true,
-      auditFile: auditFile()
-    }
-  };
-});
-ipcMain.handle('clear-audit-log', () => {
-  try { fs.rmSync(auditFile(), { force: true }); return { ok: true, count: 0 }; }
-  catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
-});
-
-/* 读随包资源（目前只有 3D 磁带模型）。
-   为什么需要这条通道：页面是 file:// 加载的，Chromium 禁止 file:// 页面对本地文件发
-   XHR/fetch，所以 GLTFLoader 没法直接 load('assets/xxx.glb') —— 会撞 CORS。
-   这里由主进程读字节交给渲染进程，再用 loader.parse() 解析。
-   只放行白名单里的文件名：不接受任意路径（否则就成了通用读文件接口）。 */
-const ASSET_ALLOW = new Set(['archive-cassette.glb', 'archive-assembly.glb']);
-ipcMain.handle('read-asset', (_e, name) => {
-  try {
-    if (!name || typeof name !== 'string' || !ASSET_ALLOW.has(name)) {
-      return { error: '不在白名单内的资源：' + String(name) };
-    }
-    const p = path.join(__dirname, 'assets', name);
-    if (!fs.existsSync(p)) return { error: '资源不存在：' + name };
-    const st = fs.statSync(p);
-    if (st.size > 64 * 1024 * 1024) return { error: '资源过大' };
-    return { bytes: fs.readFileSync(p), size: st.size };
-  } catch (e) {
-    return { error: String((e && e.message) || e) };
-  }
-});
 /* ================= 曲库恢复（--recover-library） =================
    背景：新版把界面从"随机端口"改成了固定端口 41739（IndexedDB 按"源"隔离，
    随机端口等于每次启动都换存储域）。而旧版留下来的曲库分散在三处：
@@ -1414,10 +1264,40 @@ const INGEST_MODE = process.argv.includes('--recover-ingest');
    吃完即删。路径同样要过长名（见上面 longPath 的说明）：这个目录会被
    recover.html 以 file:// 直接加载，短名会让 Chromium 认不出地址。 */
 const RECOVER_BUNDLE = path.join(longPath(os.tmpdir()), 'rhine-recover');
+/* 启动时清掉**过期**的恢复交接区 —— 这里是明文音频的落脚点：
+   上次 --recover-library 被中途打断（关窗 / 崩溃 / 强杀）之后，解出来的 mp3/flac
+   会原地留在系统临时目录里，没人再管它，那就是最典型的"派生数据长期留宿"。
+   两条判据，缺一不可：
+     · 恢复 / 吃入模式（--recover-library、--recover-ingest）下**绝不动**：
+       跨 profile 的两步恢复中间可能隔着一次普通启动，正在用的交接区不能被清掉；
+     · 其余情况只在**过期**（超过 6 小时没被改动）时清，给"刚中断、马上重试"留余地。
+   擦除走 wipeDir（覆盖写零 + 删除），不是简单 rm。
+
+   ★ 为什么这个函数定义在这儿、而不是并进 sweepStaleSessions()：
+     RECOVER_BUNDLE / RECOVER_MODE / INGEST_MODE 都是文件后段的 const。若在它们
+     初始化之前调用到，会撞 TDZ 抛 ReferenceError —— 而外层 catch 会把异常一起吞掉，
+     表现就是"残留永远清不掉、日志里一个字都没有"。定义放在常量之后、由
+     whenReady 显式调用，顺序一目了然，不依赖"调的时候应该已经初始化了吧"。 */
+function sweepStaleRecoverBundle() {
+  try {
+    if (RECOVER_MODE || INGEST_MODE) return;
+    let st = null;
+    try { st = fs.statSync(RECOVER_BUNDLE); } catch (e) { return; }
+    if (!st.isDirectory()) return;
+    const age = Date.now() - (st.mtimeMs || 0);
+    if (age < 6 * 60 * 60 * 1000) return;
+    wipeDir(RECOVER_BUNDLE);
+  } catch (e) { logMainError('恢复交接区', e); }
+}
 let recoverWriter = null;
 let recoverStats = { origins: [], total: 0, files: 0, bytes: 0, added: 0, skipped: 0, finished: 0, bundle: RECOVER_BUNDLE };
 
-ipcMain.handle('recover-from-reader', (_e, payload) => {
+ipcMain.handle('recover-from-reader', (e, payload) => {
+  /* 恢复流程里的 reader 页跑在"旧源"上（file:// 或旧端口），都不是本机 UI 服务的源，
+     所以这里不能直接用 isTrustedSender —— 判据换成"必须是 recover.html 这个页面"：
+     它要么是 app 目录下的 file://，要么是 serveForOrigin 起的临时旧端口（同样只发
+     recover.html）。两者之外的一律拒，别让这条能往临时目录写明文的通道对外敞着。 */
+  if (!isRecoveryPage(e)) return { ok: false, error: '未授权的调用源' };
   try {
     if (!payload) return { ok: false };
     if (payload.done) {
@@ -1472,22 +1352,37 @@ function makeRecoverWindow() {
     webPreferences: { contextIsolation: true, nodeIntegration: false, preload: RECOVER_PRELOAD, spellcheck: false }
   });
 }
-/* 在某个 http 源上临时起一个只读静态服务（旧端口上的数据只有在该源里才读得到） */
+/* 在某个 http 源上临时起一个只读静态服务（旧端口上的数据只有在该源里才读得到）。
+   ★ 旧实现是"把 __dirname 整目录静态托管"：main.js、preload.js、package.json、
+     以及随包解密器 ncmdump.exe 全部出现在 http://127.0.0.1:<旧端口>/ 下。
+     端口号来自 IndexedDB 的目录名（上一版用过的随机端口），本机任何进程扫一遍就能
+     把 ncmdump.exe 和主进程源码取走 —— 恢复模式只活几十秒，但这几十秒是敞着的。
+   现在只放行恢复页自己：recover.html（样式与脚本全部内联，不需要任何外部资源），
+   其余路径一律 404，连 403 都不给（不泄露"这个路径存在"）。 */
+const RECOVER_SERVE_ALLOW = new Set(['/recover.html']);
 function serveForOrigin(port, dir) {
   return new Promise((resolve) => {
+    const recoverHtml = path.join(dir, 'recover.html');
     const srv = http.createServer((q, s) => {
-      let p = decodeURIComponent(String(q.url || '/').split('?')[0].split('#')[0]);
-      if (p === '/') p = '/index.html';
-      const file = path.normalize(path.join(dir, p));
-      if (file !== dir && !file.startsWith(dir + path.sep)) { s.writeHead(403); s.end('forbidden'); return; }
+      let p = '';
+      try { p = decodeURIComponent(String(q.url || '/').split('?')[0].split('#')[0]); }
+      catch (e) { s.writeHead(400); s.end('bad request'); return; }
+      if (!RECOVER_SERVE_ALLOW.has(p)) { s.writeHead(404); s.end('not found'); return; }
+      const file = path.normalize(path.join(dir, p.replace(/^\/+/, '')));
+      if (file !== recoverHtml) { s.writeHead(404); s.end('not found'); return; }
       fs.readFile(file, (err, data) => {
         if (err) { s.writeHead(404); s.end('not found'); return; }
-        s.writeHead(200, { 'Content-Type': /\.html$/.test(file) ? 'text/html; charset=utf-8' : 'application/octet-stream' });
+        s.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff'
+        });
         s.end(data);
       });
     });
+    srv.on('close', () => { try { recoverServePorts.delete(port); } catch (e) { /* ignore */ } });
     srv.on('error', () => resolve(null));
-    srv.listen(port, '127.0.0.1', () => resolve(srv));
+    srv.listen(port, '127.0.0.1', () => { recoverServePorts.add(port); resolve(srv); });
   });
 }
 async function runRecovery() {
@@ -1577,15 +1472,17 @@ async function runIngest() {
     const payload = { fields: meta.fields || {}, origin: 'bundle', db: 'bundle', store: 'bundle', index: meta.index || 0, fileName: meta.fileName || undefined, ext: meta.ext || undefined };
     try {
       if (meta.file) {
-        const p = path.join(RECOVER_BUNDLE, meta.file);
-        const buf = fs.readFileSync(p);
-        payload.bytes = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-        recoverStats.files++;
-        recoverStats.bytes += buf.length;
+        const p = path.resolve(RECOVER_BUNDLE, String(meta.file));
+        if (p.startsWith(path.resolve(RECOVER_BUNDLE) + path.sep)) {
+          const buf = fs.readFileSync(p);
+          payload.bytes = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+          recoverStats.files++;
+          recoverStats.bytes += buf.length;
+        }
       }
       if (meta.cover) {
-        const p = path.join(RECOVER_BUNDLE, meta.cover);
-        if (fs.existsSync(p)) {
+        const p = path.resolve(RECOVER_BUNDLE, String(meta.cover));
+        if (p.startsWith(path.resolve(RECOVER_BUNDLE) + path.sep) && fs.existsSync(p)) {
           const buf = fs.readFileSync(p);
           payload.cover = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
         }
@@ -1629,21 +1526,42 @@ function resolveReadablePath(p) {
   return fixed || p;
 }
 
-ipcMain.handle('read-audio', (_e, p) => {
+/* 常见音频扩展名白名单：这条通道会把整个文件读进内存再塞给渲染进程，
+   不设边界就等于"任意路径 + 任意大小"的通用读文件接口（.exe / .db / 密钥文件都能被读走）。
+   白名单只列播放器真的会喂给 <audio> 的那些格式。 */
+const AUDIO_EXT_ALLOW = new Set([
+  '.mp3', '.flac', '.wav', '.m4a', '.m4s', '.mp4', '.ogg', '.opus', '.aac', '.wma', '.webm'
+]);
+function audioExtOf(p) {
+  const m = /(\.[A-Za-z0-9]+)$/.exec(String(p || ''));
+  return m ? m[1].toLowerCase() : '';
+}
+ipcMain.handle('read-audio', async (e, p) => {
+  if (!isTrustedSender(e)) return UNAUTHORIZED;
   try {
     if (!p || typeof p !== 'string') return { error: '文件不存在' };
     const real = resolveReadablePath(p);
+    /* 扩展名先判：不在白名单就直接拒（判在 existsSync 之前，省一次盘 IO）。
+       曲库里的固化副本是 <md5>.m4a、B 站原始缓存是 *.m4s，都在名单内。 */
+    const ext = audioExtOf(real);
+    if (!AUDIO_EXT_ALLOW.has(ext)) {
+      return { error: '只接受音频文件（' + Array.from(AUDIO_EXT_ALLOW).join(' / ') + '），收到：' + (ext || '无扩展名') };
+    }
     if (!fs.existsSync(real)) return { error: '文件不存在：' + p };
-    const st = fs.statSync(real);
+    /* ★ 全部改成异步 IO。原来是 statSync + readFileSync 一口气读几十 MB：
+       这几百毫秒到几秒里主进程是**完全冻住**的（窗口不响应、托盘、小窗全停）。
+       网络盘 / 休眠中的 USB 盘上更狠，能直接把界面卡到"未响应"。 */
+    const st = await fs.promises.stat(real);
+    if (!st.isFile()) return { error: '不是文件：' + p };
     if (st.size > 300 * 1024 * 1024) return { error: '文件过大（>300MB）' };
-    const buf = fs.readFileSync(real);
-    const mime = /\.(m4a|m4s|mp4)$/i.test(real) ? 'audio/mp4'
-      : (/\.flac$/i.test(real) ? 'audio/flac'
-        : (/\.wav$/i.test(real) ? 'audio/wav'
-          : (/\.ogg$|\.opus$/i.test(real) ? 'audio/ogg' : 'audio/mpeg')));
+    const buf = await fs.promises.readFile(real);
+    const mime = ext === '.m4a' || ext === '.m4s' || ext === '.mp4' ? 'audio/mp4'
+      : (ext === '.flac' ? 'audio/flac'
+        : (ext === '.wav' ? 'audio/wav'
+          : (ext === '.ogg' || ext === '.opus' ? 'audio/ogg' : 'audio/mpeg')));
     return { bytes: buf, mime: mime, size: st.size };
-  } catch (e) {
-    return { error: String((e && e.message) || e) };
+  } catch (e2) {
+    return { error: String((e2 && e2.message) || e2) };
   }
 });
 
@@ -1652,7 +1570,8 @@ ipcMain.handle('read-audio', (_e, p) => {
    否则会拿着一份失效引用去 read-audio，弹出一条指向老短路径的
    "文件不存在：C:\Users\KONOMI~1\..."（用户实测反馈的报错）。
    同时也把还原后的真实路径回传，方便曲库就地修好。 */
-ipcMain.handle('audio-exists', (_e, p) => {
+ipcMain.handle('audio-exists', (e, p) => {
+  if (!isTrustedSender(e)) return { ok: false, error: '未授权的调用源' };
   try {
     if (!p || typeof p !== 'string') return { ok: false };
     const real = resolveReadablePath(p);

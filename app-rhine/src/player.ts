@@ -151,6 +151,13 @@ export function currentIndex(): number {
 export function isPlaying(): boolean {
   return !audio.paused;
 }
+/** <audio> 元素里到底有没有音源。
+    ★ 只能用 getAttribute 判断：`audio.src = ""` 之后属性 getter 会把这个空串**按文档
+      baseURI 解析**成非空地址（http://127.0.0.1:xxxx/），拿 `audio.src` 判空永远为假，
+      于是"装载失败"会被当成"已装载"。 */
+function hasAudioSource(): boolean {
+  return Boolean((audio.getAttribute("src") || "").trim());
+}
 export function currentTime(): number {
   return audio.currentTime || 0;
 }
@@ -215,8 +222,20 @@ const persist = (s: Song) => {
 
 /* ---------- 工具 ---------- */
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+/* ★ 单引号也要转义：属性值虽然一律用双引号包裹，但只要有一处将来改成单引号写法，
+   不转义的 ' 就能直接闭合属性。补上 &#39;，正则与映射表同时扩。 */
 const esc = (s: string) =>
-  String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
+  String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
+/** 封面地址白名单 + 转义：只放行 data:image/、blob:、http(s)://、/ 与 ./ 开头的地址。
+    封面来自音频内嵌图 / 用户选的本地图，理论上可控，但它会被直接拼进 innerHTML 的
+    src 属性里 —— 一条被改坏的库记录（或将来新增的导入渠道）就能塞进任意协议。
+    不放行的地址一律返回空串（调用方按"没有封面"处理），绝不静默回退成原值。 */
+function safeCoverUrl(u: string | undefined | null): string {
+  const v = String(u ?? "").trim();
+  if (!v) return "";
+  if (!/^(data:image\/|blob:|https?:\/\/|\/|\.\/)/i.test(v)) return "";
+  return esc(v);
+}
 const niceName = (name: string) => {
   const base = name.replace(/\.[^.]+$/, "");
   const m = base.split(/\s+-\s+/);
@@ -766,15 +785,68 @@ async function ensurePlayableSource(s: Song, force = false): Promise<boolean> {
   const changed = s.srcUrl !== p;
   s.srcUrl = p;
   return changed;
-}/** 把音频文件读成 blob 地址（绕开 file:// 限制）。读不到返回空串。
-    force = true：跳过本地保留副本，强制从源缓存重建会话副本（自愈路径）。
-   ★ 兜底顺序：playablePathOf（会重建）→ srcUrl（**必须探活**）→ s.path（**必须探活**）。
-     以前是 (await playablePathOf(...)) || fileUrlToPath(s.srcUrl) || s.path —— 中间那环
-     完全不校验，把已消失会话目录里的路径直接喂给 readAudio，报错很误导（说"格式不支持"）。
-     现在每一环都先确认"文件真的在盘上"，不在就跳过并给出准确原因。 */
-async function blobUrlOf(s: Song, force = false): Promise<string> {
-  if (!desktop?.readAudio) return "";
-  let p = await playablePathOf(s, force);
+}
+/* ---------- 一次切歌只读一遍盘：共享字节缓存 ----------
+   blobUrlOf（喂给 <audio> 的 blob）与 startSelfmusicPcm（整曲 PCM 解码）要的是**同一份字节**。
+   以前两边各自 readAudio 一遍：B 站缓存的歌每次切歌都读两次盘（一次 IPC 往返 + 整份进内存）。
+   现在按"切歌 token"共享同一次读取：
+     · token 变（切歌）→ bumpTrackBytes() 立刻丢掉旧缓存；
+     · 使用者各自 acquire / release，最后一个 release 落地时缓存清空 ——
+       不会把整首字节长期挂在模块作用域里（解码完 / blob 建完就松）。
+   ★ 为什么用 promise 而不是字节：两个消费者几乎是同时到的（解码先起、blob 后到），
+     缓存 promise 才能把"还在读盘"的那一段也合并掉；若缓存已读好的值，
+     后来的那边仍要等，反而会漏掉合并窗口。 */
+type AudioBytesResult = { bytes: ArrayBuffer; mime?: string } | null;
+interface TrackBytesEntry {
+  token: number;
+  id: string;
+  promise: Promise<AudioBytesResult>;
+  holders: number;
+}
+let trackToken = 0;
+let trackBytes: TrackBytesEntry | null = null;
+
+/** 切歌：旧 token 的字节缓存立刻作废（不长期占内存） */
+function bumpTrackBytes(): number {
+  trackToken++;
+  trackBytes = null;
+  return trackToken;
+}
+/** 本首的音频字节（同一个 token 只读一次盘）。用完必须调 releaseTrackBytes。 */
+function acquireTrackBytes(s: Song, token = trackToken): Promise<AudioBytesResult> {
+  if (trackBytes && trackBytes.token === token && trackBytes.id === s.id) {
+    trackBytes.holders++;
+    return trackBytes.promise;
+  }
+  const entry: TrackBytesEntry = { token, id: s.id, promise: readAudioBytes(s), holders: 1 };
+  trackBytes = entry;
+  return entry.promise;
+}
+/** 放掉一个使用者；最后一个放手 → 缓存清空（切歌或解码完成都算"用完了"） */
+function releaseTrackBytes(token: number) {
+  if (!trackBytes || trackBytes.token !== token) return;
+  trackBytes.holders--;
+  if (trackBytes.holders <= 0) trackBytes = null;
+}
+/** 真正读盘的那一层：路径解析沿用原来的三级兜底，两种消费者共用。
+    force = true：跳过缓存与本地保留副本，强制从源缓存重建（自愈路径）。 */
+async function readAudioBytes(s: Song, force = false): Promise<AudioBytesResult> {
+  /* 内存里的 File 最直接（浏览器导入的曲目没有盘上路径） */
+  if (s.file) {
+    try {
+      const b = await s.file.arrayBuffer();
+      if (b && b.byteLength) return { bytes: b, mime: s.file.type || undefined };
+    } catch {
+      /* 落到路径型 */
+    }
+  }
+  if (!desktop?.readAudio) return null;
+  let p = "";
+  try {
+    p = (await playablePathOf(s, force)) || "";
+  } catch {
+    p = "";
+  }
   if (!p) {
     /* ① 上一次算出的 srcUrl：只在"文件确实还在、且不是临时会话路径"时才用 */
     const cached = fileUrlToPath(s.srcUrl || "");
@@ -787,16 +859,42 @@ async function blobUrlOf(s: Song, force = false): Promise<string> {
   }
   if (!p) {
     lastSourceError = lastSourceError || "源缓存已被删除，本地副本也不在";
-    return "";
+    return null;
   }
   try {
     const res = await desktop.readAudio(p);
-    if (res && res.bytes && res.bytes.byteLength) {
-      return URL.createObjectURL(new Blob([res.bytes], { type: res.mime || "audio/mp4" }));
+    const b = res && res.bytes;
+    if (b && b.byteLength) {
+      /* 统一成独立 ArrayBuffer：后面既要喂 Blob，也要喂 decodeAudioData，
+         不能让它继续是某个更大缓冲上的视图。 */
+      return {
+        bytes: b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer,
+        mime: res.mime,
+      };
     }
     lastSourceError = (res && res.error) || "读不到音频字节";
   } catch {
     /* ignore */
+  }
+  return null;
+}
+/** 把音频文件读成 blob 地址（绕开 file:// 限制）。读不到返回空串。
+    force = true：跳过本地保留副本，强制从源缓存重建会话副本（自愈路径）。
+   ★ 兜底顺序：playablePathOf（会重建）→ srcUrl（**必须探活**）→ s.path（**必须探活**）。
+     以前是 (await playablePathOf(...)) || fileUrlToPath(s.srcUrl) || s.path —— 中间那环
+     完全不校验，把已消失会话目录里的路径直接喂给 readAudio，报错很误导（说"格式不支持"）。
+     现在每一环都先确认"文件真的在盘上"，不在就跳过并给出准确原因。 */
+async function blobUrlOf(s: Song, force = false): Promise<string> {
+  if (!desktop?.readAudio) return "";
+  const token = trackToken;
+  try {
+    /* force：刚重建过副本，缓存里那份字节已经不代表盘上的文件了，只能重读 */
+    const res = force ? await readAudioBytes(s, true) : await acquireTrackBytes(s, token);
+    if (res && res.bytes && res.bytes.byteLength) {
+      return URL.createObjectURL(new Blob([res.bytes], { type: res.mime || "audio/mp4" }));
+    }
+  } finally {
+    if (!force) releaseTrackBytes(token);
   }
   return "";
 }
@@ -815,12 +913,24 @@ function armPendingSeek(s: Song) {
         于是每一首都得先失败一次、再走 error 自愈降级，既慢又一定会弹红提示。
     实测证明"直读"在这套架构下根本走不通。**正确做法：一律 read-audio 读字节 → Blob → objectURL**，
     这条路径一直可用，且能绕开协议限制。代价（整份载入内存）是这个架构下必须接受的。 */
+/* ★ 异步音源判据（B 站缓存那一路）：**唯一**一处定义。
+     loadSongAudio 决定"走不走 loadBiliAudio"、playAt 决定"要不要自己 play()"，
+     两边必须用同一个函数 —— 以前 playAt 用的是 `!s.srcUrl`，而 loadSongAudio 用的是
+     `s.path || s.srcUrl`：于是"有 path 但 srcUrl 还没算出来"的曲目，loadSongAudio 走异步
+     装载（此时元素里还是**上一首的**音源），playAt 却以为"这是普通文件"，直接
+     audio.play() → 点了 A 响起 B。这类判据一旦分叉就必然对这个缝，所以只留一份。 */
+function isAsyncBiliSource(s: Song | null | undefined): boolean {
+  if (!s) return false;
+  return Boolean(s.path || s.srcUrl);
+}
 let loadSeq = 0;
 async function loadBiliAudio(s: Song, autoplay: boolean) {
   const token = ++loadSeq;
   loadedId = null; // 装好之前不算"已装载"，用户这时点它 playAt 会真的来加载
   armPendingSeek(s);
-  if (autoplay) audio.pause(); // 先把上一首停住，免得异步备源期间它还在响
+  /* ★ 不再只在 autoplay 时暂停：异步备源要跑 healsSongPathsOnce + 重建副本 + 读字节，
+     这一整段时间里旧音频还在元素里响，正是"点 A 响 B"的现场。切异步源一律先停。 */
+  if (!audio.paused) audio.pause();
   /* 首次走这条路时，把曲库里历史遗留的 8.3 短名路径修成长名。
      一次性、很轻（每首两次 stat），但能彻底断掉"文件不存在：C:\Users\KONOMI~1\..."。 */
   await healsSongPathsOnce();
@@ -832,13 +942,14 @@ async function loadBiliAudio(s: Song, autoplay: boolean) {
     if (blob) URL.revokeObjectURL(blob);
     return;
   }
-  // blob 记进 currentUrl，下次切歌时连同上一首的一起回收
-  if (blob) {
-    if (currentUrl) URL.revokeObjectURL(currentUrl);
-    currentUrl = blob;
-  }
+  /* ★ 顺序：先把新 src 落到元素上，**再**回收旧的 blob 地址。
+     反过来的话，旧音频还挂在元素上、底层数据已经被 revoke —— 表现是切歌瞬间卡死或爆
+     MediaError。blob 为空时把 src 置空并把 loadedId 归 null：装载失败不许谎报"已装载"。 */
+  const oldUrl = currentUrl;
+  currentUrl = blob || null;
   audio.src = blob || "";
-  loadedId = s.id;
+  loadedId = blob ? s.id : null;
+  if (oldUrl && oldUrl !== currentUrl) URL.revokeObjectURL(oldUrl);
   if (autoplay) audio.play().catch(() => {});
 }
 /** 系统设置里的"音频质量"一行：把几件"默认行为不透明"的事摊开给用户看。
@@ -1036,29 +1147,36 @@ export async function rereadAllCovers() {
       (bad ? `，${bad} 首读取失败` : ""),
   );
 }
-/** 只把音频装进 <audio> 元素（不碰界面状态）。启动时的"恢复上次曲目"不走这里。 */function loadSongAudio(s: Song, autoplay = false) {
-  if (currentUrl) {
-    URL.revokeObjectURL(currentUrl);
-    currentUrl = null;
-  }
+/** 只把音频装进 <audio> 元素（不碰界面状态）。启动时的"恢复上次曲目"不走这里。 */
+function loadSongAudio(s: Song, autoplay = false) {
   s.triedHeal = false;
   /* ★ SelfMusic 频谱活路径：切歌先把整曲 PCM 解出来（异步，不挡播放）。
      解码完成前画面清零；失败/超长自动退回流式模式（见 startSelfmusicPcm）。 */
   startSelfmusicPcm(s);
-  /* ★ 判据用 s.path（原始源缓存路径，稳定），不要用 s.srcUrl ——
-     srcUrl 是"上次算出的可播放地址"，可能是失效的历史值，
-     但它的存在不代表这一首是路径型音源。两者都指向路径型音源时走异步装载。 */
-  if (s.path || s.srcUrl) {
-    // B 站缓存：副本要在会话临时目录里重新生成，而且必须走内存读取绕开 file:// 限制 —— 异步装载
+  /* ★ 判据只认 isAsyncBiliSource（原始源缓存路径），不要在这里另写一套 ——
+     它和 loadBiliAudio 的入口条件、playAt 的起播条件必须是同一个判断，
+     否则"有 path 无 srcUrl"时会对着上一首残留的 audio.src 调 play()。 */
+  if (isAsyncBiliSource(s)) {
+    /* ★ 不管 autoplay 与否先停声：异步备源期间旧音频还挂在元素上，
+       用户听到的是"点了这首，上首还在唱"。 */
+    if (!audio.paused) audio.pause();
     void loadBiliAudio(s, autoplay);
     return;
   }
+  /* 同步音源（File → objectURL）：先把新 src 换上去，再回收旧 blob 地址。
+     反过来会让旧音频在仍被使用时被 revoke。没有 File 就把 src 清空，
+     loadedId 保持 null —— 不许把"什么都没装"记成"已装载"。 */
+  const oldUrl = currentUrl;
   loadedId = null;
   if (s.file) {
     currentUrl = URL.createObjectURL(s.file);
     audio.src = currentUrl;
+    loadedId = s.id;
+  } else {
+    currentUrl = null;
+    audio.src = "";
   }
-  loadedId = s.id;
+  if (oldUrl && oldUrl !== currentUrl) URL.revokeObjectURL(oldUrl);
   armPendingSeek(s);
 }
 function selectSong(id: string, autoplay = false) {
@@ -1113,7 +1231,7 @@ function followWithArchive(index: number, force = false) {
 export function focusTrack(index: number): boolean {
   const s = songs[index];
   if (!s) return false;
-  if (s.id === currentId && s.id === loadedId) return false; // 已经就是它，别重装音源
+  if (s.id === currentId && s.id === loadedId && hasAudioSource()) return false; // 已经就是它，别重装音源
   selectSong(s.id, false);
   markRestored(false);
   return true;
@@ -1124,11 +1242,12 @@ export function playAt(i: number) {
   const s = songs[i];
   /* 点的就是当前这首、而且**真的装进 audio 元素**了：不要重新加载（重新赋 audio.src
      会回到 0 秒），暂停中就接着放、正在放就保持 —— 这就是"点歌不要重新播放"。
-     判据用 currentId === loadedId：启动时"记得上次播放的那首"只填了界面，
-     还没装进 audio，那时候点它必须真的去加载。
+     判据用 currentId === loadedId **并且元素里确实有 src**：启动时"记得上次播放的那首"
+     只填了界面；装载失败（blob 为空 / 异步源断掉）时 loadedId 也不再谎报，
+     但元素里可能是空的，这时必须真的去加载，否则 play() 打在空气上。
      ★ 但"把画面跟到这首"照旧要做（原来这里直接 return）：先在列表里点歌、再去点别的档案
      把选中态挪走之后，再点回列表里这一首，档案阵列就再也切不回它了。 */
-  if (s.id === currentId && s.id === loadedId) {
+  if (s.id === currentId && s.id === loadedId && hasAudioSource()) {
     if (audio.paused) audio.play().catch(() => {});
     window.dispatchEvent(new CustomEvent("rhine-track", { detail: i }));
     followWithArchive(i);
@@ -1140,11 +1259,12 @@ export function playAt(i: number) {
   persist(s);
   /* 普通文件（objectURL）在这里起播；B 站缓存那一类的音源是异步备好的
      （要重新生成副本 + 读字节转 blob），由 loadBiliAudio 自己起播 ——
-     这里再 play() 一次只会把上一首的残留音源又推起来。 */
-  if (!s.srcUrl) audio.play().catch(() => {});
+     这里再 play() 一次只会把上一首的残留音源又推起来。
+     ★ 判据必须和 loadSongAudio 同一个（isAsyncBiliSource）：用 `!s.srcUrl` 那套会在
+     "有 path 但还没算出 srcUrl"时走进这里，play() 一响就是上一首。 */
+  if (!isAsyncBiliSource(s)) audio.play().catch(() => {});
   followWithArchive(i);
 }
-/* 诊断开关：?viztest=1 / ?diag=1 时把播放内核挂到 window 上，自动化核对"点歌续播"用 */
 /* 「下一首播放」：把曲目排到当前这首后面（不动曲库顺序，只在队列里记 id） */
 let nextQueue: string[] = [];
 export function queueNext(id: string) {
@@ -1176,7 +1296,7 @@ export function togglePlay() {
      一声不响，用户必须先点列表里的**别的**一首（走 playAt → 真的加载）才能播 ——
      用户反馈的"刚打开必须切到下一首才能正常播放"就是这一句。
      现在先确认"这一首真的装进去了"，没装就走完整条加载（playAt 会带着播放）。 */
-  if (loadedId !== s.id) {
+  if (loadedId !== s.id || !hasAudioSource()) {
     playAt(currentIndex());
     return;
   }
@@ -1893,8 +2013,15 @@ let smPcmState: SmPcmState = "stream";
 let smDecodeToken = 0;
 let smPcmRate = 0;
 let smPcmDurMs = 0;
+/* ---------- 解码闸门（P1-4） ----------
+   smDecoding：单飞。同时只允许一个整曲解码在跑 —— 连点十首歌就是十份 PCM 同时进内存，
+   那是必然的 OOM。解码中来的新歌只记进 smDecodePending（**只留最新一首**，
+   中间划过去的那些本来也不会被看到），本轮结束再开下一轮，旧结果按 token 丢弃。
+   PCM_BUDGET_BYTES：单声道 Float32 的内存上限（采样点数 × 4 字节）。 */
+let smDecoding = false;
+let smDecodePending: Song | null = null;
+const PCM_BUDGET_BYTES = 200 * 1024 * 1024;
 let smLastTickAt = 0; // performance.now()（ms），上一分析帧的真实时刻
-let smLastTickDt = 0; // 上一分析帧的真实间隔（诊断）
 
 /** 引擎懒建；已存在则只确保采样率（切歌换原生率时重建频段表） */
 function ensureRefEngine(sr: number): SelfSpectrumEngine {
@@ -1927,10 +2054,9 @@ function smTickDt(): number {
   const now = performance.now();
   const dt = smLastTickAt > 0 ? Math.min(200, now - smLastTickAt) : 0;
   smLastTickAt = now;
-  smLastTickDt = dt;
   return dt;
 }
-/** 把一窗时域直接送引擎（viztest 合成信号 / 流式回退共用） */
+/** 把一窗时域直接送引擎（流式回退路径） */
 function smPublishWindow(win: Float32Array) {
   const eng = ensureRefEngine(smPcmRate || actx?.sampleRate || 48000);
   const dt = smTickDt();
@@ -1963,72 +2089,64 @@ function smTickFrame() {
 function zeroRefBars() {
   spectrum?.resetPeaks();
 }
-/** 取一首歌的音频字节（解码用）。与 blobUrlOf 同一套路径解析，但不做任何"转换/自愈" */
-async function audioBytesOf(s: Song): Promise<ArrayBuffer | null> {
-  if (s.file) {
-    try {
-      return await s.file.arrayBuffer();
-    } catch {
-      /* 落到路径型 */
-    }
-  }
-  if (!desktop?.readAudio) return null;
-  let p = "";
-  try {
-    p = (await playablePathOf(s, false)) || "";
-  } catch {
-    p = "";
-  }
-  if (!p) {
-    const cached = fileUrlToPath(s.srcUrl || "");
-    if (cached && !isStaleSessionPath(cached) && (await audioReadableExists(cached))) p = cached;
-  }
-  if (!p) {
-    const raw = s.path || "";
-    if (raw && !isStaleSessionPath(raw) && (await audioReadableExists(raw))) p = raw;
-  }
-  if (!p) return null;
-  try {
-    const res = await desktop.readAudio(p);
-    const b = res && res.bytes;
-    if (b && b.byteLength) {
-      return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer;
-    }
-  } catch {
-    /* ignore */
-  }
-  return null;
-}
+/* audioBytesOf 已经并进 readAudioBytes / acquireTrackBytes（见 §共享字节缓存）：
+   解码与 blob 走同一次读盘，不再各读一遍。 */
 /** 切歌入口：启动整曲 PCM 解码（异步；token 防串台）。失败即回退流式模式 */
 function startSelfmusicPcm(s: Song) {
   const token = ++smDecodeToken;
+  bumpTrackBytes();          // 切歌：上一首的字节缓存立刻作废（不长期占内存）
   smPcmState = "wait";
   smPcmRate = 0;
   smPcmDurMs = 0;
   smDriver?.engine.reset();
   zeroRefBars();
-  void (async () => {
-    const bytes = await audioBytesOf(s);
+  /* ★ 单飞闸门：已经有一个解码在跑时不再新起一个，只记"最新待解的那一首"。
+     同时起多条 async 解码 = 多份整曲 PCM 同时在内存里长（每条都是几十~上百 MB），
+     连点几首歌就足够把渲染进程打爆。旧任务的结果由 token 判定后丢弃。 */
+  if (smDecoding) {
+    smDecodePending = s;
+    return;
+  }
+  void runPcmDecode(s, token);
+}
+/** 一次整曲解码（单飞执行体）。切歌则中途放弃，结果与字节一律不留。 */
+async function runPcmDecode(s: Song, token: number) {
+  smDecoding = true;
+  const bytesToken = trackToken;
+  try {
+    /* 与 blobUrlOf 共用同一次 readAudio（同一 token 只读一遍盘） */
+    const res = await acquireTrackBytes(s, bytesToken);
     if (token !== smDecodeToken) return;
-    if (!bytes) {
+    if (!res || !res.bytes) {
+      smPcmState = "stream";
+      return;
+    }
+    const bytes = res.bytes;
+    const rateGuess = actx?.sampleRate ?? 48000;
+    const dur = Number(s.duration) || 0;
+    /* ★ 内存预算先行：Float32 单声道 = 采样率 × 4 字节/秒。
+       已知时长时先估一遍并按 **字节** 算（不是按分钟估）—— 超过 200MB 连解都不解。
+       真要等解码完才发现爆，进程已经没了，退回流式也来不及。 */
+    if (dur > 0 && dur * rateGuess * 4 > PCM_BUDGET_BYTES) {
       smPcmState = "stream";
       return;
     }
     /* 超长/超大守卫：SelfMusic 对长音频只取前 900s（超出部分频谱归零）；
        这里直接退回流式模式（比"整曲解码爆内存"稳，也比"15 分钟后空白"可用）。 */
-    const dur = Number(s.duration) || 0;
     if (dur > 900 || bytes.byteLength > 120 * 1024 * 1024) {
       smPcmState = "stream";
       return;
     }
     let dec: { pcm: Float32Array; rate: number } | null = null;
     try {
-      dec = await decodeMonoPcm(bytes, actx?.sampleRate ?? 48000);
+      dec = await decodeMonoPcm(bytes, rateGuess);
     } catch {
       dec = null;
     }
     if (token !== smDecodeToken) return;
-    if (!dec) {
+    /* decodeMonoPcm 自己也有一道硬上限（见 selfmusic-pcm.ts）；这里是第二道闸：
+       万一换了实现或那里判据放宽，也不让一份超预算的 PCM 进驱动。 */
+    if (!dec || dec.pcm.byteLength > PCM_BUDGET_BYTES) {
       smPcmState = "stream";
       return;
     }
@@ -2038,7 +2156,15 @@ function startSelfmusicPcm(s: Song) {
     smPcmRate = dec.rate;
     smPcmDurMs = Math.round((dec.pcm.length / dec.rate) * 1000);
     smPcmState = "pcm";
-  })();
+  } finally {
+    /* 解码结束 → 这份原始字节没人要了，立刻松引用（切歌 / 解码完成都算"用完"） */
+    releaseTrackBytes(bytesToken);
+    smDecoding = false;
+    const next = smDecodePending;
+    smDecodePending = null;
+    /* 单飞队列：解码期间划过的那一首在这里接上（token 已经是它的了） */
+    if (next && smDecodeToken !== token) void runPcmDecode(next, smDecodeToken);
+  }
 }
 
 /* ---------- 可视化调节（十六滑块）：存储 + 应用 ----------
@@ -2152,14 +2278,43 @@ let vizLast = 0;
 /* 分析节拍（固定 16ms = SelfMusic 的 QTimer）的定时器句柄。rAF 只管重画，分析由它驱动 ——
    挂在 rAF 上会被 16.7ms 的步长量化成 33ms，节拍就不对了。 */
 let vizTimer: ReturnType<typeof setTimeout> | null = null;
-let vizTickCount = 0; // 诊断：一秒内的分析 tick 数 → vizTickFps
-let vizTickT0 = 0;
-let vizTickFps = 0;
 let spectrum: Spectrum | null = null;
+/* 频谱加饰档位（v1.1，2026-11-14 用户："可视化似乎还有点薄"）。
+   0 = 纯复刻（SelfMusic visualizer.py 直译，像素对拍用）
+   1 = 加饰（默认：天际线 / 柱顶受光 / 双段辉光 / 槽位刻度 / 接地带）
+   2 = 加饰 + 顶部光幕
+   ★ 只动绘制层，不碰引擎与 16 项滑块 —— 柱高、停点、alpha 公式一个数都不变。 */
+const SM_DECOR_KEY = "rhine-sm-decor";
+function readSmDecor(): number {
+  try {
+    const v = Number(localStorage.getItem(SM_DECOR_KEY));
+    return Number.isFinite(v) && v >= 0 && v <= 2 ? Math.round(v) : 1;
+  } catch {
+    return 1;
+  }
+}
+let smDecor = readSmDecor();
+export function getSmDecor(): number {
+  return smDecor;
+}
+export function setSmDecor(level: number) {
+  const v = Math.max(0, Math.min(2, Math.round(Number(level)) || 0));
+  smDecor = v;
+  try {
+    localStorage.setItem(SM_DECOR_KEY, String(v));
+  } catch {
+    /* ignore */
+  }
+  spectrum?.setDecor(v);
+}
 /* 这一 tick 要分析吗：播放中、或 ?viztest 的合成信号。暂停后不需要分析
-   （柱高回落由 rAF 那条循环的 decay() 负责）。 */
+   （柱高回落由 rAF 那条循环的 decay() 负责）。
+   ★ PCM 活路径**不需要** analyserNode：整曲 PCM 已经在驱动引擎了。
+     以前这里只认 analyserNode，于是接管音频图失败（vizDenied）时，
+     连 PCM 那条本来能用的路径一起被门掉 —— 明明有数据，画面却一动不动。 */
 function vizAnalysing() {
-  return Boolean(analyserNode) && !audio.paused;
+  if (audio.paused) return false;
+  return (smPcmState === "pcm" && Boolean(smDriver)) || Boolean(analyserNode);
 }
 /** 起分析定时器（幂等：已经在跑就不重复起）。
     节拍固定 16ms —— 与 SelfMusic mainwindow 的 QTimer（v2.7.6 起唯一档）一致。 */
@@ -2171,67 +2326,21 @@ function stopVizAnalysis() {
   if (vizTimer !== null) clearTimeout(vizTimer);
   vizTimer = null;
 }
-/* 一个分析 tick：取时域 → 喂 SelfMusic 活路径 → 出图。
-   ★ 只有一条管线（v2.7.7 起）：viztest 用合成信号、真实播放用 analyser 时域，
-     两者都进 smPublishWindow/smTickFrame（位置窗 + 平滑时钟 + 16ms 折算）。 */
+/* 一个分析 tick：取时域 → 喂 SelfMusic 活路径 → 出图。 */
 function analysisTick() {
   vizTimer = null;
-  if (!vizAnalysing()) return;
-  /* 诊断：分析 tick 的实测频率（应 ≈62Hz） */
-  vizTickCount++;
-  const nowMs = performance.now();
-  if (!vizTickT0) vizTickT0 = nowMs;
-  if (nowMs - vizTickT0 >= 1000) {
-    vizTickFps = Math.round((vizTickCount * 1000) / (nowMs - vizTickT0));
-    vizTickCount = 0;
-    vizTickT0 = nowMs;
-  }
-  /* ★ 这里原先还挂着两条分支，2026-11-10 的「清理调试残留」把它们整段删掉了 ——
-     连**生产那条**一起删（`else if (analyserNode && spectrum) smTickFrame();`）。
-     症状：画布还在、一直重画，但引擎从没被喂过任何一窗数据 → 柱高恒 0 →
-     「可视化没了」。调试钩子可以删，这条分析调用不能删。 */
-  if (analyserNode && spectrum) {
+  /* 没有画布（离开详情页后 disposeDetailViz 把 spectrum 放了）就别再重挂定时器：
+     否则一个 62Hz 的死循环会在后台一直空转。 */
+  if (!spectrum || !vizAnalysing()) return;
+  /* ★ 门控必须认两条腿：PCM 活路径（smPcmState === "pcm" 且有 driver，不需要
+     analyserNode）**或**流式 analyser。只认 analyserNode 会把可用的 PCM 路径
+     一起门掉 —— 接管音频图失败时画面永远不动，而引擎其实一直在出数。 */
+  if ((smPcmState === "pcm" && smDriver) || analyserNode) {
     smTickFrame();
-  } else if (spectrum) {
+  } else {
     spectrum.decay();
   }
   armVizAnalysis();
-}
-/* ?viztest=1：不播音乐，用合成信号跑频谱 —— 用来在无音频的环境里核对频谱观感。
-   信号要有**真实音乐的频谱形状**：粉噪打底（每倍频程 −3dB，高频自然衰减）＋ 一条低频
-   基音与它的谐波 ＋ 每 4 秒一次的鼓点包络。
-   早先这里是"55Hz + 440Hz + 2.4kHz 三个纯音"——纯音经过 Hann 加窗后
-   旁瓣泄漏很宽，120 个对数频段的读数几乎一样大，本帧峰值归一后全部贴到 1.0，
-   看起来就是"柱子全顶满"，完全没法用来看观感。 */
-let vizTestPhase = 0;
-let vizNoiseLp = 0; // 粉噪的一阶低通状态（跨帧连续，噪声才连贯）
-let vizNoiseIdx = 0; // 已生成的采样总数（时间轴连续，避免每帧从头开始）
-const VIZ_NOISE_HP = 0.55; // 粉噪的高频衰减（一阶低通系数）
-function vizTestTimeData(out: Float32Array) {
-  const sr = actx?.sampleRate ?? 48000;
-  vizTestPhase += 1;
-  const beat = Math.pow(Math.max(0, Math.sin((vizTestPhase / 120) * Math.PI * 2)), 8);
-  const n = out.length;
-  for (let i = 0; i < n; i++) {
-    const t = (vizNoiseIdx + i) / sr;
-    /* 频谱形状要**像真实音乐**：低频厚、高频薄（一阶低通 ＝ −6dB/oct，再叠白噪垫底）。
-       早先用"三个纯音"，Hann 加窗后旁瓣泄漏很宽，120 个对数频段读数几乎一样，
-       本帧峰值归一后整排都贴到 1.0，看起来就是"柱子全顶满"——完全没法用来看观感。 */
-    vizNoiseLp += (Math.random() * 2 - 1 - vizNoiseLp) * VIZ_NOISE_HP;
-    let s = vizNoiseLp * 0.9 + (Math.random() * 2 - 1) * 0.1;
-    // 低频基音 + 谐波（受鼓点包络调制），给低频那根"细针"一点真实素材
-    const env = 0.35 + 0.65 * beat;
-    s +=
-      env *
-      (0.26 * Math.sin(2 * Math.PI * 55 * t) +
-        0.12 * Math.sin(2 * Math.PI * 110 * t) +
-        0.05 * Math.sin(2 * Math.PI * 220 * t));
-    // 中高频人声区：窄带扫频（随鼓点起伏）
-    s += env * 0.06 * Math.sin(2 * Math.PI * (700 + 400 * Math.sin(2 * Math.PI * 0.3 * t)) * t);
-    out[i] = Math.max(-1, Math.min(1, s * 0.5));
-  }
-  vizNoiseIdx += n;
-  return beat;
 }
 
 /** 频谱调色板：颜色取本机主题（style.css 的权威配色），**规则**照 SelfMusic：
@@ -2462,6 +2571,15 @@ function vizStop() {
   vizRaf = 0;
   stopVizAnalysis();
 }
+/** 离开详情页：把频谱实例与绘制/分析循环一起放掉。
+    ★ 精确名字（main.ts 那边按这个名调用）：disposeDetailViz。
+    详情区每次重绘都会 new 一个 Spectrum 绑在新画布上，旧实例若不放手，
+    rAF 与分析定时器会指着已经脱离文档的画布继续算 —— 等于离开页面后还在烧 CPU。
+    这里只放"详情页这一份"：音频元素、AudioContext、引擎都保留，回详情页立刻能用。 */
+export function disposeDetailViz(): void {
+  spectrum = null;
+  vizStop();
+}
 async function startViz() {
   const node = await ensureAnalyser();
   if (!node) return;
@@ -2502,15 +2620,6 @@ function lrcLines(s: Song | null): { t: number; txt: string }[] {
    两个 while 都是"摊还 O(1)"。 */
 let lyricCursor = 0;
 let lyricCursorId = "";
-/* 诊断用：非 null 时取代 audio.currentTime 作为歌词推进的时间源（见 stepLyrics）。
-   正常运行时恒为 null，对真实播放没有任何影响。 */
-let lyricTimeOverride: number | null = null;
-/** 给自动化验证用：喂一个歌词时间并立刻走一遍 stepLyrics。
-    只在诊断开关下导出（见 mountSongDetail），产品运行时不暴露。 */
-export function setLyricTimeForTest(sec: number) {
-  lyricTimeOverride = isFinite(sec) ? sec : null;
-  stepLyrics();
-}
 
 /* ★ 详情区正在"展示"的那一首 ≠ 正在"播放"的那一首。
    用户可以在档案阵列里翻看任意一首（详情面板显示 songs[selected]），
@@ -2563,12 +2672,7 @@ function stepLyrics() {
     return;
   }
 
-  /* 歌词时间源：正常取 audio.currentTime。
-     ★ 自动化验证里那首假曲目没有真实音源（audio.currentTime 永远是 0），
-       没法推播放进度 —— 于是允许在诊断开关（?diag=1 / rhine-diag）下
-       从外面喂一个时间，走的是**和 timeupdate 完全相同**的这一条路径，
-       验证到的滚动/高亮就是真实行为，不是另写一条捷径。 */
-  const cur = lyricTimeOverride !== null ? lyricTimeOverride : audio.currentTime || 0;
+  const cur = audio.currentTime || 0;
   // 向前推进：只要能走到下一行，就走
   while (lyricCursor + 1 < lines.length && lines[lyricCursor + 1].t <= cur) lyricCursor++;
   // 向后回退：seek 往回拖 / 换到新的一首时的兜底
@@ -3054,7 +3158,7 @@ export function songDetailMarkup(index: number): string {
   return `
   <div class="detail-kicker"><span>TRACK ${empty ? "000" : esc(s!.id.slice(-3).toUpperCase())}</span><span class="song-mode-kicker">${status} · ${MODE_EN[mode] ?? "LOOP"}</span></div>
   <div class="song-head">
-    <div class="song-cover">${s && s.cover ? `<img src="${s.cover}" alt="${esc(s.title)} 封面"/>` : ""}</div>
+    <div class="song-cover">${s && safeCoverUrl(s.cover) ? `<img src="${safeCoverUrl(s.cover)}" alt="${esc(s.title)} 封面"/>` : ""}</div>
     <div class="song-head-text">
       <h2>${esc(title)}</h2>
       <div class="detail-title-cn">${esc(artist)}<span>${esc(album)}</span></div>
@@ -3128,7 +3232,7 @@ export function songEditMarkup(index: number): string {
   editIndex = index;
   editDraft = { title: s.title || "", artist: s.artist || "", album: s.album || "" };
   const hasPath = Boolean(s.filePath && !s.srcUrl);
-  const coverSrc = s.cover || "";
+  const coverSrc = safeCoverUrl(s.cover);
   return `
   <div class="detail-kicker"><span>EDIT TRACK ${esc(s.id.slice(-3).toUpperCase())}</span><span class="song-mode-kicker">INFO / 歌曲信息</span></div>
   <div class="edit-grid">
@@ -3229,9 +3333,10 @@ export function mountSongEdit(root: ParentNode) {
   if (cv) {
     spectrum = new Spectrum(cv);
     spectrum.setPalette(spectrumPalette());
+    spectrum.setDecor(smDecor);
   }
   if (!vizRaf) {
-    const live = Boolean(analyserNode) && !audio.paused;
+    const live = vizAnalysing();
     if (live || spectrum) vizRaf = requestAnimationFrame(vizFrame);
   }
   armVizAnalysis();
@@ -3424,10 +3529,10 @@ export function mountSongDetail(root: ParentNode) {
     // 面板每次重绘都是新画布，因此频谱实例跟着重建（画布尺寸决定柱宽与渐变）
     spectrum = new Spectrum(cv);
     spectrum.setPalette(spectrumPalette());
-    // 诊断开关：?viztest=1 时把实例与帧率对象挂到 window 上，便于自动化核对（见功能说明）
+    spectrum.setDecor(smDecor);
   }
   if (vizRaf) return;
-  const live = Boolean(analyserNode) && !audio.paused;
+  const live = vizAnalysing();
   if (live) vizRaf = requestAnimationFrame(vizFrame);
   armVizAnalysis();
 }
@@ -3457,10 +3562,12 @@ audio.addEventListener("error", async () => {
            用户反馈的"把缓存文件夹删了就不能播"正需要这条兜底。 */
         if (!blob && s.localPath) blob = await blobUrlOf(s, false);
         if (blob) {
-          if (currentUrl && currentUrl !== blob) URL.revokeObjectURL(currentUrl);
+          /* 与 loadBiliAudio 同一个顺序：先换 src、再回收旧地址 */
+          const oldUrl = currentUrl;
           currentUrl = blob;
           audio.src = blob;
           loadedId = s.id;
+          if (oldUrl && oldUrl !== currentUrl) URL.revokeObjectURL(oldUrl);
           audio.play().catch(() => {});
           playbackErrorHandling = false;
           return;

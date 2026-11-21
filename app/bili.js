@@ -215,6 +215,29 @@ function fileToDataUrl(p) {
   } catch (e) { return null; }
 }
 
+/* ================= 封面下载的主机白名单 =================
+   coverUrl 来自 entry.json / videoInfo.json —— 那是**磁盘上的数据**，不是我们能保证的东西
+   （缓存目录可以被手工改、被同步软件覆盖、被别的程序写）。而 httpGetBinary 会照它去
+   GET 并把结果写进 userData/bili_cover 再 base64 给界面：等于一个"读 JSON 就能让播放器
+   访问任意地址"的 SSRF 口子，顺手还能打内网（127.0.0.1 / 10.x / 192.168.x / 169.254.x）。
+   所以只认 B 站自己的图床：
+     · 精确命中 hdslb.com / bilibili.com
+     · 或它们的任意子域（i0.hdslb.com / album.bilibili.com …）
+   私网与 localhost 即便"看起来像子域"也先按字面拒掉（多一道，不依赖前缀匹配）。
+   跳转也过同一道门（见 httpGetBinary 里的 3xx 分支）—— 只校验首跳等于没校验。 */
+const COVER_HOST_EXACT = new Set(['hdslb.com', 'bilibili.com']);
+const PRIVATE_HOST_RE = /^(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|169\.254\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|\[?::1\]?)$/i;
+function isAllowedCoverUrl(rawUrl) {
+  let u = null;
+  try { u = new URL(String(rawUrl || '')); } catch (e) { return false; }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return false;
+  const host = String(u.hostname || '').toLowerCase();
+  if (!host) return false;
+  if (PRIVATE_HOST_RE.test(host)) return false;
+  if (COVER_HOST_EXACT.has(host)) return true;
+  return host.endsWith('.hdslb.com') || host.endsWith('.bilibili.com');
+}
+
 function httpGetBinary(url, depth, timeoutMs) {
   depth = depth || 0;
   timeoutMs = timeoutMs || 15000;
@@ -222,6 +245,8 @@ function httpGetBinary(url, depth, timeoutMs) {
     if (depth > 4 || !url) return resolve(null);
     let u;
     try { u = new URL(url); } catch (e) { return resolve(null); }
+    // 每一跳都过白名单（首跳、重定向后的每一跳）
+    if (!isAllowedCoverUrl(u.href)) return resolve(null);
     const mod = (u.protocol === 'https:') ? https : http;
     const req = mod.get(u, {
       headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.bilibili.com/', 'Accept': 'image/*,*/*' }
@@ -272,6 +297,8 @@ async function resolveCover(entryDir, coverUrl, opts) {
     try { if (fs.statSync(c).size > 1024) { const d = fileToDataUrl(c); if (d) return d; } } catch (e) { /* ignore */ }
   }
   if (coverUrl && opts && opts.fetchCover !== false) {
+    // 白名单外的地址连缓存文件都不写（见上面 isAllowedCoverUrl 的说明）
+    if (!isAllowedCoverUrl(coverUrl)) return null;
     const dir = path.join(opts.userDataDir, 'bili_cover');
     try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* ignore */ }
     const dest = path.join(dir, md5hex(coverUrl).slice(0, 16) + '.jpg');
@@ -310,15 +337,35 @@ function collect(rootDir) {
 }
 
 /* 内容判定（带缓存）：读 mp4 盒子看 stsd 里是音频轨还是视频轨。
-   B 站的 m4s 都是"moov 在文件开头"的结构，所以只读前 1.5MB 就够，不必整个文件读进来。 */
-const kindCache = new Map();
+   B 站的 m4s 都是"moov 在文件开头"的结构，所以只读前 1.5MB 就够，不必整个文件读进来。
+
+   ★ 缓存的两个毛病都在这里修掉了：
+     ① 键只有路径 —— 文件被重新下载后内容换了，缓存还拿旧结论（"这集是视频轨"），
+        表现就是重新导入后某集突然没声音/整集消失。现在用 mtimeMs + size 双校验，
+        任何一个变了就重判。
+     ② 没有上限 —— 扫描一个上千集的缓存目录就存上千条，反复扫不同目录只增不减。
+        现在硬上限 2000 条，超了从最早插入的开始丢（Map 保持插入顺序，够用）。 */
+const KIND_CACHE_MAX = 2000;
+const kindCache = new Map();   // p -> { mtimeMs, size, rec }
+function kindCachePut(p, mtimeMs, size, rec) {
+  kindCache.set(p, { mtimeMs: mtimeMs, size: size, rec: rec });
+  while (kindCache.size > KIND_CACHE_MAX) {
+    const first = kindCache.keys().next();
+    if (first.done) break;
+    kindCache.delete(first.value);
+  }
+}
 function sniffKind(p) {
-  if (kindCache.has(p)) return kindCache.get(p);
-  let size = 0;
-  try { size = fs.statSync(p).size; } catch (e) { /* ignore */ }
+  let st = null;
+  try { st = fs.statSync(p); } catch (e) { st = null; }
+  const mtimeMs = st ? st.mtimeMs : 0;
+  const size = st ? st.size : 0;
+  const hit = kindCache.get(p);
+  if (hit && hit.mtimeMs === mtimeMs && hit.size === size) return hit.rec;
   if (size > 0 && size < 1024) {
     const r = { kind: 'tiny', size: size };
-    kindCache.set(p, r); return r;
+    kindCachePut(p, mtimeMs, size, r);
+    return r;
   }
   let info = null;
   try { info = probeM4a(p, 1.5 * 1024 * 1024); } catch (e) { info = null; }
@@ -332,7 +379,7 @@ function sniffKind(p) {
   // 注意顺序：先把 info 铺进去，再写 kind/size —— 反过来会让 info.kind（'other'）
   // 覆盖掉上面名字兜底修正出来的 kind，导致"内容读不出来但名字明确"的文件被整批漏掉。
   const rec = Object.assign({}, info || {}, { kind: kind, size: size });
-  kindCache.set(p, rec);
+  kindCachePut(p, mtimeMs, size, rec);
   return rec;
 }
 
@@ -352,12 +399,18 @@ function qualityRank(p) { return QUALITY_RANK[qualityTagOf(p)] || 0; }
 
 /* 在某个 entry 目录下挑最优音轨：先比音质标签，再比体积（同集时长相同 → 体积即码率） */
 function pickBestAudio(entryDir, audios) {
+  /* ★ 目录边界必须带上分隔符。旧写法 a.indexOf(entryDir) === 0 是**纯字符串前缀**判断：
+     B 站的清晰度目录名恰好是 16 / 32 / 64 / 80 / 1000 / 10000 / 30216 / 30280 这种数字，
+     于是 entryDir = ...\100 时，...\1000\audio.m4s 也"以 ...\100 开头"，被算成同一集的
+     候选 —— 挑出来的 best 可能是隔壁集（甚至隔壁视频）的音轨，用户听到的就是串轨/错歌。
+     加上 path.sep 之后 "...\100\" 不再匹配 "...\1000\"。 */
+  const prefix = entryDir.endsWith(path.sep) ? entryDir : entryDir + path.sep;
   const cands = audios
-    .filter((a) => a.indexOf(entryDir) === 0)
+    .filter((a) => typeof a === 'string' && a.length > prefix.length && a.startsWith(prefix))
     .map((a) => {
       let size = 0;
       try { size = fs.statSync(a).size; } catch (e) { /* ignore */ }
-      return { path: a, rank: qualityRank(a), size, tag: qualityTagOf(a), sniff: kindCache.get(a) || null };
+      return { path: a, rank: qualityRank(a), size, tag: qualityTagOf(a), sniff: (kindCache.get(a) || {}).rec || null };
     })
     .sort((x, y) => (y.rank - x.rank) || (y.size - x.size));
   return { best: cands[0] || null, all: cands };

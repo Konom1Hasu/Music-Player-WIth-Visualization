@@ -112,12 +112,17 @@ export class ArchiveScene {
   private coverCanvas = document.createElement("canvas");
   private coverTexture?: THREE.CanvasTexture;
   private coverImage?: HTMLImageElement;
+  /* 封面请求序号：每次 setCover 自增，图片 onload 回调对不上号就直接丢弃。
+     快速切歌时上一首的 onload 常常比本首晚到，没有这个计数器封面就会错配。 */
+  private coverSeq = 0;
   private coverMeta = { no: "000", title: "尚无曲目", artist: "音乐库为空", album: "" };
   /* 画布上"封面方块"区域的平均色（低分辨率抽样），用于自检封面是否真的画上去了 */
   private coverSample: number[] = [0, 0, 0];
   private reduced = false;
   private quality = normalizeQuality(undefined);
   private appliedQuality = "";
+  /** WebGL 上下文是否已丢失（GPU 重置 / 驱动崩溃 / 休眠唤醒）。丢失期间 update() 直接空转。 */
+  private contextLost = false;
   private smaa = new SMAAPass();
   private aoKernelSize = 32;
   onSelect?: (index: number, cell?: ArchiveCell) => void;
@@ -153,6 +158,23 @@ export class ArchiveScene {
       "三维研究档案阵列，可点击选择档案",
     );
     container.appendChild(this.renderer.domElement);
+    /* ---------- WebGL 上下文丢失 / 恢复 ----------
+       GPU 重置（驱动崩溃、显存被系统回收、休眠唤醒）会静默丢掉这个 context。
+       没有这两个监听时：context 死掉的每一帧都还在发 draw call，Chrome 刷
+       "CONTEXT_LOST_WEBGL" 警告、主线程被拖慢，而画面永远不回来。
+       · lost：preventDefault() 是 restored 能触发的**前提**，不调就永远收不到恢复事件。
+       · restored：composer 的 render target / shadow map 都跟着 context 一起没了，
+         必须重跑 resize() 让 three 重建它们，光把 flag 打回去画面会是一整块黑。 */
+    const glCanvas = this.renderer.domElement;
+    glCanvas.addEventListener("webglcontextlost", (event) => {
+      event.preventDefault();
+      this.contextLost = true;
+    });
+    glCanvas.addEventListener("webglcontextrestored", () => {
+      this.contextLost = false;
+      this.last = 0; // 丢掉旧时间基准，回来第一帧的 dt 交给 update() 自己钳
+      this.resize();
+    });
     this.scene.background = new THREE.Color("#eae5e1");
     this.scene.fog = new THREE.Fog("#eae5e1", 22, 47);
     this.light = createArchiveLighting(this.renderer, this.scene, lightingLook);
@@ -408,9 +430,19 @@ export class ArchiveScene {
         /\.\d+$/,
         "",
       );
+      /* ★ 材质必须 clone，不能直接拿模板的引用：
+         这份模板缓存在 this.assemblyTemplate 里、第二次打开 360° 会再遍历一遍，
+         而 dispose() 会 dispose 掉每个 mesh 的材质 —— 直接把模板材质传下去，
+         第一次关闭就把模板材质连它的 shader program 一起释放了，
+         再打开只能全量重编译（切一下卡一下，正是"二次打开变卡"的来源）。
+         数组材质（多 material 的 mesh）也要逐项 clone，否则还是共享。 */
+      const source = object.material;
+      const material = Array.isArray(source)
+        ? source.map((entry) => entry.clone())
+        : source.clone();
       const mesh = new THREE.Mesh(
         object.geometry.clone().applyMatrix4(object.matrixWorld),
-        object.material,
+        material,
       );
       mesh.userData.surface = name;
       mesh.userData.assemblyPart = object.userData.assemblyPart;
@@ -446,7 +478,12 @@ export class ArchiveScene {
       dispose: () => {
         for (const mesh of meshes) {
           mesh.geometry.dispose();
-          (mesh.material as THREE.Material).dispose();
+          /* 上面每个 mesh 拿到的都是自己的材质克隆，数组材质也一样 —— 
+             所以这里可以放心一次全释放，不会波及缓存模板。 */
+          for (const entry of Array.isArray(mesh.material)
+            ? mesh.material
+            : [mesh.material])
+            entry.dispose();
         }
         texture.dispose();
       },
@@ -462,10 +499,7 @@ export class ArchiveScene {
       const canonical = fileLocation(fileAtSlot(this.selectedSlot));
       this.selectedCell = { lane: canonical.lane, row: canonical.row };
       this.coordinateOrigin = { lane: 0, row: 0 };
-      for (const old of this.outgoing) {
-        this.scene.remove(old.group);
-        this.appearance.dispose(old.group);
-      }
+      for (const old of this.outgoing) this.disposeCard(old.group);
       this.outgoing = [];
     }
     this.lastInteraction = this.clock;
@@ -560,6 +594,24 @@ export class ArchiveScene {
       this.pendingPulse.row -= shift.row;
     }
   }
+  /** 释放一张"收回中的卡片"克隆体。
+      几何是 this.model.clone(true) 共享来的（同一批 BufferGeometry），**绝不 dispose**，
+      放了主模型就没得画。能放的是 prepare() 克隆出来的材质，以及 select() 给这张卡片
+      单独烤的两张 CanvasTexture（正面标签 / 封面板）—— 后者漏掉的正是显存碎片。 */
+  private disposeCard(group: THREE.Group) {
+    this.scene.remove(group);
+    group.traverse((child) => {
+      if (!(child instanceof THREE.Mesh)) return;
+      for (const entry of Array.isArray(child.material)
+        ? child.material
+        : [child.material]) {
+        const map = (entry as THREE.MeshBasicMaterial).map;
+        if (map && map !== this.coverTexture && map !== this.labelTexture)
+          map.dispose();
+      }
+    });
+    this.appearance.dispose(group);
+  }
   select(index: number, navigation?: ArchiveNavigation) {
     this.lastInteraction = this.clock;
     const next = fileLocation(index).slot;
@@ -612,6 +664,14 @@ export class ArchiveScene {
         returnY: group.rotation.y !== 0 ? group.position.y : null,
         clarity: this.decryption.clarity,
       });
+      /* ★ 上限 4 张。卡片在下落途中被点回来时要"复活"（下面的 returning 分支），
+         所以不能一推完就扔；但一路点下去不回头时这个数组只会一直变长，
+         而每张卡片都攥着一整套材质克隆 + 1024×440 的标签纹理 + 1536×1216 的封面纹理
+         —— 攒十几张就是实打实的显存。超限立刻释放最旧那张。 */
+      while (this.outgoing.length > 4) {
+        const stale = this.outgoing.shift()!;
+        this.disposeCard(stale.group);
+      }
       this.lift.value = 0;
       this.lift.velocity = 0;
     }
@@ -629,8 +689,7 @@ export class ArchiveScene {
       this.rotation = o.group.rotation.y;
       this.returnY = o.returnY;
       this.decryption.select(o.clarity);
-      this.scene.remove(o.group);
-      this.appearance.dispose(o.group);
+      this.disposeCard(o.group);
       this.outgoing.splice(returning, 1);
     }
     if (this.deferSelectionPulse) {
@@ -646,6 +705,11 @@ export class ArchiveScene {
   /** 把当前曲目的封面与信息印到正面标签板上（cover 为 data URL 或 null）。 */
   setCover(cover: string | null, meta: { no: string; title: string; artist: string; album: string }) {
     this.coverMeta = meta;
+    /* ★ 请求序号。切歌时封面是异步解码的，上一张的 onload 经常比本张晚到 ——
+       回调里不校验就写 this.coverImage，快切几首之后大标签板上印的是**上一首**的封面
+       （档案编号已经换成新的，图还是旧的，看起来就是"封面错配"）。
+       这里每次调用自增，回调只认自己那一张，序号对不上直接丢弃。 */
+    const seq = ++this.coverSeq;
     if (!cover) {
       this.coverImage = undefined;
       this.drawCover();
@@ -654,10 +718,12 @@ export class ArchiveScene {
     if (this.coverImage && this.coverImage.src === cover) return;
     const img = new Image();
     img.onload = () => {
+      if (seq !== this.coverSeq) return;
       this.coverImage = img;
       this.drawCover();
     };
     img.onerror = () => {
+      if (seq !== this.coverSeq) return;
       this.coverImage = undefined;
       this.drawCover();
     };
@@ -931,6 +997,7 @@ export class ArchiveScene {
     time: number,
     cinematic?: { reveal: number; lift: number; zoom: number; time: number },
   ) {
+    if (this.contextLost) return;
     const dt = Math.min(time - this.last || 0.016, 0.05);
     this.last = time;
     this.clock = time;

@@ -81,8 +81,45 @@ if ($running) {
 }
 
 if (Test-Path $InstallDir) {
+    # ★ 防误删护栏：$InstallDir 是 -InstallDir 传进来的自由参数，也可能是别人脚本里
+    #   拼错的路径。直接 `Remove-Item -Recurse -Force` 会把盘符根、共享目录或用户
+    #   自己的文件夹整个清掉 —— 这个错没法回滚，所以清空之前先做归属校验。
+    $installFull = [IO.Path]::GetFullPath($InstallDir)
+    $trimmed     = $installFull.TrimEnd([char[]]@('\', '/'))
+    $depth       = ([regex]::Matches($trimmed, '\\')).Count
+
+    # (1) 拒绝盘符根 / UNC 根 / 明显过短的路径
+    if ($trimmed -match '^[A-Za-z]:$' -or $installFull -match '^\\\\[^\\\\]+\\\\[^\\\\]+\\?$' -or $depth -lt 2 -or $trimmed.Length -lt 6) {
+        throw "安全保护：安装目录 $InstallDir 是盘符根或层级过短（至少要到 X:\Apps\音乐播放器 这种深度），已拒绝删除。请指定专属子目录（如 D:\Apps\音乐播放器）后重试。"
+    }
+    # 拒绝系统目录本身及其上层
+    $systemDirs = @($env:SystemRoot, $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData, $env:LOCALAPPDATA, $env:APPDATA, $env:USERPROFILE) |
+        Where-Object { $_ } | ForEach-Object { $_.TrimEnd([char[]]@('\', '/')) }
+    foreach ($sys in $systemDirs) {
+        if ($trimmed -eq $sys -or $sys.StartsWith($trimmed + '\')) {
+            throw "安全保护：安装目录 $InstallDir 是系统目录或其上层（$sys 就在里面），已拒绝删除。请指定专属子目录（如 D:\Apps\音乐播放器）后重试。"
+        }
+    }
+    # 拒绝成为本仓库的父目录（说明路径拼到项目外面上去了）
+    $rootFull = ([IO.Path]::GetFullPath($Root)).TrimEnd([char[]]@('\', '/'))
+    if ($rootFull.StartsWith($trimmed + '\')) {
+        throw "安全保护：安装目录 $InstallDir 是本项目目录的上层，已拒绝删除。请指定专属子目录（如 D:\Apps\音乐播放器）后重试。"
+    }
+
+    # (2) 非空目录必须"看得出是本程序装过的"才允许清空
+    $existing = @(Get-ChildItem -LiteralPath $installFull -Force -ErrorAction SilentlyContinue)
+    if ($existing.Count -gt 0) {
+        $looksLikeOurs = $false
+        if (Test-Path -LiteralPath (Join-Path $installFull $ExeName) -PathType Leaf)            { $looksLikeOurs = $true }
+        if (Test-Path -LiteralPath (Join-Path $installFull '卸载.bat') -PathType Leaf)          { $looksLikeOurs = $true }
+        if (Test-Path -LiteralPath (Join-Path $installFull 'resources\app\package.json') -PathType Leaf) { $looksLikeOurs = $true }
+        if (-not $looksLikeOurs) {
+            throw "安全保护：目标目录 $InstallDir 非空且不像本程序的旧安装目录，已拒绝删除。请指定专属子目录（如 D:\Apps\音乐播放器）或手动清空后重试。"
+        }
+    }
+
     Write-Ok '清理旧版本'
-    try { Remove-Item $InstallDir -Recurse -Force -ErrorAction Stop }
+    try { Remove-Item -LiteralPath $installFull -Recurse -Force -ErrorAction Stop }
     catch { throw "无法清理旧安装目录（可能仍被占用）：$($_.Exception.Message)" }
 }
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null

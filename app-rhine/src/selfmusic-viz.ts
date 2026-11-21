@@ -9,7 +9,7 @@ import {
   SELFMUSIC_SLIDER_RANGES,
   type SmSliderKey,
 } from "./selfmusic-spectrum";
-import { getSmDisplayValues, resetSmDisplayValues, setSmDisplayValue } from "./player";
+import { getSmDecor, getSmDisplayValues, resetSmDisplayValues, setSmDecor, setSmDisplayValue } from "./player";
 
 /** 行定义：[键, 名称, 提示]（顺序与提示语照 SelfMusic mainwindow rows） */
 const ROWS: Array<[SmSliderKey, string, string]> = [
@@ -31,6 +31,13 @@ const ROWS: Array<[SmSliderKey, string, string]> = [
   ["idle", "静音呼吸", "无信号时是否轻轻起伏（0 = 归零，1 = 呼吸）"],
 ];
 
+/** 绘制层（加饰）三档：只影响 Canvas 上叠的视觉层，不碰 16 项算法参数 */
+const DECOR_ROWS: Array<[number, string]> = [
+  [0, "纯复刻"],
+  [1, "加饰（默认）"],
+  [2, "加饰 + 顶部光幕"],
+];
+
 /** 系统设置里的面板块（放 settingsMarkup 里） */
 export function selfmusicVizMarkup() {
   const cur = getSmDisplayValues();
@@ -39,7 +46,16 @@ export function selfmusicVizMarkup() {
     const value = cur[key];
     return `<label class="quality-control quality-range" title="${tip}"><span>${label}<small>${tip}</small></span><div><input type="range" data-sm-slider="${key}" aria-label="${label}" min="${lo}" max="${hi}" step="1" value="${value}"/><output data-sm-output="${key}">${value}</output></div></label>`;
   }).join("");
-  return `<div class="sm-viz"><div class="quality-heading"><h3>SELF-MUSIC VISUALIZER<span>可视化调节 · 拖动实时生效</span></h3><button type="button" class="sm-viz-reset" data-action="sm-viz-reset">RESET<span>还原默认</span></button></div><p class="quality-note">十六枚参数与 SelfMusic 的「可视化调节」面板一致（作用于 SelfMusic 频谱档）。默认 = 出厂档；调整即时生效，并自动记住。</p>${rows}</div>`;
+  const decor = getSmDecor();
+  const decorRow = `<label class="quality-control"><span>绘制层<small>只影响画面叠加：天际线 / 柱顶受光 / 辉光 / 槽位刻度 / 接地带。纯复刻 = 与原版 visualizer.py 逐条一致</small></span><select data-sm-decor aria-label="绘制层">${DECOR_ROWS.map(([v, text]) => `<option value="${v}" ${decor === v ? "selected" : ""}>${text}</option>`).join("")}</select></label>`;
+  return `<div class="sm-viz"><div class="quality-heading"><h3>SELF-MUSIC VISUALIZER<span>可视化调节 · 拖动实时生效</span></h3><button type="button" class="sm-viz-reset" data-action="sm-viz-reset">RESET<span>还原默认</span></button></div><p class="quality-note">十六枚参数与 SelfMusic 的「可视化调节」面板一致（作用于 SelfMusic 频谱档）。默认 = 出厂档；调整即时生效，并自动记住。</p>${rows}${decorRow}</div>`;
+}
+
+/** 绘制层档位切换（main.ts 的全局 input 委托调用） */
+export function handleSelfmusicDecor(input: HTMLInputElement | HTMLSelectElement) {
+  const v = Number(input.value);
+  if (!Number.isFinite(v)) return;
+  setSmDecor(v);
 }
 
 /** 拖动处理（main.ts 的全局 input 委托调用）：值 → 引擎实时 + 存 + 回显 */

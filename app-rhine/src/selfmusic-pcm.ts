@@ -121,6 +121,11 @@ export function parseSampleRate(bytes: Uint8Array): number | null {
 
 /* ---------- 解码 ---------- */
 
+/** 单声道 PCM 的硬上限（字节）：n × 4。超过就放弃整曲解码，让上层退回流式频谱。
+    200MB 对应约 44.1kHz 下单声道 95 分钟 —— 正常歌曲（≤15 分钟）远低于此，
+    而"几小时的播客 / 演唱会录音"在这个尺寸上必然把渲染进程打死。 */
+const PCM_HARD_LIMIT_BYTES = 200 * 1024 * 1024;
+
 function clamp16(v: number): number {
   return v > 32767 ? 32767 : v < -32768 ? -32768 : v;
 }
@@ -148,6 +153,11 @@ export async function decodeMonoPcm(
     rate = buf.sampleRate || rate;
     const ch = buf.numberOfChannels;
     const n = buf.length;
+    /* ★ 硬上限（P1-4）：单声道 Float32 = n × 4 字节。
+       超过 200MB 直接放弃解码、返回 null → 上层退回流式模式。
+       长音轨（几小时的播客 / 现场录音）在这个尺寸上必然 OOM，
+       而且是在 `new Float32Array(n)` 那一刻就崩，没有事后补救的余地。 */
+    if (!(n > 0) || n * 4 > PCM_HARD_LIMIT_BYTES) return null;
     const out = new Float32Array(n);
     if (ch === 1) {
       const c0 = buf.getChannelData(0);

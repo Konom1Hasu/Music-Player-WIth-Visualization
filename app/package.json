@@ -1,7 +1,7 @@
 {
   "name": "music-player",
   "version": "2.7.9",
-  "description": "音乐播放器（便携桌面版）· 本地曲库 / 自研频谱可视化 / 迷你悬浮窗",
+  "description": "Windows 本地桌面音乐播放器 · 莱茵生命风格 3D 磁带终端、B 站缓存导入与 NCM 解密",
   "main": "main.js",
   "license": "MIT",
   "private": true,

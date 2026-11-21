@@ -71,8 +71,21 @@ Write-Step "安装包版本：$Version"
 # ---------------------------------------------------------------- 2. 便携版产物
 if (-not $NoBuild) {
     Write-Step '先构建便携版（build-portable.ps1）'
-    & (Join-Path $PSScriptRoot 'build-portable.ps1')
-    if ($LASTEXITCODE -ne 0) { throw "build-portable.ps1 失败（退出码 $LASTEXITCODE）" }
+    # ★ 不能拿 $LASTEXITCODE 判子脚本成败：build-portable.ps1 是 PowerShell 脚本，
+    #   它正常 return 时**不会**设置 $LASTEXITCODE —— 这个变量还留着上一次原生
+    #   命令（npm.cmd / ISCC 之类）的旧值，全新会话里干脆是 $null；而 `$null -ne 0`
+    #   为 True，于是正常的构建被误报成"失败（退出码 ）"，真失败反倒可能被吞掉。
+    #   可靠做法（与 install.ps1:63 一致）：先清零，再让脚本自己的 throw 中断，
+    #   外面兜一层 try/catch 把异常翻译成带出处的错误。
+    $LASTEXITCODE = 0
+    try {
+        & (Join-Path $PSScriptRoot 'build-portable.ps1')
+        if ($LASTEXITCODE -ne 0) { throw "build-portable.ps1 里的原生命令返回了非零退出码（$LASTEXITCODE）" }
+    }
+    catch {
+        throw "build-portable.ps1 失败：$($_.Exception.Message)"
+    }
+    Write-Ok '便携版构建完成'
 }
 
 if (-not (Test-Path (Join-Path $PortableDir $ExeName))) {

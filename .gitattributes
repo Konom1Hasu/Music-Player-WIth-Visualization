@@ -23,7 +23,6 @@
 
 # 徽章 / 统计：让 GitHub 识别为文档而非代码
 *.md linguist-documentation
-docs/** linguist-documentation
 LICENSE linguist-documentation
 
 # 生成的产物不参与语言统计

@@ -55,10 +55,11 @@ import {
   type PlaybackPrefs,
   toggleFavAt,
   importFiles,
+  disposeDetailViz,
 } from "./player";
 import { TerminalAudio } from "./audio";
 import { audioSettingsMarkup } from "./audio-settings";
-import { selfmusicVizMarkup, handleSelfmusicVizInput, resetSelfmusicViz, installVizPreviewMode, disposeVizPreviewMode } from "./selfmusic-viz";
+import { selfmusicVizMarkup, handleSelfmusicVizInput, handleSelfmusicDecor, resetSelfmusicViz, installVizPreviewMode, disposeVizPreviewMode } from "./selfmusic-viz";
 import "./selfmusic-viz.css";
 
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) =>
@@ -120,12 +121,14 @@ let mode: Mode = "boot",
 let modal: "search" | "saved" | "settings" | null = null,
   searchQuery = "",
   filter = categories[0];
-const reviewParams = new URLSearchParams(location.search);
+const reviewParams = import.meta.env.DEV
+  ? new URLSearchParams(location.search)
+  : new URLSearchParams();
 let frozenTime =
-  reviewParams.get("freeze") === "1"
+  import.meta.env.DEV && reviewParams.get("freeze") === "1"
     ? Number(reviewParams.get("time") ?? 0)
     : null;
-if (reviewParams.get("review") === "1") {
+if (import.meta.env.DEV && reviewParams.get("review") === "1") {
   $("#stage").dataset.review = "true";
   window.addEventListener("message", (event) => {
     if (
@@ -419,6 +422,10 @@ function setMode(next: Mode) {
     pendingDetailFocus = false;
     tabTransition.cancel();
     detailTransition.hide(prefs.reduced || next === "boot");
+    /* ★ 详情页一收起就把频谱循环停掉。原来那条 rAF 只在详情页里可见时有用，
+       可它并不知道自己已经不在页上了 —— 详情页关掉之后还在按帧算 FFT 画柱子，
+       等于回到档案页 / 开屏时白烧一块 CPU。reduced 模式下这个开销最明显。 */
+    disposeDetailViz();
     if (!modal && next === "archive") $(".read-file").focus({ preventScroll: true });
   }
   $("#detail-ui").inert = next !== "detail" || Boolean(modal);
@@ -767,6 +774,8 @@ document.addEventListener("input", (e) => {
   }
   /* 「可视化调节」十六滑块：拖动实时写 SelfMusic 引擎（下一次分析 tick 生效）+ 持久化 */
   if (slider.dataset.smSlider) handleSelfmusicVizInput(slider);
+  /* 绘制层档位（纯复刻 / 加饰 / 加饰+光幕）：select 改值同样走 input 事件 */
+  if (slider.dataset.smDecor) handleSelfmusicDecor(slider);
   const volume = e.target as HTMLInputElement;
   if (volume.dataset.volume === "musicVolume" || volume.dataset.volume === "soundVolume") {
     prefs[volume.dataset.volume] = Number(volume.value) / 100;
@@ -1178,7 +1187,37 @@ let bootSpeed = BOOT_SPEED;
 function bootAppTime(now: number) {
   return bootApp0 + (now - bootOrigin) * bootSpeed;
 }
+/* ---------- 画面停摆（最小化 / 隐藏标签页） ----------
+   原来 frame() 自己无限续 rAF：窗口最小化、切到别的标签、或者点了系统托盘隐藏，
+   它照样每帧跑 scene.update() + viewer.update() + 一串 DOM 写。
+   窗口看不见的时候这些全是白烧的 GPU/CPU，风扇照样转，笔记本照样掉电 ——
+   用户反馈"最小化之后机器还是热的"就是这条。
+   做法：门控 + 幂等拉起。
+     · framesBlocked() 为真 → frame() 只把自己从队列里摘掉，不再挂下一帧（不轮询、不空转）；
+     · 恢复可见由 visibilitychange / Electron 的 win-state 事件重新拉起；
+     · frameScheduled 保证任何时候**最多只有一条** rAF 循环在飞，
+       重复的拉起请求直接被吞掉（原来最容易踩的坑就是恢复时挂了第二条循环，帧率翻倍）。 */
+let winMinimized = false;
+let frameScheduled = false;
+function framesBlocked() {
+  return document.hidden || winMinimized;
+}
+function requestFrame() {
+  if (frameScheduled) return;
+  frameScheduled = true;
+  requestAnimationFrame(frame);
+}
+function resumeFrames() {
+  if (framesBlocked()) return;
+  /* 停摆期间 rAF 不跑，帧率统计窗口里攒的时间是假的：不重置的话恢复后第一帧会
+     量出一个 0.x fps 写进设置页（顺带喂给自动降档逻辑）。 */
+  frameStart = performance.now();
+  frameCount = 0;
+  requestFrame();
+}
 function frame(ms: number) {
+  frameScheduled = false;
+  if (framesBlocked()) return;
   const time = ms / 1000;
   const cinema =
     mode === "boot" && ready
@@ -1230,8 +1269,18 @@ function frame(ms: number) {
     /* 设置面板开着时把帧率一并刷出来（每秒一次，成本可忽略） */
     if (document.getElementById("quality-summary")) updateQualitySummary();
   }
-  requestAnimationFrame(frame);
+  requestFrame();
 }
+document.addEventListener("visibilitychange", resumeFrames);
+/* Electron 主进程在 minimize / restore / hide / show 时推 { minimized }（见 app/main.js 的
+   pushWinState）。最小化的窗口 document.hidden 一直是 false —— 浏览器不认为它"不可见"，
+   所以光靠 visibilitychange 抓不到，必须补这条 IPC。 */
+(window as any).desktop?.on?.("win-state", (state: { minimized?: boolean }) => {
+  const next = Boolean(state?.minimized);
+  if (next === winMinimized) return;
+  winMinimized = next;
+  if (!next) resumeFrames();
+});
 async function start() {
   try {
     // 先加载音乐库（IndexedDB），让三维档案阵列一进来就显示歌曲
@@ -1299,7 +1348,7 @@ async function start() {
     if (params.get("scene") === "archive") setMode("archive");
     if (params.get("scene") === "detail") setMode("detail");
     if (prefs.reduced && !params.has("time")) setMode("archive");
-    requestAnimationFrame(frame);
+    requestFrame();
   } catch (error) {
     console.error(error);
     $("#loading").innerHTML =
@@ -1308,48 +1357,50 @@ async function start() {
 }
 updateSelection();
 void start();
-// Deterministic review controls: the running application, never a video surrogate.
-Object.assign(window, {
-  rhine: {
-    // The review button supplies a real user activation. Preferences stay local to this preview.
-    playBootPreview: async (music = false) => {
-      if (!ready || !navigator.userActivation.isActive) return false;
-      const request = ++audioPreviewRequest;
-      audioPreview = true;
-      audio.configure({ ...prefs, sound: true, music });
-      const unlocked = await audio.unlock();
-      if (request !== audioPreviewRequest) return false;
-      if (!unlocked) {
-        audioPreview = false;
-        audio.configure(prefs);
-        return false;
-      }
-      replayBoot(true);
-      return true;
+// Deterministic review controls: dev-only, stripped from production builds.
+if (import.meta.env.DEV) {
+  Object.assign(window, {
+    rhine: {
+      // The review button supplies a real user activation. Preferences stay local to this preview.
+      playBootPreview: async (music = false) => {
+        if (!ready || !navigator.userActivation.isActive) return false;
+        const request = ++audioPreviewRequest;
+        audioPreview = true;
+        audio.configure({ ...prefs, sound: true, music });
+        const unlocked = await audio.unlock();
+        if (request !== audioPreviewRequest) return false;
+        if (!unlocked) {
+          audioPreview = false;
+          audio.configure(prefs);
+          return false;
+        }
+        replayBoot(true);
+        return true;
+      },
+      seek: (t: number) => {
+        setMode("boot");
+        bootOrigin = performance.now() / 1000;
+        bootApp0 = t;
+        bootSpeed = 1; // 复核用：从这一帧起按原速走，方便对着原片看
+        lastStep = "";
+      },
+      archive: () => setMode("archive"),
+      detail: () => openFile(),
+      select: (i: number) => select(i),
+      /* 排列顺序：与播放列表下拉框走同一条路（复核 / 脚本化核对用） */
+      sort: (mode: string) => setSortMode(mode),
+      stats: () => ({
+        ...scene?.getStats(),
+        fps: Math.round(fps),
+        mode,
+        ready,
+        bootTime: mode === "boot" ? (frozenTime ?? bootAppTime(performance.now() / 1000)) + 5 : null,
+        selected: records[selected].id,
+        // 收藏统一以播放器曲目的 fav 字段为准（原来的档案收藏集合已废弃）
+        saved: getSongs().filter((s) => s.fav).map((s) => s.title),
+        audio: audio.stats(),
+      }),
     },
-    seek: (t: number) => {
-      setMode("boot");
-      bootOrigin = performance.now() / 1000;
-      bootApp0 = t;
-      bootSpeed = 1; // 复核用：从这一帧起按原速走，方便对着原片看
-      lastStep = "";
-    },
-    archive: () => setMode("archive"),
-    detail: () => openFile(),
-    select: (i: number) => select(i),
-    /* 排列顺序：与播放列表下拉框走同一条路（复核 / 脚本化核对用） */
-    sort: (mode: string) => setSortMode(mode),
-    stats: () => ({
-      ...scene?.getStats(),
-      fps: Math.round(fps),
-      mode,
-      ready,
-      bootTime: mode === "boot" ? (frozenTime ?? bootAppTime(performance.now() / 1000)) + 5 : null,
-      selected: records[selected].id,
-      // 收藏统一以播放器曲目的 fav 字段为准（原来的档案收藏集合已废弃）
-      saved: getSongs().filter((s) => s.fav).map((s) => s.title),
-      audio: audio.stats(),
-    }),
-  },
-});
+  });
+}
 if (import.meta.hot) import.meta.hot.dispose(() => audio.dispose());
